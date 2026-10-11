@@ -170,4 +170,71 @@ describe("prepareSvg", () => {
 		expect(prepared).toContain(".a{fill:#ff8800}");
 		expect(prepared).toContain('<rect fill="#ff8800"/>');
 	});
+
+	describe("rejects embedded raster images (structural, bypass-proof)", () => {
+		it("rejects <image> elements with data-URI href attributes", () => {
+			const svg = '<svg><image href="data:image/png;base64,iVBORw0KGg" width="1" height="1"/></svg>';
+			expect(() => prepareSvg(svg, palette)).toThrow(/SVG contains.*<image>.*<feImage>/i);
+		});
+
+		it("rejects <image> elements with whitespace around the equals sign in attributes", () => {
+			const svg = '<svg><image href = "data:image/png;base64,iVBORw0KGg" width="1" height="1"/></svg>';
+			expect(() => prepareSvg(svg, palette)).toThrow(/SVG contains.*<image>.*<feImage>/i);
+		});
+
+		it("rejects <image> elements with xlink:href attribute", () => {
+			const svg =
+				'<svg xmlns:xlink="http://www.w3.org/1999/xlink"><image xlink:href="data:image/jpeg;base64,abc123" width="1" height="1"/></svg>';
+			expect(() => prepareSvg(svg, palette)).toThrow(/SVG contains.*<image>.*<feImage>/i);
+		});
+
+		it("rejects <image> elements with single-quoted attributes", () => {
+			const svg = "<svg><image href='data:image/gif;base64,R0lGOD' width='1' height='1'/></svg>";
+			expect(() => prepareSvg(svg, palette)).toThrow(/SVG contains.*<image>.*<feImage>/i);
+		});
+
+		it("rejects <image> elements with mixed quote styles", () => {
+			const svg = "<svg><image href=\"data:image/webp;base64,UklGR\" width='1' height='1'/></svg>";
+			expect(() => prepareSvg(svg, palette)).toThrow(/SVG contains.*<image>.*<feImage>/i);
+		});
+
+		it("rejects <image> elements regardless of tag name case", () => {
+			const svg = '<svg><IMAGE href="data:image/png;base64,iVBORw0KGg" width="1" height="1"/></svg>';
+			expect(() => prepareSvg(svg, palette)).toThrow(/SVG contains.*<image>.*<feImage>/i);
+		});
+
+		it("rejects <image> elements with namespace prefixes", () => {
+			const svg =
+				'<svg xmlns:x="http://www.w3.org/2000/svg"><x:image href="data:image/png;base64,iVBORw0KGg" width="1" height="1"/></svg>';
+			expect(() => prepareSvg(svg, palette)).toThrow(/SVG contains.*<image>.*<feImage>/i);
+		});
+
+		it("rejects <feImage> elements (filter primitive)", () => {
+			const svg =
+				'<svg><defs><filter><feImage href="data:image/png;base64,iVBORw0KGg" x="0" y="0"/></filter></defs></svg>';
+			expect(() => prepareSvg(svg, palette)).toThrow(/SVG contains.*<image>.*<feImage>/i);
+		});
+
+		it("rejects <feImage> elements regardless of case", () => {
+			const svg =
+				'<svg><defs><filter><FEIMAGE href="data:image/png;base64,iVBORw0KGg" x="0" y="0"/></filter></defs></svg>';
+			expect(() => prepareSvg(svg, palette)).toThrow(/SVG contains.*<image>.*<feImage>/i);
+		});
+
+		it("rejects <image> elements with spaces in tag name and attributes", () => {
+			const svg = '<svg><  image  href = "data:image/png;base64,test"  width  =  "1"  /></svg>';
+			expect(() => prepareSvg(svg, palette)).toThrow(/SVG contains.*<image>.*<feImage>/i);
+		});
+
+		it("allows <rect>, <g>, and other non-image elements", () => {
+			const svg = '<svg><rect width="10" height="10" fill="red"/><g><circle r="5"/></g></svg>';
+			expect(() => prepareSvg(svg, palette)).not.toThrow();
+		});
+
+		it("allows SVGs with only text and shapes when data: appears in text content", () => {
+			const svg =
+				'<svg><text>Use data:image/png; base64 here but not in a tag</text><rect width="10" height="10"/></svg>';
+			expect(() => prepareSvg(svg, palette)).not.toThrow();
+		});
+	});
 });

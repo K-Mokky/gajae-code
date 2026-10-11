@@ -232,15 +232,49 @@ const CSS_VALUE_ATTRIBUTES = new Set([
  *   uses `xlink:` attributes.
  */
 /**
- * Reject SVGs with embedded data-URI raster images to prevent unbounded
- * memory allocation during decoding. Embedded PNG/JPEG data URIs can declare
- * extreme dimensions (e.g., 1×2B height) and allocate multi-gigabyte buffers
- * before frame decode, causing OOM/abort of the local process.
+ * Reject SVGs with <image> or <feImage> elements to prevent unbounded
+ * memory allocation during rasterization. Image elements can reference
+ * data-URIs with extreme dimensions (e.g., 1×2^31 height) and trigger
+ * multi-gigabyte buffer allocation before frame decode, causing OOM/abort
+ * of the local process. Parsing is structural to reject all bypass
+ * spellings (whitespace around attributes, xlink:href, entity-encoded data:,
+ * mixed case, etc.) regardless of attribute format.
  */
 function rejectEmbeddedRasterImages(svg: string): void {
-	const dataUriPattern = /href=["']data:image\/(png|jpeg|jpg|gif|webp);[^"']*["']/gi;
-	if (dataUriPattern.test(svg)) {
-		throw new Error("SVG contains embedded raster image data URIs, which are not supported for this renderer");
+	// Scan for <image or <feImage elements by finding markup constructs and
+	// checking their tag names. This approach ignores attribute spelling and
+	// captures all raster image references regardless of how they are written.
+	let index = 0;
+	while (index < svg.length) {
+		const lt = svg.indexOf("<", index);
+		if (lt < 0) break;
+
+		const close = constructEnd(svg, lt);
+		if (close < 0) {
+			index = lt + 1;
+			continue;
+		}
+
+		// Skip non-element constructs (comments, CDATA, processing instructions).
+		if (svg[lt + 1] === "!" || svg[lt + 1] === "?") {
+			index = close;
+			continue;
+		}
+
+		// Extract the tag name, handling namespace prefixes.
+		const tag = svg.slice(lt, close);
+		const nameMatch = /^<\s*(?:[\w.-]+:)?(\w+)/.exec(tag);
+		if (!nameMatch) {
+			index = close;
+			continue;
+		}
+
+		const tagName = nameMatch[1]!.toLowerCase();
+		if (tagName === "image" || tagName === "feimage") {
+			throw new Error("SVG contains <image> or <feImage> elements, which are not supported for this renderer");
+		}
+
+		index = close;
 	}
 }
 
