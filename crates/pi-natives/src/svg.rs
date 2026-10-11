@@ -108,7 +108,8 @@ mod tests {
 	fn ignores_embedded_data_urls() {
 		// SVG with embedded data URL image element should not decode the image.
 		let svg = "<?xml version=\"1.0\"?><svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:custom=\"http://www.w3.org/2000/svg\" width=\"12\" height=\"7\"><custom:image href=\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==\" width=\"12\" height=\"7\"/><rect x=\"0\" y=\"0\" width=\"12\" height=\"7\" fill=\"red\"/></svg>".as_bytes();
-		let png = rasterize_svg_sync(svg, 100, 100).expect("SVG with embedded data should rasterize without decoding image");
+		let png = rasterize_svg_sync(svg, 100, 100)
+			.expect("SVG with embedded data should rasterize without decoding image");
 		let image = image::load_from_memory(&png).expect("result should be PNG");
 		assert_eq!((image.width(), image.height()), (12, 7));
 	}
