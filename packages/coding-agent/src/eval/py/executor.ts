@@ -152,6 +152,8 @@ interface ActivePythonRequest {
 	readonly kernels: Set<PythonKernel>;
 	readonly cleanupAttempts: Map<PythonKernel, Promise<KernelShutdownResult>>;
 	readonly finish: () => void;
+	/** Cleanup function for user signal listener, called at finish */
+	userSignalCleanup?: () => void;
 }
 
 let pythonResourceCleanupRegistered = false;
@@ -391,15 +393,29 @@ function beginPythonRequest(
 			detachProvisionalSessionRequest(request);
 			activeRequests.delete(request);
 			if (deadlineTimer) clearTimeout(deadlineTimer);
+			request.userSignalCleanup?.();
 			resolve();
 		},
 	};
 	activeRequests.add(request);
 
+	const userSignal = capturedOptions.signal;
 	const signals = [controller.signal];
-	if (capturedOptions.signal) signals.push(capturedOptions.signal);
+	if (userSignal) signals.push(userSignal);
 	const signal = AbortSignal.any(signals);
 	request.signal = signal;
+	// Add listener to user signal directly for proper tracking and cleanup
+	if (userSignal && !userSignal.aborted) {
+		const onUserAbort = () => {
+			controller.abort(userSignal.reason);
+			// Manually remove the listener since { once: true } doesn't call removeEventListener
+			userSignal.removeEventListener("abort", onUserAbort);
+		};
+		userSignal.addEventListener("abort", onUserAbort);
+		request.userSignalCleanup = () => {
+			userSignal.removeEventListener("abort", onUserAbort);
+		};
+	}
 	if (sessionId !== undefined) {
 		const session = sessions.get(sessionId);
 		if (session && isInitializingSession(session)) enrollInitializerRequest(session, request);
