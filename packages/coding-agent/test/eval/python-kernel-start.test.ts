@@ -16,11 +16,20 @@ const OK_RESULT: KernelExecuteResult = {
 
 class FakeKernel {
 	alive = true;
+	private _exitCode: number | null = null;
 	execute = vi.fn(async () => OK_RESULT);
 	shutdown = vi.fn(async (): Promise<KernelShutdownResult> => ({ confirmed: true }));
 
 	isAlive(): boolean {
 		return this.alive;
+	}
+
+	getExitCode(): number | null {
+		return this._exitCode;
+	}
+
+	setExitCode(code: number | null): void {
+		this._exitCode = code;
 	}
 }
 

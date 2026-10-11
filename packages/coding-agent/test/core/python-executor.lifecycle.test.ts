@@ -13,6 +13,7 @@ class FakeKernel {
 	#result: KernelExecuteResult;
 	#onExecute?: (options?: KernelExecuteOptions) => void;
 	#alive: boolean;
+	#exitCode: number | null = null;
 	readonly executeCalls: string[] = [];
 	shutdownCalls = 0;
 
@@ -39,6 +40,14 @@ class FakeKernel {
 		this.shutdownCalls += 1;
 		this.#alive = false;
 		return { confirmed: true };
+	}
+
+	getExitCode(): number | null {
+		return this.#exitCode;
+	}
+
+	setExitCode(code: number | null): void {
+		this.#exitCode = code;
 	}
 
 	async ping(): Promise<boolean> {

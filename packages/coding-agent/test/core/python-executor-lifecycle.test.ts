@@ -15,11 +15,20 @@ class FakeKernel {
 	});
 	ping = vi.fn(async () => true);
 	alive = true;
+	private _exitCode: number | null = null;
 
 	constructor(private readonly result: KernelExecuteResult) {}
 
 	isAlive(): boolean {
 		return this.alive;
+	}
+
+	getExitCode(): number | null {
+		return this._exitCode;
+	}
+
+	setExitCode(code: number | null): void {
+		this._exitCode = code;
 	}
 }
 
@@ -111,6 +120,8 @@ describe("executePython lifecycle", () => {
 		const kernelNext = new FakeKernel(OK_RESULT);
 		kernel.alive = false;
 		kernel.shutdown.mockResolvedValueOnce({ confirmed: false });
+		// Simulate process exit even though shutdown is unconfirmed
+		kernel.setExitCode(0);
 		vi.spyOn(pythonKernel, "checkPythonKernelAvailability").mockResolvedValue({ ok: true });
 		const startSpy = vi
 			.spyOn(pythonKernel.PythonKernel, "start")
@@ -131,6 +142,8 @@ describe("executePython lifecycle", () => {
 		const replacement = new FakeKernel(OK_RESULT);
 		kernel.alive = false;
 		kernel.shutdown.mockResolvedValueOnce({ confirmed: false });
+		// Simulate process exit even though shutdown is unconfirmed
+		kernel.setExitCode(0);
 		vi.spyOn(pythonKernel, "checkPythonKernelAvailability").mockResolvedValue({ ok: true });
 		vi.spyOn(pythonKernel.PythonKernel, "start")
 			.mockResolvedValueOnce(kernel as unknown as pythonKernel.PythonKernel)
