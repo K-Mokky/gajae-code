@@ -1,4 +1,4 @@
-// Vendored from can1357/oh-my-pi@68fb9863b377af566d3b56aa882a964654b5760a:crates/pi-builtins/src/line_input.rs — MIT (c) 2025 Mario Zechner, 2025-2026 Can Bölük, 2026 Stencil Labs, Inc. Modified for gajae-code: no.
+// Vendored from can1357/oh-my-pi@68fb9863b377af566d3b56aa882a964654b5760a:crates/pi-builtins/src/line_input.rs — MIT (c) 2025 Mario Zechner, 2025-2026 Can Bölük, 2026 Stencil Labs, Inc. Modified for gajae-code: yes, a failed refill leaves no read-ahead to give back.
 //! Byte input for the line-reading builtins (`read`, `mapfile`).
 
 use std::io::{self, Read, Seek, SeekFrom};
@@ -80,9 +80,18 @@ impl LineInput {
 		}
 		if self.pos == self.block.len() {
 			self.block.resize(BLOCK, 0);
-			let n = self.input.read(&mut self.block)?;
-			self.block.truncate(n);
 			self.pos = 0;
+			let n = match self.input.read(&mut self.block) {
+				Ok(n) => n,
+				Err(error) => {
+					// Nothing was read into the block, and everything before it
+					// was handed out; leaving it at full length would make
+					// `give_back` seek back over bytes already consumed.
+					self.block.clear();
+					return Err(error);
+				},
+			};
+			self.block.truncate(n);
 			if n == 0 {
 				return Ok(None);
 			}
@@ -111,5 +120,42 @@ impl LineInput {
 impl Drop for LineInput {
 	fn drop(&mut self) {
 		self.give_back();
+	}
+}
+
+#[cfg(test)]
+#[expect(clippy::panic_in_result_fn)]
+mod tests {
+	use std::io::{Seek, Write};
+
+	use anyhow::Result;
+
+	use super::*;
+
+	/// Regression: a refill that fails must not leave the block at full
+	/// length, or dropping the input seeks the shared offset back over bytes
+	/// that were never read (here, over bytes just written).
+	#[test]
+	fn failed_refill_gives_nothing_back() -> Result<()> {
+		let path = std::env::temp_dir()
+			.join(format!("brush-line-input-failed-refill-{}.txt", std::process::id()));
+		// Write-only, so every read fails.
+		let mut file = std::fs::OpenOptions::new()
+			.write(true)
+			.create(true)
+			.truncate(true)
+			.open(&path)?;
+		file.write_all(&[b'a'; 5000])?;
+		let mut offset = file.try_clone()?;
+
+		let mut input = LineInput::new(OpenFile::File(file), ReadAhead::Seekable);
+		assert!(input.reads_ahead());
+		assert!(input.next_byte().is_err());
+		drop(input);
+
+		let position = offset.stream_position()?;
+		std::fs::remove_file(&path)?;
+		assert_eq!(position, 5000);
+		Ok(())
 	}
 }

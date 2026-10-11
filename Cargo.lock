@@ -491,7 +491,6 @@ dependencies = [
  "nix 0.31.3",
  "procfs",
  "rlimit",
- "rustix",
  "strum",
  "strum_macros",
  "thiserror 2.0.18",

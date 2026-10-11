@@ -3768,6 +3768,37 @@ mod tests {
 		assert_eq!(output, "é|a\n");
 	}
 
+	/// Contract: `read -N` counts characters too, and only the count ends
+	/// it: a newline inside the limit is data, and three- and four-byte
+	/// characters are taken whole.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn read_exact_count_takes_whole_utf8_characters_across_newlines() {
+		let (result, output) = execute_captured(
+			"printf '한\\n😀x' | { read -r -N 3 first; read -r rest; echo \"[$first][$rest]\"; }"
+				.to_owned(),
+		)
+		.await;
+		assert_eq!(result.exit_code, Some(0), "{output:?}");
+		assert_eq!(output, "[한\n😀][x]\n");
+	}
+
+	/// Contract: a byte that cannot begin a UTF-8 character counts as one
+	/// character on its own, as in bash, so `read -n 1` stops after it and
+	/// leaves the next byte for the next reader. The same holds for a lead
+	/// byte whose next byte cannot continue it. The bytes taken decode with
+	/// replacement characters.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn read_count_takes_one_invalid_byte_and_leaves_the_rest() {
+		let (result, output) = execute_captured(
+			"for input in '\\300A' '\\340\\200A'; do printf \"$input\\n\" | { read -r -n 1 first; \
+			 read -r rest; echo \"[$first][$rest]\"; }; done"
+				.to_owned(),
+		)
+		.await;
+		assert_eq!(result.exit_code, Some(0), "{output:?}");
+		assert_eq!(output, "[\u{FFFD}][A]\n[\u{FFFD}\u{FFFD}][A]\n");
+	}
+
 	/// Contract: `mapfile -n` from a file consumes exactly the lines it
 	/// stores; a later reader of the descriptor gets the rest.
 	#[tokio::test(flavor = "multi_thread")]

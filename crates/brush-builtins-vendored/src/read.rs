@@ -1,4 +1,4 @@
-// Vendored from can1357/oh-my-pi@68fb9863b377af566d3b56aa882a964654b5760a:crates/pi-builtins/src/read.rs — MIT (c) 2025 Mario Zechner, 2025-2026 Can Bölük, 2026 Stencil Labs, Inc. Modified for gajae-code: yes, preserves cancellation, timeout, and readiness guards.
+// Vendored from can1357/oh-my-pi@68fb9863b377af566d3b56aa882a964654b5760a:crates/pi-builtins/src/read.rs — MIT (c) 2025 Mario Zechner, 2025-2026 Can Bölük, 2026 Stencil Labs, Inc. Modified for gajae-code: yes, preserves cancellation, timeout, and readiness guards; polls a stream before every byte; counts -n/-N characters by UTF-8 validity.
 use std::{
 	collections::VecDeque,
 	io::Write,
@@ -304,8 +304,6 @@ struct InputReader {
 	deadline:   Option<Instant>,
 	/// Terminal input: Ctrl-C and Ctrl-D bytes are keys, not data.
 	terminal:   bool,
-	/// Bytes a stream reported ready, readable without waiting for input.
-	ready:      u64,
 	/// Terminal mode guard - kept alive for RAII cleanup on drop.
 	/// The guard restores original terminal settings when dropped, even though
 	/// we don't access the field directly after construction.
@@ -352,7 +350,6 @@ impl InputReader {
 			source: LineInput::new(input, ReadAhead::Seekable),
 			deadline: timeout.map(|t| Instant::now() + t),
 			terminal,
-			ready: 0,
 			_term_mode: term_mode,
 		}
 	}
@@ -420,45 +417,22 @@ impl InputReader {
 		Ok(None)
 	}
 
-	/// Bytes readable from a stream right now without blocking; at least 1
-	/// once the stream polled readable (an EOF reports 0 ready but must
-	/// still be read to be seen).
-	fn bytes_ready(&self) -> u64 {
-		#[cfg(unix)]
-		let ready = self
-			.source
-			.input()
-			.try_borrow_as_fd()
-			.ok()
-			.and_then(|fd| rustix::io::ioctl_fionread(fd).ok())
-			.unwrap_or(0);
-		#[cfg(not(unix))]
-		let ready = 0;
-		ready.max(1)
-	}
-
 	/// Reads the next input event, handling timeout and control characters.
 	fn read_event<F>(&mut self, is_cancelled: &F) -> Result<InputEvent, brush_core::Error>
 	where
 		F: Fn() -> bool,
 	{
-		if !self.source.reads_ahead() {
-			if self.ready == 0 {
-				if let Some(event) = self.wait_for_input(is_cancelled)? {
-					return Ok(event);
-				}
-				// Once a stream polls readable, learn how much is buffered so
-				// the bytes after this one skip the poll (and the descriptor
-				// classification it repeats) entirely.
-				self.ready = self.bytes_ready();
-			} else if self.deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-				return Ok(InputEvent::Timeout);
-			}
-			self.ready -= 1;
+		// A stream is polled before every byte. A count of bytes ready, taken
+		// once and trusted for later bytes, goes stale when another reader of
+		// a shared pipe drains it; the read would then block where neither
+		// `-t` nor cancellation is checked.
+		if !self.source.reads_ahead()
+			&& let Some(event) = self.wait_for_input(is_cancelled)?
+		{
+			return Ok(event);
 		}
 		ensure_not_cancelled(is_cancelled)?;
 		let Some(byte) = self.source.next_byte()? else {
-			self.ready = 0;
 			return Ok(InputEvent::Eof);
 		};
 
@@ -483,31 +457,36 @@ struct LineReaderConfig {
 }
 
 /// Characters read toward a `-n`/`-N` limit. Bash counts characters, not
-/// bytes: a UTF-8 lead byte starts one, and the limit is reached only once
-/// its continuation bytes are in, so a multibyte character is never split.
+/// bytes, in a UTF-8 locale: each byte extends the pending sequence until it
+/// decodes as one character or can no longer become one, and either way the
+/// sequence counts once. A byte that can never begin a character (such as
+/// 0xC0) is therefore a character by itself, and the byte after it is left
+/// for the next reader; a multibyte character is never split.
 #[derive(Default)]
 struct CharCount {
-	chars:        usize,
-	continuation: u8,
+	chars:   usize,
+	pending: [u8; 4],
+	len:     usize,
 }
 
 impl CharCount {
 	fn push(&mut self, byte: u8) {
-		if self.continuation > 0 && byte & 0xC0 == 0x80 {
-			self.continuation -= 1;
-		} else {
+		// A UTF-8 sequence is at most four bytes, and four bytes always decode
+		// or fail, so `len` is back to 0 before it could reach 4.
+		self.pending[self.len] = byte;
+		self.len += 1;
+		let incomplete = matches!(
+			std::str::from_utf8(&self.pending[..self.len]),
+			Err(error) if error.error_len().is_none()
+		);
+		if !incomplete {
 			self.chars += 1;
-			self.continuation = match byte {
-				0xC0..=0xDF => 1,
-				0xE0..=0xEF => 2,
-				0xF0..=0xF7 => 3,
-				_ => 0,
-			};
+			self.len = 0;
 		}
 	}
 
 	fn reached(&self, limit: Option<usize>) -> bool {
-		self.continuation == 0 && limit.is_some_and(|limit| self.chars >= limit)
+		self.len == 0 && limit.is_some_and(|limit| self.chars >= limit)
 	}
 }
 
@@ -993,5 +972,80 @@ mod tests {
 			.read_line(input_file, Vec::<u8>::new(), None, || true)
 			.expect_err("cancelled state must interrupt read builtin");
 		assert_eq!(err.to_string(), "interrupted");
+	}
+
+	/// A pipe reader that, right after handing out its first byte, lets a
+	/// second reader of the same pipe drain whatever else was ready.
+	#[cfg(unix)]
+	struct DrainedAfterFirstByte {
+		reader:  std::io::PipeReader,
+		other:   std::io::PipeReader,
+		drained: bool,
+	}
+
+	#[cfg(unix)]
+	impl std::io::Read for DrainedAfterFirstByte {
+		fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+			let n = self.reader.read(buf)?;
+			if !self.drained {
+				self.drained = true;
+				let mut rest = [0_u8; 1];
+				self.other.read_exact(&mut rest)?;
+			}
+			Ok(n)
+		}
+	}
+
+	#[cfg(unix)]
+	impl std::io::Write for DrainedAfterFirstByte {
+		fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+			Err(std::io::ErrorKind::Unsupported.into())
+		}
+
+		fn flush(&mut self) -> std::io::Result<()> {
+			Ok(())
+		}
+	}
+
+	#[cfg(unix)]
+	impl brush_core::openfiles::Stream for DrainedAfterFirstByte {
+		fn clone_box(&self) -> Box<dyn brush_core::openfiles::Stream> {
+			unimplemented!("not cloned by read")
+		}
+
+		fn try_clone_to_owned(&self) -> Result<std::os::fd::OwnedFd, brush_core::Error> {
+			Err(brush_core::ErrorKind::CannotConvertToNativeFd.into())
+		}
+
+		fn try_borrow_as_fd(&self) -> Result<std::os::fd::BorrowedFd<'_>, brush_core::Error> {
+			use std::os::fd::AsFd;
+			Ok(self.reader.as_fd())
+		}
+	}
+
+	/// Regression: another reader of a shared pipe can drain bytes this
+	/// `read` saw ready. Every byte must still wait through the poll, so the
+	/// read times out instead of blocking while the writer stays open.
+	#[cfg(unix)]
+	#[test]
+	#[expect(clippy::panic_in_result_fn)]
+	fn test_read_line_times_out_after_another_reader_drains_the_pipe() -> anyhow::Result<()> {
+		use std::io::Write;
+
+		let command = test_command();
+		let (reader, mut writer) = std::io::pipe()?;
+		let other = reader.try_clone()?;
+		writer.write_all(b"ab")?;
+		let input_file = brush_core::openfiles::OpenFile::Stream(Box::new(DrainedAfterFirstByte {
+			reader,
+			other,
+			drained: false,
+		}));
+
+		let result =
+			command.read_line(input_file, Vec::<u8>::new(), Some(Duration::from_millis(200)), || false)?;
+		assert!(matches!(result, ReadResult::TimedOut(Some(ref line)) if line == "a"));
+		drop(writer);
+		Ok(())
 	}
 }
