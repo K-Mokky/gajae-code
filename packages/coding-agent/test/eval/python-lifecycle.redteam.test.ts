@@ -28,6 +28,7 @@ const OK_RESULT: KernelExecuteResult = {
 
 class FakeKernel {
 	alive = true;
+	exitCode: number | null = null;
 	executeCalls: string[] = [];
 	shutdownCalls = 0;
 	shutdownResult: KernelShutdownResult = { confirmed: true };
@@ -50,6 +51,10 @@ class FakeKernel {
 
 	isAlive(): boolean {
 		return this.alive;
+	}
+
+	getExitCode(): number | null {
+		return this.exitCode;
 	}
 }
 
