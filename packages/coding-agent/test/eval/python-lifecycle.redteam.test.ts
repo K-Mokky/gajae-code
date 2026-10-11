@@ -368,19 +368,20 @@ describe("python eval lifecycle red-team", () => {
 	);
 
 	it(
-		"settles an in-flight cell during shutdown without leaked abort listeners",
+		"settles an in-flight cell during shutdown and isolates a replacement from late cancellation",
 		async () => {
 			Bun.env.PI_PYTHON_SKIP_CHECK = "1";
 			using tempDir = TempDir.createSync("@gjc-python-lifecycle-redteam-");
 			const controller = new AbortController();
-			const listeners = countAbortListeners(controller.signal);
 			const kernelStarted = Promise.withResolvers<void>();
+			let stoppedKernel: PythonKernel | undefined;
 			let shutdown: (() => Promise<KernelShutdownResult>) | undefined;
 			let execution: Promise<PythonResult> | undefined;
 			try {
 				PythonKernel.start = async () => {
 					try {
 						const kernel = await originalStart({ cwd: tempDir.path() });
+						stoppedKernel ??= kernel;
 						shutdown = () => kernel.shutdown({ timeoutMs: 100 });
 						kernelStarted.resolve();
 						return kernel;
@@ -403,16 +404,34 @@ describe("python eval lifecycle red-team", () => {
 				);
 				await kernelStarted.promise;
 				await waitForFile(executionReadyFile);
-				expect(listeners.count()).toBe(1);
-				if (!shutdown) throw new Error("Python kernel did not expose shutdown after startup");
+				if (!shutdown || !stoppedKernel) throw new Error("Python kernel did not expose shutdown after startup");
 
-				await shutdown();
-				await execution;
-				expect(listeners.count()).toBe(0);
+				expect(await shutdown()).toEqual({ confirmed: true });
+				expect(await settlesWithin(execution, CLEANUP_TIMEOUT_MS)).toBe(true);
+				const result = await execution;
+				expect(result.cancelled).toBe(true);
+				expect(result.exitCode).toBeUndefined();
+				expect(stoppedKernel.isAlive()).toBe(false);
+				expect(stoppedKernel.getExitCode()).not.toBeNull();
+
+				// A completed caller's composite signal must not cancel the replacement session.
+				const successorReadyFile = `${tempDir.path()}/successor-executing`;
+				const successorReleaseFile = `${tempDir.path()}/successor-release`;
+				execution = executePython(
+					`from pathlib import Path\nPath(${JSON.stringify(successorReadyFile)}).touch()\nimport time\nwhile not Path(${JSON.stringify(successorReleaseFile)}).exists():\n    time.sleep(0.01)\nprint('successor completed')`,
+					{ cwd: tempDir.path(), sessionId: "redteam-inflight-shutdown", kernelMode: "session" },
+				);
+				await waitForFile(successorReadyFile);
+				controller.abort();
+				await Bun.write(successorReleaseFile, "");
+				expect(await settlesWithin(execution, CLEANUP_TIMEOUT_MS)).toBe(true);
+				const successorResult = await execution;
+				expect(successorResult.cancelled).toBe(false);
+				expect(successorResult.exitCode).toBe(0);
+				expect(successorResult.output).toContain("successor completed");
 			} finally {
 				await shutdown?.().catch(() => undefined);
 				await execution?.catch(() => undefined);
-				listeners.restore();
 			}
 		},
 		LIFECYCLE_TEST_TIMEOUT_MS,
