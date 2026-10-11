@@ -466,9 +466,12 @@ describe("python eval lifecycle red-team", () => {
 			}
 			expect(startupFinished).toBe(true);
 			expect(kernel.shutdownCalls).toBe(1);
-			// The first shutdown is unconfirmed, so expect it to be retried.
-			await disposeAllKernelSessions().catch(() => {});
+			// The first dispose attempt gets an unconfirmed shutdown; assert the error and retry.
+			const disposeError = await disposeAllKernelSessions().catch(error => error);
 			expect(kernel.shutdownCalls).toBe(2);
+			expect(disposeError).toBeInstanceOf(Error);
+			expect(disposeError.name).toBe("PythonKernelShutdownUnconfirmedError");
+			// On retry with confirmed result, dispose succeeds.
 			kernel.shutdownResult = { confirmed: true };
 			await disposeAllKernelSessions();
 			expect(kernel.shutdownCalls).toBe(3);
