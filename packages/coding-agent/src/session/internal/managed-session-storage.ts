@@ -1624,10 +1624,7 @@ export class ManagedSessionDescendantStore {
 			} catch (error) {
 				// If canonicalization fails with a symlink error on a retained path,
 				// the binding has changed: the path no longer resolves to the original inode.
-				if (
-					error instanceof Error &&
-					error.message.startsWith("Managed path contains symlink:")
-				) {
+				if (error instanceof Error && error.message.startsWith("Managed path contains symlink:")) {
 					throw new Error("Managed descendant root binding changed");
 				}
 				throw error;
