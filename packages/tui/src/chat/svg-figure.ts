@@ -187,9 +187,18 @@ export class SvgFigure implements Component {
 	/** Whether the current source and cell size have not been attempted yet. */
 	#stale(width: number): boolean {
 		const attempt = this.#attempt;
-		if (this.#failed === this.#source) return false;
 		const cell = getCellDimensions();
 		const limits = limitsFor(width, cell);
+		// If we've failed but limits changed and we'd outgrow, retry (resource-dependent failure).
+		if (this.#failed === this.#source) {
+			if (
+				(attempt?.limits.columns !== limits.columns || attempt?.limits.rows !== limits.rows) &&
+				this.#outgrown(limits)
+			) {
+				return true;
+			}
+			return false;
+		}
 		return (
 			attempt === undefined ||
 			attempt.source !== this.#source ||
@@ -301,6 +310,9 @@ export class SvgFigure implements Component {
 			this.#show(attempt, data, size.widthPx, size.heightPx);
 		} else if (attempt.final && attempt.source === this.#source && attempt.palette === this.#palette) {
 			this.#failed = attempt.source;
+			// Clear the raster and image on terminal failure to keep preview only while a replacement is in flight.
+			this.#raster = undefined;
+			this.#image = undefined;
 			this.#options.onChange();
 		}
 		// The source, cell size, or room moved on while this raster ran.
