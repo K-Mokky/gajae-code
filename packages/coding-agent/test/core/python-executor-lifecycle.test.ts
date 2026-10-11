@@ -9,6 +9,7 @@ import * as pythonKernel from "@gajae-code/coding-agent/eval/py/kernel";
 import { getProjectDir } from "@gajae-code/utils";
 
 class FakeKernel {
+	id = `fake-kernel-${Math.random().toString(36).slice(2, 9)}`;
 	execute = vi.fn(async () => this.result);
 	shutdown = vi.fn(async () => {
 		return { confirmed: true };
@@ -182,5 +183,86 @@ describe("executePython lifecycle", () => {
 		).rejects.toBe(failure);
 		expect(startSpy).toHaveBeenCalledTimes(1);
 		expect(kernel.execute).not.toHaveBeenCalled();
+	});
+
+	it("does not replace a reset kernel whose shutdown is unconfirmed without exit evidence", async () => {
+		const kernel = new FakeKernel(OK_RESULT);
+		const kernelNext = new FakeKernel(OK_RESULT);
+		vi.spyOn(pythonKernel, "checkPythonKernelAvailability").mockResolvedValue({ ok: true });
+		const startSpy = vi
+			.spyOn(pythonKernel.PythonKernel, "start")
+			.mockResolvedValueOnce(kernel as unknown as pythonKernel.PythonKernel)
+			.mockResolvedValueOnce(kernelNext as unknown as pythonKernel.PythonKernel);
+
+		// First execution to establish the session
+		await executePython("1 + 1", {
+			kernelMode: "session",
+			sessionId: "unconfirmed-no-exit-session",
+			cwd: getProjectDir(),
+		});
+
+		// Simulate shutdown that is not confirmed and process is still "alive" from kernel perspective
+		kernel.shutdown.mockResolvedValueOnce({ confirmed: false });
+		kernel.alive = false;
+		// No exit code set - this is key: no positive evidence the process exited
+		kernel.setExitCode(null);
+
+		// Reset and try to execute again
+		const resetError = await executePython("2 + 2", {
+			kernelMode: "session",
+			sessionId: "unconfirmed-no-exit-session",
+			reset: true,
+			cwd: getProjectDir(),
+		}).catch(error => error);
+
+		// Should reject with unconfirmed shutdown error
+		expect(resetError).toBeInstanceOf(Error);
+		expect(resetError.name).toBe("PythonKernelShutdownUnconfirmedError");
+
+		// Should NOT have started a replacement kernel (start count should still be 1)
+		expect(startSpy).toHaveBeenCalledTimes(1);
+		// The first kernel should have been shut down once during the reset
+		expect(kernel.shutdown).toHaveBeenCalledTimes(1);
+	});
+
+	it("replaces a reset kernel with confirmed exit when shutdown is unconfirmed but exit evidence exists", async () => {
+		const kernel = new FakeKernel(OK_RESULT);
+		const kernelNext = new FakeKernel(OK_RESULT);
+		vi.spyOn(pythonKernel, "checkPythonKernelAvailability").mockResolvedValue({ ok: true });
+		const startSpy = vi
+			.spyOn(pythonKernel.PythonKernel, "start")
+			.mockResolvedValueOnce(kernel as unknown as pythonKernel.PythonKernel)
+			.mockResolvedValueOnce(kernelNext as unknown as pythonKernel.PythonKernel);
+
+		// First execution to establish the session
+		await executePython("1 + 1", {
+			kernelMode: "session",
+			sessionId: "unconfirmed-with-exit-session",
+			cwd: getProjectDir(),
+		});
+
+		// Simulate shutdown that is not confirmed but process HAS exited (exit code = 0)
+		kernel.shutdown.mockResolvedValueOnce({ confirmed: false });
+		kernel.alive = false;
+		// Exit code is set - positive evidence the process exited
+		kernel.setExitCode(0);
+
+		// Reset and try to execute again
+		const resetResult = await executePython("2 + 2", {
+			kernelMode: "session",
+			sessionId: "unconfirmed-with-exit-session",
+			reset: true,
+			cwd: getProjectDir(),
+		});
+
+		// Should succeed (not throw)
+		expect(resetResult.cancelled).toBe(false);
+
+		// Should have started a replacement kernel (start count should be 2)
+		expect(startSpy).toHaveBeenCalledTimes(2);
+		// The first kernel should have been shut down during the reset
+		expect(kernel.shutdown).toHaveBeenCalledTimes(1);
+		// The second kernel should have executed the code
+		expect(kernelNext.execute).toHaveBeenCalledTimes(1);
 	});
 });

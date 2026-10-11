@@ -997,7 +997,16 @@ async function resetSession(sessionId: string): Promise<void> {
 	const kernel = existing.kernel;
 	const shutdown = prepareSessionShutdown(existing);
 	startSessionShutdown(existing);
-	await shutdown;
+	try {
+		await shutdown;
+	} catch (error) {
+		// Suppress unconfirmed shutdown error ONLY when we have positive evidence the
+		// process actually exited (exitCode is set). Without that evidence, propagate the error
+		// so we don't reset the session and start executing on a potentially live process.
+		const hasConfirmedExit = kernel.getExitCode() !== null;
+		if (!hasConfirmedExit || !(error instanceof Error) || error.name !== "PythonKernelShutdownUnconfirmedError")
+			throw error;
+	}
 	if (sessions.get(sessionId) === existing && existing.kernel === kernel) sessions.delete(sessionId);
 }
 
