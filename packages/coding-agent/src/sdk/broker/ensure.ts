@@ -1380,16 +1380,17 @@ async function retireUnusableBroker(
 		await shutdownPublishedBrokerViaRpc(settings.agentDir, current, deadline);
 		return;
 	} catch (rpcError) {
-		try {
-			if (stale.pid === process.pid)
-				throw new Error("Cannot reap an in-process stale broker through its shared process PID.");
-			await reapDetachedBrokerPid(stale.pid, stale.incarnation);
-		} catch (cleanupError) {
-			throw new AggregateError(
-				[rpcError, cleanupError],
-				`SDK broker ${stale.pid} shutdown and identity-bound cleanup both failed.`,
-			);
+		if (stale.pid !== process.pid) {
+			try {
+				await reapDetachedBrokerPid(stale.pid, stale.incarnation);
+			} catch (cleanupError) {
+				throw new AggregateError(
+					[rpcError, cleanupError],
+					`SDK broker ${stale.pid} shutdown and identity-bound cleanup both failed.`,
+				);
+			}
 		}
+		// If pid === process.pid, fall through to wait on identity
 	}
 	await waitForBrokerIdentityGone(stale, deadline);
 }

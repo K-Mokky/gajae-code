@@ -1,4 +1,5 @@
 import type * as childProcess from "node:child_process";
+import { FileLockAcquireError } from "../../config/file-lock";
 import {
 	type BrokerDiscovery,
 	brokerProcessIncarnation,
@@ -34,7 +35,8 @@ export type AuthorizedBrokerSuccessorResult =
 				| "intent_not_committed"
 				| "spawn_failed"
 				| "spawn_exited_before_publication"
-				| "publication_timeout";
+				| "publication_timeout"
+				| "startup_lock_unavailable";
 			detail?: string;
 	  };
 
@@ -91,7 +93,9 @@ async function refuseUnpublishedBrokerSuccessor(
 export async function launchAuthorizedBrokerSuccessor(
 	options: AuthorizedBrokerSuccessorOptions,
 ): Promise<AuthorizedBrokerSuccessorResult> {
-	const spawnOutcome = await withBrokerStartupLock(options.agentDir, async deadline => {
+	let spawnOutcome: AuthorizedBrokerSuccessorResult;
+	try {
+		spawnOutcome = await withBrokerStartupLock(options.agentDir, async deadline => {
 		if (Date.now() >= Math.min(deadline, options.deadlineAt))
 			return { kind: "refused" as const, reason: "deadline_elapsed" as const };
 		// Only a durably COMMITTED intent for this exact requestId authorizes a
@@ -159,7 +163,17 @@ export async function launchAuthorizedBrokerSuccessor(
 				detail: spawnError instanceof Error ? spawnError.message : String(spawnError),
 			};
 		}
-	});
+		});
+	} catch (lockError) {
+		if (lockError instanceof FileLockAcquireError) {
+			return {
+				kind: "refused",
+				reason: "startup_lock_unavailable",
+				detail: lockError.message,
+			};
+		}
+		throw lockError;
+	}
 	if (spawnOutcome.kind !== "spawned") return spawnOutcome;
 	const { child } = spawnOutcome;
 	const realBrokerPid = spawnOutcome.realBrokerPid ?? child.pid;
