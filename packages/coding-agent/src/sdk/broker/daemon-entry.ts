@@ -1,8 +1,19 @@
-import { type ChildProcess, spawn } from "node:child_process";
-import { FileLockAcquireError } from "../../config/file-lock";
-import { type BrokerDiscovery, readBrokerDiscovery, readBrokerRestartIntent } from "./discovery";
-import { withBrokerStartupLock } from "./ensure";
-import { isProcessIncarnation, observeProcessIncarnation } from "./process-incarnation";
+import type * as childProcess from "node:child_process";
+import {
+	type BrokerDiscovery,
+	brokerProcessIncarnation,
+	readBrokerDiscovery,
+	readBrokerRestartIntent,
+} from "./discovery";
+import {
+	type BrokerLaunchResult,
+	launchBrokerViaHop,
+	launchBrokerViaPosixTrampoline,
+	reapFailedBrokerLaunch,
+	resolveBrokerLaunchMode,
+	withBrokerStartupLock,
+} from "./ensure";
+import { observeProcessIncarnation } from "./process-incarnation";
 import { resolveSdkInternalSpawnCommand } from "./runtime";
 
 export interface AuthorizedBrokerSuccessorOptions {
@@ -23,23 +34,47 @@ export type AuthorizedBrokerSuccessorResult =
 				| "intent_not_committed"
 				| "spawn_failed"
 				| "spawn_exited_before_publication"
-				| "publication_timeout"
-				| "startup_lock_unavailable";
+				| "publication_timeout";
 			detail?: string;
 	  };
 
 const SUCCESSOR_SPAWN_POLL_MS = 25;
 
-type SpawnedBrokerChild = {
-	kind: "spawned";
-	child: ChildProcess;
-	isTrampoline: boolean;
-	trampolineOutput: () => string;
-	trampolineOutputEnded: () => boolean;
-	spawnError: () => Error | undefined;
-};
+async function refuseFailedBrokerLaunch(
+	launched: BrokerLaunchResult,
+): Promise<Extract<AuthorizedBrokerSuccessorResult, { kind: "refused" }>> {
+	const child: childProcess.ChildProcess = launched.process;
+	if (!launched.handoff) child.unref();
+	let detail = launched.error?.message ?? "Broker launch failed.";
+	try {
+		await reapFailedBrokerLaunch(launched);
+	} catch (error) {
+		const cleanupDetail = error instanceof Error ? error.message : String(error);
+		detail = `${detail}; retry cleanup failed: ${cleanupDetail}`;
+	}
+	return { kind: "refused", reason: "spawn_failed", detail };
+}
 
-type BrokerSuccessorSpawnOutcome = Exclude<AuthorizedBrokerSuccessorResult, { kind: "spawned" }> | SpawnedBrokerChild;
+async function refuseUnpublishedBrokerSuccessor(
+	child: childProcess.ChildProcess,
+	realBrokerPid: number | undefined,
+	realBrokerIncarnation: string | undefined,
+	handoff: BrokerLaunchResult["handoff"],
+	reason: "spawn_exited_before_publication" | "publication_timeout",
+): Promise<Extract<AuthorizedBrokerSuccessorResult, { kind: "refused" }>> {
+	let detail: string | undefined;
+	try {
+		await reapFailedBrokerLaunch({
+			process: child,
+			realBrokerPid,
+			realBrokerIncarnation,
+			handoff,
+		});
+	} catch (error) {
+		detail = `Broker successor cleanup failed: ${error instanceof Error ? error.message : String(error)}`;
+	}
+	return { kind: "refused", reason, ...(detail === undefined ? {} : { detail }) };
+}
 
 /**
  * Launches (or adopts) exactly one authorized successor for `requestId`.
@@ -56,142 +91,163 @@ type BrokerSuccessorSpawnOutcome = Exclude<AuthorizedBrokerSuccessorResult, { ki
 export async function launchAuthorizedBrokerSuccessor(
 	options: AuthorizedBrokerSuccessorOptions,
 ): Promise<AuthorizedBrokerSuccessorResult> {
-	let spawnOutcome: BrokerSuccessorSpawnOutcome;
-	try {
-		spawnOutcome = await withBrokerStartupLock(options.agentDir, async deadline => {
-			if (Date.now() >= Math.min(deadline, options.deadlineAt))
-				return { kind: "refused" as const, reason: "deadline_elapsed" as const };
-			// Only a durably COMMITTED intent for this exact requestId authorizes a
-			// spawn. A prepared-but-not-committed or absent intent means the owner
-			// side of the protocol never reached its commit boundary, so no successor
-			// may exist yet -- spawning here would double-launch a broker the owner
-			// might still be about to retire cleanly on its own.
-			const intent = await readBrokerRestartIntent(options.agentDir);
-			if (intent?.phase !== "committed" || intent.requestId !== options.requestId)
-				return { kind: "refused" as const, reason: "intent_not_committed" as const };
-			const existing = await readBrokerDiscovery(options.agentDir);
-			if (
-				existing &&
-				existing.packageGeneration === options.packageGeneration &&
-				existing.restartRequestId === options.requestId
-			)
-				return { kind: "adopted" as const, discovery: existing };
-			const command = resolveSdkInternalSpawnCommand(
-				process.platform === "win32" ? "broker-internal" : "broker-trampoline-internal",
-			);
-			let child: ChildProcess;
-			const isTrampoline = process.platform !== "win32";
-			try {
-				child = spawn(command.file, [...command.args, "--agent-dir", options.agentDir], {
-					detached: true,
-					stdio: isTrampoline ? ["ignore", "pipe", "ignore"] : "ignore",
-					env: { ...command.env, GJC_BROKER_RESTART_REQUEST: options.requestId },
-					...(command.kind === "bun-source" ? { cwd: command.cwd } : {}),
+	const spawnOutcome = await withBrokerStartupLock(options.agentDir, async deadline => {
+		if (Date.now() >= Math.min(deadline, options.deadlineAt))
+			return { kind: "refused" as const, reason: "deadline_elapsed" as const };
+		// Only a durably COMMITTED intent for this exact requestId authorizes a
+		// spawn. A prepared-but-not-committed or absent intent means the owner
+		// side of the protocol never reached its commit boundary, so no successor
+		// may exist yet -- spawning here would double-launch a broker the owner
+		// might still be about to retire cleanly on its own.
+		const intent = await readBrokerRestartIntent(options.agentDir);
+		if (intent?.phase !== "committed" || intent.requestId !== options.requestId)
+			return { kind: "refused" as const, reason: "intent_not_committed" as const };
+		const existing = await readBrokerDiscovery(options.agentDir);
+		if (
+			existing &&
+			existing.packageGeneration === options.packageGeneration &&
+			existing.restartRequestId === options.requestId
+		)
+			return { kind: "adopted" as const, discovery: existing };
+		const command = resolveSdkInternalSpawnCommand("broker-internal");
+		try {
+			const env = { ...command.env, GJC_BROKER_RESTART_REQUEST: options.requestId };
+			const launchMode = resolveBrokerLaunchMode(process.platform, "discovery");
+			if (launchMode === "direct") throw new Error("Broker successor launch cannot use a fixture child.");
+			const timeoutMs = Math.max(0, Math.min(deadline, options.deadlineAt) - Date.now());
+			const launched =
+				launchMode === "windows-hop"
+					? await launchBrokerViaHop(
+							{
+								command: {
+									file: command.file,
+									args: [...command.args, "--agent-dir", options.agentDir],
+								},
+								...(command.kind === "bun-source" ? { cwd: command.cwd } : {}),
+							},
+							{
+								env,
+								cwd: command.kind === "bun-source" ? command.cwd : undefined,
+								timeoutMs,
+							},
+						)
+					: await launchBrokerViaPosixTrampoline(options.agentDir, {
+							env,
+							...(command.kind === "bun-source" ? { cwd: command.cwd } : {}),
+							timeoutMs,
+							retainChildUntilPublication: launchMode === "darwin-trampoline",
+						});
+			if (launched.error) return await refuseFailedBrokerLaunch(launched);
+			if (launched.realBrokerPid === undefined || launched.realBrokerIncarnation === undefined)
+				return await refuseFailedBrokerLaunch({
+					...launched,
+					error: new Error("Broker launcher returned no verified process identity."),
 				});
-			} catch (spawnError) {
-				return {
-					kind: "refused" as const,
-					reason: "spawn_failed" as const,
-					detail: spawnError instanceof Error ? spawnError.message : String(spawnError),
-				};
-			}
-			let spawnError: Error | undefined;
-			let trampolineOutput = "";
-			let trampolineOutputEnded = !isTrampoline;
-			if (child.stdout)
-				child.stdout
-					.setEncoding("utf8")
-					.on("data", chunk => (trampolineOutput += chunk))
-					.once("end", () => (trampolineOutputEnded = true));
-			child.once("error", childError => {
-				spawnError = childError;
-			});
-			child.unref();
+			const child: childProcess.ChildProcess = launched.process;
+			if (!launched.handoff) child.unref();
 			return {
 				kind: "spawned" as const,
 				child,
-				isTrampoline,
-				trampolineOutput: () => trampolineOutput,
-				trampolineOutputEnded: () => trampolineOutputEnded,
-				spawnError: () => spawnError,
+				realBrokerPid: launched.realBrokerPid,
+				realBrokerIncarnation: launched.realBrokerIncarnation,
+				handoff: launched.handoff,
 			};
-		});
-	} catch (error) {
-		if (error instanceof FileLockAcquireError) {
+		} catch (spawnError) {
 			return {
 				kind: "refused" as const,
-				reason: "startup_lock_unavailable" as const,
-				detail: error.message,
+				reason: "spawn_failed" as const,
+				detail: spawnError instanceof Error ? spawnError.message : String(spawnError),
 			};
 		}
-		throw error;
-	}
+	});
 	if (spawnOutcome.kind !== "spawned") return spawnOutcome;
 	const { child } = spawnOutcome;
-	let successorPid: number | undefined;
-	let successorIncarnation: string | undefined;
-	let trampolineExited = !spawnOutcome.isTrampoline;
-	let trampolineExitCode: number | null = null;
-	let trampolineSignal: NodeJS.Signals | null = null;
-	if (spawnOutcome.isTrampoline)
-		child.once("exit", (code: number | null, signal: NodeJS.Signals | null) => {
-			trampolineExitCode = code;
-			trampolineSignal = signal;
-			trampolineExited = true;
-		});
-	if (spawnOutcome.isTrampoline && (child.exitCode !== null || child.signalCode !== null)) {
-		trampolineExitCode = child.exitCode;
-		trampolineSignal = child.signalCode;
-		trampolineExited = true;
-	}
+	const realBrokerPid = spawnOutcome.realBrokerPid ?? child.pid;
+	let expectedBrokerIncarnation =
+		spawnOutcome.realBrokerIncarnation ??
+		(realBrokerPid !== undefined && realBrokerPid === child.pid
+			? brokerProcessIncarnation(realBrokerPid)
+			: undefined);
 	const until = Math.min(Date.now() + Math.max(1, options.deadlineAt - Date.now()), options.deadlineAt);
 	for (;;) {
-		if (spawnOutcome.spawnError())
-			return {
-				kind: "refused",
-				reason: "spawn_failed",
-				detail: spawnOutcome.spawnError()?.message,
-			};
-		if (!spawnOutcome.isTrampoline && (child.exitCode !== null || child.signalCode !== null))
-			return { kind: "refused", reason: "spawn_exited_before_publication" };
-		if (spawnOutcome.isTrampoline && !successorPid) {
-			const report = spawnOutcome.trampolineOutput().trim();
-			const match = /^(\d+)\t([^\r\n]+)$/.exec(report);
-			if (match) {
-				const pid = Number(match[1]);
-				const incarnation = match[2];
-				if (Number.isSafeInteger(pid) && pid > 0 && isProcessIncarnation(incarnation)) {
-					const observed = observeProcessIncarnation(pid);
-					if (observed.status === "present" && observed.incarnation === incarnation) {
-						successorPid = pid;
-						successorIncarnation = incarnation;
-					}
-				}
+		// On Darwin the trampoline remains alive until publication; elsewhere the
+		// launcher exits after handoff. The broker identity remains authoritative.
+		const failedSpawn = child.signalCode !== null || (child.exitCode !== null && child.exitCode !== 0);
+		if (failedSpawn)
+			return await refuseUnpublishedBrokerSuccessor(
+				child,
+				realBrokerPid,
+				expectedBrokerIncarnation,
+				spawnOutcome.handoff,
+				"spawn_exited_before_publication",
+			);
+		if (realBrokerPid !== undefined) {
+			const observation = observeProcessIncarnation(realBrokerPid);
+			if (
+				observation.status === "absent" ||
+				(observation.status === "present" &&
+					expectedBrokerIncarnation !== undefined &&
+					observation.incarnation !== expectedBrokerIncarnation)
+			)
+				return await refuseUnpublishedBrokerSuccessor(
+					child,
+					realBrokerPid,
+					expectedBrokerIncarnation,
+					spawnOutcome.handoff,
+					"spawn_exited_before_publication",
+				);
+			if (
+				observation.status === "present" &&
+				expectedBrokerIncarnation === undefined &&
+				realBrokerPid === child.pid
+			) {
+				expectedBrokerIncarnation = observation.incarnation;
 			}
 		}
-		if (successorPid) {
-			const observed = observeProcessIncarnation(successorPid);
-			if (
-				observed.status === "absent" ||
-				(observed.status === "present" && observed.incarnation !== successorIncarnation)
-			)
-				return { kind: "refused", reason: "spawn_exited_before_publication" };
-		}
-		if (spawnOutcome.isTrampoline && trampolineExited && spawnOutcome.trampolineOutputEnded() && !successorPid)
-			return { kind: "refused", reason: "spawn_exited_before_publication" };
-		if (spawnOutcome.isTrampoline && trampolineExited && (trampolineSignal !== null || trampolineExitCode !== 0))
-			return { kind: "refused", reason: "spawn_exited_before_publication" };
 		const discovered = await readBrokerDiscovery(options.agentDir);
 		if (
 			discovered &&
+			discovered.pid === realBrokerPid &&
+			discovered.incarnation === expectedBrokerIncarnation &&
 			discovered.packageGeneration === options.packageGeneration &&
 			discovered.restartRequestId === options.requestId
-		)
-			if (!spawnOutcome.isTrampoline || (trampolineExited && spawnOutcome.trampolineOutputEnded()))
-				return { kind: "spawned", discovery: discovered };
-		if (Date.now() >= until) return { kind: "refused", reason: "publication_timeout" };
+		) {
+			try {
+				await spawnOutcome.handoff?.release();
+			} catch (error) {
+				const refusal = await refuseUnpublishedBrokerSuccessor(
+					child,
+					realBrokerPid,
+					expectedBrokerIncarnation,
+					spawnOutcome.handoff,
+					"spawn_exited_before_publication",
+				);
+				return {
+					...refusal,
+					detail: `Broker successor release failed: ${error instanceof Error ? error.message : String(error)}${
+						refusal.detail ? `; ${refusal.detail}` : ""
+					}`,
+				};
+			}
+			return { kind: "spawned", discovery: discovered };
+		}
+		if (Date.now() >= until)
+			return await refuseUnpublishedBrokerSuccessor(
+				child,
+				realBrokerPid,
+				expectedBrokerIncarnation,
+				spawnOutcome.handoff,
+				"publication_timeout",
+			);
 		await Bun.sleep(SUCCESSOR_SPAWN_POLL_MS);
 	}
+}
+
+/** Test hook: retries exact cleanup before mapping a launch error to refusal. */
+export function refuseFailedBrokerLaunchForTest(
+	launched: BrokerLaunchResult,
+): Promise<Extract<AuthorizedBrokerSuccessorResult, { kind: "refused" }>> {
+	return refuseFailedBrokerLaunch(launched);
 }
 
 /**
