@@ -189,7 +189,7 @@ async function terminateLauncher(child: ChildProcess): Promise<boolean> {
 	} catch {
 		// The exit events below still distinguish a launcher that already exited.
 	}
-	await Promise.race([exited.promise, Bun.sleep(1_000)]);
+	await Promise.race([exited.promise, ensureBrokerTiming.sleep(1_000)]);
 	return child.exitCode !== null || child.signalCode !== null;
 }
 
@@ -203,14 +203,14 @@ async function awaitLauncherCloseBeforeDeadline(
 	const closed = awaitLauncherClose(child);
 	const result = await Promise.race([
 		closed.then(outcome => ({ kind: "closed" as const, outcome })),
-		Bun.sleep(timeoutMs).then(() => ({ kind: "timeout" as const })),
+		ensureBrokerTiming.sleep(timeoutMs).then(() => ({ kind: "timeout" as const })),
 	]);
 	if (result.kind === "closed") return result;
 	if (onTimeout) {
 		onTimeout();
 		const cleanupFinished = await Promise.race([
 			closed.then(() => true),
-			Bun.sleep(HOP_HANDOFF_CLEANUP_TIMEOUT_MS).then(() => false),
+			ensureBrokerTiming.sleep(HOP_HANDOFF_CLEANUP_TIMEOUT_MS).then(() => false),
 		]);
 		if (cleanupFinished) return { kind: "timeout", terminated: true };
 	}
@@ -442,7 +442,7 @@ function createBrokerLaunchHandoff(
 			}
 			const outcome = await Promise.race([
 				closed,
-				Bun.sleep(RETAINED_TRAMPOLINE_CLEANUP_TIMEOUT_MS).then(() => undefined),
+				ensureBrokerTiming.sleep(RETAINED_TRAMPOLINE_CLEANUP_TIMEOUT_MS).then(() => undefined),
 			]);
 			if (!outcome) throw new Error("POSIX broker trampoline did not complete its publication decision.");
 			if (outcome.spawnError) throw outcome.spawnError;
@@ -513,7 +513,7 @@ async function launchBrokerViaRetainedPosixTrampoline(
 	trampoline.stdin?.on("error", () => {});
 	const wait = await Promise.race([
 		reply.promise.then(() => ({ kind: "reply" as const })),
-		Bun.sleep(timeoutMs).then(() => ({ kind: "timeout" as const })),
+		ensureBrokerTiming.sleep(timeoutMs).then(() => ({ kind: "timeout" as const })),
 	]);
 	const identity = {
 		realBrokerPid: parsed?.realBrokerPid,
