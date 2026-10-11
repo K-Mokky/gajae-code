@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import { disposeAllKernelSessions, executePython } from "@gajae-code/coding-agent/eval/py/executor";
+import {
+	disposeAllKernelSessions,
+	disposeKernelSessionsByOwner,
+	executePython,
+} from "@gajae-code/coding-agent/eval/py/executor";
 import type { KernelExecuteResult } from "@gajae-code/coding-agent/eval/py/kernel";
 import * as pythonKernel from "@gajae-code/coding-agent/eval/py/kernel";
 import { getProjectDir } from "@gajae-code/utils";
@@ -35,9 +39,11 @@ describe("executePython lifecycle", () => {
 	it("starts and shuts down per-call kernels", async () => {
 		const kernel = new FakeKernel(OK_RESULT);
 		vi.spyOn(pythonKernel, "checkPythonKernelAvailability").mockResolvedValue({ ok: true });
-		const startSpy = vi
-			.spyOn(pythonKernel.PythonKernel, "start")
-			.mockResolvedValue(kernel as unknown as pythonKernel.PythonKernel);
+		const startSpy = vi.spyOn(pythonKernel.PythonKernel, "start").mockImplementation(async options => {
+			const created = kernel as unknown as pythonKernel.PythonKernel;
+			options.onKernelCreated?.(created);
+			return created;
+		});
 
 		await executePython("print('hi')", { kernelMode: "per-call", cwd: getProjectDir() });
 
@@ -118,5 +124,50 @@ describe("executePython lifecycle", () => {
 		expect(kernel.shutdown).toHaveBeenCalledTimes(1);
 		expect(kernel.execute).toHaveBeenCalledTimes(0);
 		expect(kernelNext.execute).toHaveBeenCalledTimes(2);
+	});
+
+	it("retains unconfirmed dead-kernel cleanup for owner disposal after replacement", async () => {
+		const kernel = new FakeKernel(OK_RESULT);
+		const replacement = new FakeKernel(OK_RESULT);
+		kernel.alive = false;
+		kernel.shutdown.mockResolvedValueOnce({ confirmed: false });
+		vi.spyOn(pythonKernel, "checkPythonKernelAvailability").mockResolvedValue({ ok: true });
+		vi.spyOn(pythonKernel.PythonKernel, "start")
+			.mockResolvedValueOnce(kernel as unknown as pythonKernel.PythonKernel)
+			.mockResolvedValueOnce(replacement as unknown as pythonKernel.PythonKernel);
+
+		const result = await executePython("recover", {
+			kernelMode: "session",
+			sessionId: "dead-owned-session",
+			kernelOwnerId: "dead-kernel-owner",
+			cwd: getProjectDir(),
+		});
+
+		expect(result.exitCode).toBe(0);
+		expect(kernel.shutdown).toHaveBeenCalledTimes(1);
+		await disposeKernelSessionsByOwner("dead-kernel-owner");
+		expect(kernel.shutdown).toHaveBeenCalledTimes(2);
+		expect(replacement.shutdown).toHaveBeenCalledTimes(1);
+	});
+
+	it("does not replace a dead retained kernel when shutdown rejects", async () => {
+		const kernel = new FakeKernel(OK_RESULT);
+		kernel.alive = false;
+		const failure = new Error("shutdown transport failed");
+		kernel.shutdown.mockRejectedValueOnce(failure);
+		vi.spyOn(pythonKernel, "checkPythonKernelAvailability").mockResolvedValue({ ok: true });
+		const startSpy = vi
+			.spyOn(pythonKernel.PythonKernel, "start")
+			.mockResolvedValue(kernel as unknown as pythonKernel.PythonKernel);
+
+		await expect(
+			executePython("recover", {
+				kernelMode: "session",
+				sessionId: "dead-rejected-session",
+				cwd: getProjectDir(),
+			}),
+		).rejects.toBe(failure);
+		expect(startSpy).toHaveBeenCalledTimes(1);
+		expect(kernel.execute).not.toHaveBeenCalled();
 	});
 });

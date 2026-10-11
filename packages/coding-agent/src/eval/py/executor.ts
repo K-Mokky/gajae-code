@@ -912,7 +912,14 @@ async function replaceSessionKernel(
 	const old = session.kernel;
 	const remaining = getRemainingTimeoutMs(options.deadlineMs);
 	const ownerIds = new Set(session.ownerIds);
-	await shutdownOrRetainKernel(old, ownerIds, remaining === undefined ? undefined : Math.max(0, remaining));
+	const wasAlive = old.isAlive();
+	try {
+		await shutdownOrRetainKernel(old, ownerIds, remaining === undefined ? undefined : Math.max(0, remaining));
+	} catch (error) {
+		if (wasAlive || !(error instanceof Error) || error.name !== "PythonKernelShutdownUnconfirmedError") throw error;
+		// A dead runner cannot execute again, but its unconfirmed cleanup must remain
+		// retained for owner disposal. Do not let that cleanup block session recovery.
+	}
 	throwIfExecutionCancelled(options);
 	if (sessions.get(session.sessionId) !== session) {
 		throw new PythonExecutionCancelledError(false);
