@@ -3782,21 +3782,40 @@ mod tests {
 		assert_eq!(output, "[한\n😀][x]\n");
 	}
 
-	/// Contract: a byte that cannot begin a UTF-8 character counts as one
-	/// character on its own, as in bash, so `read -n 1` stops after it and
-	/// leaves the next byte for the next reader. The same holds for a lead
-	/// byte whose next byte cannot continue it. The bytes taken decode with
-	/// replacement characters.
+	/// Contract: `read -n` counts characters as the line decodes them, so
+	/// each invalid sequence, replaced by one U+FFFD, is one character. A lead
+	/// byte is known to be invalid only once the next byte arrives, and a
+	/// pipe cannot take that byte back: when it lies past the limit it stays
+	/// in the variable rather than being lost.
 	#[tokio::test(flavor = "multi_thread")]
-	async fn read_count_takes_one_invalid_byte_and_leaves_the_rest() {
+	async fn read_count_counts_invalid_bytes_as_they_decode() {
 		let (result, output) = execute_captured(
-			"for input in '\\300A' '\\340\\200A'; do printf \"$input\\n\" | { read -r -n 1 first; \
-			 read -r rest; echo \"[$first][$rest]\"; }; done"
+			"printf '\\300A\\n' | { read -r -n 1 a; read -r b; echo \"[$a][$b]\"; }; printf \
+			 '\\303AB\\n' | { read -r -n 2 a; read -r b; echo \"[$a][$b]\"; }; printf \
+			 '\\340\\200A\\n' | { read -r -n 1 a; read -r b; echo \"[$a][$b]\"; }"
 				.to_owned(),
 		)
 		.await;
 		assert_eq!(result.exit_code, Some(0), "{output:?}");
-		assert_eq!(output, "[\u{FFFD}][A]\n[\u{FFFD}\u{FFFD}][A]\n");
+		assert_eq!(output, "[\u{FFFD}][A]\n[\u{FFFD}A][B]\n[\u{FFFD}\u{FFFD}][A]\n");
+	}
+
+	/// Contract: from a regular file, the byte that showed a lead byte to be
+	/// invalid goes back to the file when it lies past the `-n` limit, so
+	/// the next reader gets it.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn read_count_gives_a_file_the_byte_past_the_limit_back() {
+		let dir = tempfile::tempdir().expect("temporary directory");
+		let path = dir.path().join("invalid.txt");
+		std::fs::write(&path, b"\xC3A\n\xE0\x80A\n").expect("write fixture");
+		let path = path.to_string_lossy().replace('\\', "/");
+		let (result, output) = execute_captured(format!(
+			"{{ read -r -n 1 a; read -r b; read -r -n 1 c; read -r d; echo \"[$a][$b][$c][$d]\"; }} \
+			 < '{path}'"
+		))
+		.await;
+		assert_eq!(result.exit_code, Some(0), "{output:?}");
+		assert_eq!(output, "[\u{FFFD}][A][\u{FFFD}][\u{FFFD}A]\n");
 	}
 
 	/// Contract: `mapfile -n` from a file consumes exactly the lines it

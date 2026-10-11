@@ -1,4 +1,4 @@
-// Vendored from can1357/oh-my-pi@68fb9863b377af566d3b56aa882a964654b5760a:crates/pi-builtins/src/line_input.rs — MIT (c) 2025 Mario Zechner, 2025-2026 Can Bölük, 2026 Stencil Labs, Inc. Modified for gajae-code: yes, a failed refill leaves no read-ahead to give back.
+// Vendored from can1357/oh-my-pi@68fb9863b377af566d3b56aa882a964654b5760a:crates/pi-builtins/src/line_input.rs — MIT (c) 2025 Mario Zechner, 2025-2026 Can Bölük, 2026 Stencil Labs, Inc. Modified for gajae-code: yes, a failed refill leaves no read-ahead to give back, and read can take back the bytes past its -n/-N limit.
 //! Byte input for the line-reading builtins (`read`, `mapfile`).
 
 use std::io::{self, Read, Seek, SeekFrom};
@@ -100,6 +100,33 @@ impl LineInput {
 		Ok(Some(self.block[self.pos - 1]))
 	}
 
+	/// Takes back the last `n` bytes handed out, so the next reader of a
+	/// regular file gets them. Only read-ahead from a regular file can do
+	/// this; a byte read from a pipe or terminal is gone, so this returns
+	/// `false` and changes nothing.
+	pub(crate) fn unread(&mut self, n: usize) -> bool {
+		if !self.blocks || !matches!(self.input, OpenFile::File(_)) {
+			return false;
+		}
+		if let Some(pos) = self.pos.checked_sub(n) {
+			self.pos = pos;
+			return true;
+		}
+		// Some of the bytes came from the previous block: seek back over this
+		// block and those bytes, and start over from there.
+		let Ok(back) = i64::try_from(self.block.len() - self.pos + n) else {
+			return false;
+		};
+		if let OpenFile::File(file) = &mut self.input
+			&& file.seek(SeekFrom::Current(-back)).is_ok()
+		{
+			self.block.clear();
+			self.pos = 0;
+			return true;
+		}
+		false
+	}
+
 	/// Gives the bytes read ahead but not handed out back to a regular
 	/// file's shared offset, so another reader of the descriptor resumes
 	/// right after the last byte consumed. Bash's `mapfile` does the same
@@ -156,6 +183,51 @@ mod tests {
 		let position = offset.stream_position()?;
 		std::fs::remove_file(&path)?;
 		assert_eq!(position, 5000);
+		Ok(())
+	}
+
+	/// Contract: bytes taken back from a regular file go to the next reader
+	/// of the descriptor, also when they came from the previous block.
+	#[test]
+	fn unread_bytes_go_back_to_the_file() -> Result<()> {
+		let path = std::env::temp_dir()
+			.join(format!("brush-line-input-unread-{}.txt", std::process::id()));
+		std::fs::write(&path, vec![b'a'; BLOCK + 10])?;
+		let file = std::fs::File::open(&path)?;
+		let mut offset = file.try_clone()?;
+
+		let mut input = LineInput::new(OpenFile::File(file), ReadAhead::Seekable);
+		for _ in 0..5 {
+			input.next_byte()?;
+		}
+		assert!(input.unread(2));
+		drop(input);
+		let within_block = offset.stream_position()?;
+
+		offset.seek(SeekFrom::Start(0))?;
+		let mut input = LineInput::new(OpenFile::File(offset.try_clone()?), ReadAhead::Seekable);
+		for _ in 0..=BLOCK {
+			input.next_byte()?;
+		}
+		assert!(input.unread(2));
+		drop(input);
+		let across_blocks = offset.stream_position()?;
+
+		std::fs::remove_file(&path)?;
+		assert_eq!(within_block, 3);
+		assert_eq!(across_blocks, u64::try_from(BLOCK)? - 1);
+		Ok(())
+	}
+
+	/// Contract: a pipe byte cannot be taken back.
+	#[test]
+	fn unread_from_a_pipe_does_nothing() -> Result<()> {
+		let (reader, mut writer) = std::io::pipe()?;
+		writer.write_all(b"ab")?;
+		let mut input = LineInput::new(OpenFile::PipeReader(reader), ReadAhead::Seekable);
+		assert_eq!(input.next_byte()?, Some(b'a'));
+		assert!(!input.unread(1));
+		assert_eq!(input.next_byte()?, Some(b'b'));
 		Ok(())
 	}
 }

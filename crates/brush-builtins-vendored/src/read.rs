@@ -1,4 +1,4 @@
-// Vendored from can1357/oh-my-pi@68fb9863b377af566d3b56aa882a964654b5760a:crates/pi-builtins/src/read.rs — MIT (c) 2025 Mario Zechner, 2025-2026 Can Bölük, 2026 Stencil Labs, Inc. Modified for gajae-code: yes, preserves cancellation, timeout, and readiness guards; polls a stream before every byte; counts -n/-N characters by UTF-8 validity.
+// Vendored from can1357/oh-my-pi@68fb9863b377af566d3b56aa882a964654b5760a:crates/pi-builtins/src/read.rs — MIT (c) 2025 Mario Zechner, 2025-2026 Can Bölük, 2026 Stencil Labs, Inc. Modified for gajae-code: yes, preserves cancellation, timeout, and readiness guards; polls a stream before every byte; counts -n/-N characters as the line decodes and gives a regular file the byte read past the limit back.
 use std::{
 	collections::VecDeque,
 	io::Write,
@@ -417,6 +417,17 @@ impl InputReader {
 		Ok(None)
 	}
 
+	/// The text of a `-n`/`-N` read whose limit fell before the last byte of
+	/// `line`, which took `input_len` bytes of input. A regular file takes
+	/// those bytes back for the next reader. A pipe or terminal cannot, so
+	/// the byte stays in the line rather than being lost.
+	fn line_before_last_byte(&mut self, mut line: Vec<u8>, input_len: usize) -> String {
+		if self.source.unread(input_len) {
+			line.pop();
+		}
+		decode_line(line)
+	}
+
 	/// Reads the next input event, handling timeout and control characters.
 	fn read_event<F>(&mut self, is_cancelled: &F) -> Result<InputEvent, brush_core::Error>
 	where
@@ -456,12 +467,12 @@ struct LineReaderConfig {
 	process_escapes: bool,
 }
 
-/// Characters read toward a `-n`/`-N` limit. Bash counts characters, not
-/// bytes, in a UTF-8 locale: each byte extends the pending sequence until it
-/// decodes as one character or can no longer become one, and either way the
-/// sequence counts once. A byte that can never begin a character (such as
-/// 0xC0) is therefore a character by itself, and the byte after it is left
-/// for the next reader; a multibyte character is never split.
+/// Characters read toward a `-n`/`-N` limit, counted as `decode_line` will
+/// decode them: a complete UTF-8 character is one, and so is each invalid
+/// sequence it replaces with one U+FFFD. A multibyte character is never
+/// split. A lead byte is known to be invalid only once the byte after it
+/// arrives, and that byte then starts the next character, so it can lie past
+/// the limit.
 #[derive(Default)]
 struct CharCount {
 	chars:   usize,
@@ -469,24 +480,42 @@ struct CharCount {
 	len:     usize,
 }
 
+/// Where a byte leaves a [`CharCount`] relative to its limit.
+enum Limit {
+	/// Below the limit, or inside a character not yet complete.
+	NotReached,
+	/// Reached by the character this byte completes.
+	Reached,
+	/// Reached by the invalid sequence this byte ended without belonging to:
+	/// the byte itself lies past the limit.
+	Passed,
+}
+
 impl CharCount {
-	fn push(&mut self, byte: u8) {
-		// A UTF-8 sequence is at most four bytes, and four bytes always decode
-		// or fail, so `len` is back to 0 before it could reach 4.
+	fn push(&mut self, byte: u8, limit: Option<usize>) -> Limit {
+		// The bytes pending before a push are the start of one valid
+		// character, at most three, so there is room for this one.
 		self.pending[self.len] = byte;
 		self.len += 1;
-		let incomplete = matches!(
-			std::str::from_utf8(&self.pending[..self.len]),
-			Err(error) if error.error_len().is_none()
-		);
-		if !incomplete {
+		while let Some(char_len) = self.next_char_len() {
 			self.chars += 1;
-			self.len = 0;
+			self.pending.copy_within(char_len..self.len, 0);
+			self.len -= char_len;
+			if limit.is_some_and(|limit| self.chars >= limit) {
+				return if self.len == 0 { Limit::Reached } else { Limit::Passed };
+			}
 		}
+		Limit::NotReached
 	}
 
-	fn reached(&self, limit: Option<usize>) -> bool {
-		self.len == 0 && limit.is_some_and(|limit| self.chars >= limit)
+	/// The length of the first pending character once it is known: a
+	/// complete character, or an invalid sequence that decodes to one
+	/// U+FFFD. `None` while the pending bytes can still become a character.
+	fn next_char_len(&self) -> Option<usize> {
+		(1..=self.len).find_map(|end| match std::str::from_utf8(&self.pending[..end]) {
+			Ok(_) => Some(end),
+			Err(error) => error.error_len(),
+		})
 	}
 }
 
@@ -556,13 +585,14 @@ where
 
 						// For other bytes, add the byte literally (backslash consumed).
 						line.push(byte);
-						count.push(byte);
 
 						// Check character limit (based on output length).
-						if count.reached(config.char_limit) {
-							return Ok(ReadResult::Line(decode_line(line)));
+						match count.push(byte, config.char_limit) {
+							Limit::NotReached => continue,
+							Limit::Reached => return Ok(ReadResult::Line(decode_line(line))),
+							// The backslash before the byte lies past the limit too.
+							Limit::Passed => return Ok(ReadResult::Line(reader.line_before_last_byte(line, 2))),
 						}
-						continue;
 					}
 
 					if byte == BACKSLASH {
@@ -582,11 +612,12 @@ where
 				}
 
 				line.push(byte);
-				count.push(byte);
 
 				// Check character limit (based on output length).
-				if count.reached(config.char_limit) {
-					return Ok(ReadResult::Line(decode_line(line)));
+				match count.push(byte, config.char_limit) {
+					Limit::NotReached => {},
+					Limit::Reached => return Ok(ReadResult::Line(decode_line(line))),
+					Limit::Passed => return Ok(ReadResult::Line(reader.line_before_last_byte(line, 1))),
 				}
 			},
 		}
