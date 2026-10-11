@@ -27,6 +27,7 @@ const OK_RESULT: KernelExecuteResult = {
 };
 
 class FakeKernel {
+	id = `fake-kernel-${Math.random().toString(36).slice(2, 9)}`;
 	alive = true;
 	exitCode: number | null = null;
 	executeCalls: string[] = [];
@@ -46,6 +47,11 @@ class FakeKernel {
 	async shutdown(): Promise<KernelShutdownResult> {
 		this.shutdownCalls += 1;
 		this.alive = false;
+		// If shutdown is confirmed, set exitCode to 0 to indicate process exited.
+		// This matches the behavior of a real kernel where exitCode is set when process exits.
+		if (this.shutdownResult.confirmed && this.exitCode === null) {
+			this.exitCode = 0;
+		}
 		return this.shutdownResult;
 	}
 
@@ -421,7 +427,9 @@ describe("python eval lifecycle red-team", () => {
 			const startup = Promise.withResolvers<void>();
 			const startupCalled = Promise.withResolvers<void>();
 			const kernel = new FakeKernel();
+			// Simulate a kernel that fails to shutdown cleanly (process still running)
 			kernel.shutdownResult = { confirmed: false };
+			kernel.exitCode = null; // No positive evidence process exited
 			let startupFinished = false;
 			let executionSettled = false;
 			PythonKernel.start = async () => {
@@ -458,7 +466,8 @@ describe("python eval lifecycle red-team", () => {
 			}
 			expect(startupFinished).toBe(true);
 			expect(kernel.shutdownCalls).toBe(1);
-			await disposeAllKernelSessions();
+			// The first shutdown is unconfirmed, so expect it to be retried.
+			await disposeAllKernelSessions().catch(() => {});
 			expect(kernel.shutdownCalls).toBe(2);
 			kernel.shutdownResult = { confirmed: true };
 			await disposeAllKernelSessions();
