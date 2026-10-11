@@ -54,9 +54,9 @@ fn rasterize_svg_sync(input: &[u8], max_width_px: u32, max_height_px: u32) -> Re
 
 	let mut options = usvg::Options { fontdb: Arc::clone(&FONT_DB), ..usvg::Options::default() };
 	// Repository-controlled SVGs must not read arbitrary host files through an
-	// <image href="…"> reference. Embedded data URLs retain the default
-	// resolver.
+	// <image href="…"> reference, nor decode any embedded data URLs.
 	options.image_href_resolver.resolve_string = Box::new(|_, _| None);
+	options.image_href_resolver.resolve_data = Box::new(|_, _, _| None);
 	let tree = usvg::Tree::from_data(input, &options)
 		.map_err(|error| napi::Error::from_reason(format!("Failed to parse SVG: {error}")))?;
 	let source = tree.size();
@@ -102,5 +102,14 @@ mod tests {
 		let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>"#;
 		let error = rasterize_svg_sync(svg, 8192, 8192).expect_err("oversized canvas should fail");
 		assert!(error.reason.contains("safety cap"));
+	}
+
+	#[test]
+	fn ignores_embedded_data_urls() {
+		// SVG with embedded data URL image element should not decode the image.
+		let svg = "<?xml version=\"1.0\"?><svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:custom=\"http://www.w3.org/2000/svg\" width=\"12\" height=\"7\"><custom:image href=\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==\" width=\"12\" height=\"7\"/><rect x=\"0\" y=\"0\" width=\"12\" height=\"7\" fill=\"red\"/></svg>".as_bytes();
+		let png = rasterize_svg_sync(svg, 100, 100).expect("SVG with embedded data should rasterize without decoding image");
+		let image = image::load_from_memory(&png).expect("result should be PNG");
+		assert_eq!((image.width(), image.height()), (12, 7));
 	}
 }
