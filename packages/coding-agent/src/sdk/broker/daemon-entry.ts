@@ -7,6 +7,7 @@ import {
 	readBrokerRestartIntent,
 } from "./discovery";
 import {
+	type BrokerLaunchHandoff,
 	type BrokerLaunchResult,
 	launchBrokerViaHop,
 	launchBrokerViaPosixTrampoline,
@@ -27,7 +28,14 @@ export interface AuthorizedBrokerSuccessorOptions {
 /** Typed outcome of a successor-launch attempt; never an opaque thrown message. */
 export type AuthorizedBrokerSuccessorResult =
 	| { kind: "adopted"; discovery: BrokerDiscovery }
-	| { kind: "spawned"; discovery: BrokerDiscovery }
+	| {
+			kind: "spawned";
+			child: childProcess.ChildProcess;
+			realBrokerPid: number | undefined;
+			realBrokerIncarnation: string | undefined;
+			handoff: BrokerLaunchHandoff | undefined;
+			discovery?: BrokerDiscovery;
+	  }
 	| {
 			kind: "refused";
 			reason:
@@ -96,73 +104,73 @@ export async function launchAuthorizedBrokerSuccessor(
 	let spawnOutcome: AuthorizedBrokerSuccessorResult;
 	try {
 		spawnOutcome = await withBrokerStartupLock(options.agentDir, async deadline => {
-		if (Date.now() >= Math.min(deadline, options.deadlineAt))
-			return { kind: "refused" as const, reason: "deadline_elapsed" as const };
-		// Only a durably COMMITTED intent for this exact requestId authorizes a
-		// spawn. A prepared-but-not-committed or absent intent means the owner
-		// side of the protocol never reached its commit boundary, so no successor
-		// may exist yet -- spawning here would double-launch a broker the owner
-		// might still be about to retire cleanly on its own.
-		const intent = await readBrokerRestartIntent(options.agentDir);
-		if (intent?.phase !== "committed" || intent.requestId !== options.requestId)
-			return { kind: "refused" as const, reason: "intent_not_committed" as const };
-		const existing = await readBrokerDiscovery(options.agentDir);
-		if (
-			existing &&
-			existing.packageGeneration === options.packageGeneration &&
-			existing.restartRequestId === options.requestId
-		)
-			return { kind: "adopted" as const, discovery: existing };
-		const command = resolveSdkInternalSpawnCommand("broker-internal");
-		try {
-			const env = { ...command.env, GJC_BROKER_RESTART_REQUEST: options.requestId };
-			const launchMode = resolveBrokerLaunchMode(process.platform, "discovery");
-			if (launchMode === "direct") throw new Error("Broker successor launch cannot use a fixture child.");
-			const timeoutMs = Math.max(0, Math.min(deadline, options.deadlineAt) - Date.now());
-			const launched =
-				launchMode === "windows-hop"
-					? await launchBrokerViaHop(
-							{
-								command: {
-									file: command.file,
-									args: [...command.args, "--agent-dir", options.agentDir],
+			if (Date.now() >= Math.min(deadline, options.deadlineAt))
+				return { kind: "refused" as const, reason: "deadline_elapsed" as const };
+			// Only a durably COMMITTED intent for this exact requestId authorizes a
+			// spawn. A prepared-but-not-committed or absent intent means the owner
+			// side of the protocol never reached its commit boundary, so no successor
+			// may exist yet -- spawning here would double-launch a broker the owner
+			// might still be about to retire cleanly on its own.
+			const intent = await readBrokerRestartIntent(options.agentDir);
+			if (intent?.phase !== "committed" || intent.requestId !== options.requestId)
+				return { kind: "refused" as const, reason: "intent_not_committed" as const };
+			const existing = await readBrokerDiscovery(options.agentDir);
+			if (
+				existing &&
+				existing.packageGeneration === options.packageGeneration &&
+				existing.restartRequestId === options.requestId
+			)
+				return { kind: "adopted" as const, discovery: existing };
+			const command = resolveSdkInternalSpawnCommand("broker-internal");
+			try {
+				const env = { ...command.env, GJC_BROKER_RESTART_REQUEST: options.requestId };
+				const launchMode = resolveBrokerLaunchMode(process.platform, "discovery");
+				if (launchMode === "direct") throw new Error("Broker successor launch cannot use a fixture child.");
+				const timeoutMs = Math.max(0, Math.min(deadline, options.deadlineAt) - Date.now());
+				const launched =
+					launchMode === "windows-hop"
+						? await launchBrokerViaHop(
+								{
+									command: {
+										file: command.file,
+										args: [...command.args, "--agent-dir", options.agentDir],
+									},
+									...(command.kind === "bun-source" ? { cwd: command.cwd } : {}),
 								},
-								...(command.kind === "bun-source" ? { cwd: command.cwd } : {}),
-							},
-							{
+								{
+									env,
+									cwd: command.kind === "bun-source" ? command.cwd : undefined,
+									timeoutMs,
+								},
+							)
+						: await launchBrokerViaPosixTrampoline(options.agentDir, {
 								env,
-								cwd: command.kind === "bun-source" ? command.cwd : undefined,
+								...(command.kind === "bun-source" ? { cwd: command.cwd } : {}),
 								timeoutMs,
-							},
-						)
-					: await launchBrokerViaPosixTrampoline(options.agentDir, {
-							env,
-							...(command.kind === "bun-source" ? { cwd: command.cwd } : {}),
-							timeoutMs,
-							retainChildUntilPublication: launchMode === "darwin-trampoline",
-						});
-			if (launched.error) return await refuseFailedBrokerLaunch(launched);
-			if (launched.realBrokerPid === undefined || launched.realBrokerIncarnation === undefined)
-				return await refuseFailedBrokerLaunch({
-					...launched,
-					error: new Error("Broker launcher returned no verified process identity."),
-				});
-			const child: childProcess.ChildProcess = launched.process;
-			if (!launched.handoff) child.unref();
-			return {
-				kind: "spawned" as const,
-				child,
-				realBrokerPid: launched.realBrokerPid,
-				realBrokerIncarnation: launched.realBrokerIncarnation,
-				handoff: launched.handoff,
-			};
-		} catch (spawnError) {
-			return {
-				kind: "refused" as const,
-				reason: "spawn_failed" as const,
-				detail: spawnError instanceof Error ? spawnError.message : String(spawnError),
-			};
-		}
+								retainChildUntilPublication: launchMode === "darwin-trampoline",
+							});
+				if (launched.error) return await refuseFailedBrokerLaunch(launched);
+				if (launched.realBrokerPid === undefined || launched.realBrokerIncarnation === undefined)
+					return await refuseFailedBrokerLaunch({
+						...launched,
+						error: new Error("Broker launcher returned no verified process identity."),
+					});
+				const child: childProcess.ChildProcess = launched.process;
+				if (!launched.handoff) child.unref();
+				return {
+					kind: "spawned" as const,
+					child,
+					realBrokerPid: launched.realBrokerPid,
+					realBrokerIncarnation: launched.realBrokerIncarnation,
+					handoff: launched.handoff,
+				};
+			} catch (spawnError) {
+				return {
+					kind: "refused" as const,
+					reason: "spawn_failed" as const,
+					detail: spawnError instanceof Error ? spawnError.message : String(spawnError),
+				};
+			}
 		});
 	} catch (lockError) {
 		if (lockError instanceof FileLockAcquireError) {
@@ -243,7 +251,14 @@ export async function launchAuthorizedBrokerSuccessor(
 					}`,
 				};
 			}
-			return { kind: "spawned", discovery: discovered };
+			return {
+				kind: "spawned" as const,
+				child,
+				realBrokerPid,
+				realBrokerIncarnation: expectedBrokerIncarnation,
+				handoff: spawnOutcome.handoff,
+				discovery: discovered,
+			};
 		}
 		if (Date.now() >= until)
 			return await refuseUnpublishedBrokerSuccessor(

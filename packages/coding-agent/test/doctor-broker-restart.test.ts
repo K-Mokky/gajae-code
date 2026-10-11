@@ -341,6 +341,7 @@ describe("doctor broker restart protocol", () => {
 			expect(outcome.result.kind).toBe("spawned");
 			if (outcome.result.kind !== "spawned")
 				throw new Error("Authorized successor was not spawned after the lock became available.");
+			if (!outcome.result.discovery) throw new Error("Authorized successor discovery was not populated.");
 			successorPid = outcome.result.discovery.pid;
 			expect(outcome.result.discovery.restartRequestId).toBe(requestId);
 			let retainedIntent = await readBrokerRestartIntent(dir);
