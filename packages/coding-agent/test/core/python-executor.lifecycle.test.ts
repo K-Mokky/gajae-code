@@ -169,9 +169,11 @@ describe("executePython session lifecycle", () => {
 		let startCount = 0;
 		let shutdownCount = 0;
 
-		PythonKernel.start = async () => {
+		PythonKernel.start = async options => {
 			startCount += 1;
-			return kernels.shift() as unknown as PythonKernel;
+			const kernel = kernels.shift() as unknown as PythonKernel;
+			options.onKernelCreated?.(kernel);
+			return kernel;
 		};
 
 		kernelA.shutdown = async (): Promise<KernelShutdownResult> => {

@@ -119,7 +119,11 @@ describe("PythonExecutorOptions.onKernelStart", () => {
 	it("does not invoke onKernelStart for execute-per-call mode", async () => {
 		const kernel = new FakeKernel();
 		vi.spyOn(pythonKernel, "checkPythonKernelAvailability").mockResolvedValue({ ok: true });
-		vi.spyOn(pythonKernel.PythonKernel, "start").mockResolvedValue(kernel as unknown as PythonKernelInstance);
+		vi.spyOn(pythonKernel.PythonKernel, "start").mockImplementation(async options => {
+			const created = kernel as unknown as PythonKernelInstance;
+			options.onKernelCreated?.(created);
+			return created;
+		});
 		const onKernelStart = vi.fn();
 
 		await executePython("per call", {
