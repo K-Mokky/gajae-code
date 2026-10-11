@@ -6,19 +6,44 @@ type Input = Record<string, unknown>;
 type SecretInputError = { code: "secret_field_forbidden"; message: string };
 const SECRET_FIELD = /(?:secret|token|password|credential|authorization|api[_-]?key)/i;
 
+type UltrafastRestrictionError = { code: "ultrafast_tier_forbidden"; message: string };
+
+function containsUltrafastServiceTier(value: unknown): boolean {
+	if (Array.isArray(value)) return value.some(containsUltrafastServiceTier);
+	if (!value || typeof value !== "object") return false;
+	if (
+		typeof (value as Record<string, unknown>).serviceTier === "string" &&
+		(value as Record<string, unknown>).serviceTier === "ultrafast"
+	) {
+		return true;
+	}
+	return Object.values(value as Record<string, unknown>).some(containsUltrafastServiceTier);
+}
+
 function containsSecretField(value: unknown): boolean {
 	if (Array.isArray(value)) return value.some(containsSecretField);
 	if (!value || typeof value !== "object") return false;
 	return Object.entries(value).some(([key, nested]) => SECRET_FIELD.test(key) || containsSecretField(nested));
 }
 
-/** Rejects secret-bearing config patches from model-facing adapter inputs. */
-export function validateAdapterSecretFields(operation: string, input: Input): SecretInputError | undefined {
-	if (operation === "config.patch" && containsSecretField(input)) {
-		return {
-			code: "secret_field_forbidden",
-			message: "config.patch secret fields are not available through this adapter.",
-		};
+/** Rejects secret-bearing and ultrafast-tier config patches from model-facing adapter inputs. */
+export function validateAdapterSecretFields(
+	operation: string,
+	input: Input,
+): SecretInputError | UltrafastRestrictionError | undefined {
+	if (operation === "config.patch") {
+		if (containsSecretField(input)) {
+			return {
+				code: "secret_field_forbidden",
+				message: "config.patch secret fields are not available through this adapter.",
+			};
+		}
+		if (containsUltrafastServiceTier(input)) {
+			return {
+				code: "ultrafast_tier_forbidden",
+				message: "config.patch serviceTier ultrafast is restricted to trusted local sources.",
+			};
+		}
 	}
 	return undefined;
 }
