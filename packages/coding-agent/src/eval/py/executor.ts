@@ -919,8 +919,9 @@ async function replaceSessionKernel(
 		// process actually exited (exitCode is set). Without that evidence, propagate the error
 		// so we don't start a replacement while the old subprocess is still running.
 		// See https://github.com/yeachan-heo/gajae-code/issues/6569
-		const hasConfirmedExit = "getExitCode" in old && typeof (old as any).getExitCode === "function" && (old as any).getExitCode() !== null;
-		if (!hasConfirmedExit || !(error instanceof Error) || error.name !== "PythonKernelShutdownUnconfirmedError") throw error;
+		const hasConfirmedExit = old.getExitCode() !== null;
+		if (!hasConfirmedExit || !(error instanceof Error) || error.name !== "PythonKernelShutdownUnconfirmedError")
+			throw error;
 	}
 	throwIfExecutionCancelled(options);
 	if (sessions.get(session.sessionId) !== session) {
