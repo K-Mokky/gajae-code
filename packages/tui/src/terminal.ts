@@ -277,6 +277,37 @@ function unsubscribeFromStdinErrors(subscriber: (err: Error) => void): void {
 	stdinErrorSubscribers.delete(subscriber);
 	if (stdinErrorSubscribers.size === 0) process.stdin.removeListener("error", dispatchStdinError);
 }
+/**
+ * Keys typed while the TTY was still cooked (before start() switched to raw
+ * mode, e.g. during a slow startup) pass through the line discipline, whose
+ * ICRNL turns Enter (CR) into LF. They reach the first raw read as one backlog
+ * chunk, and the editor reads a lone LF as the Shift+Enter newline mapping, so
+ * type-ahead never submits. Restore the final LF to the CR the user pressed;
+ * earlier LFs stay newlines so a multi-line paste is submitted once.
+ *
+ * Only convert if there is actual content before the final LF. A bare LF is a
+ * raw-mode keystroke (e.g., Shift+Enter after a probe reply), not cooked
+ * backlog, and must remain a newline.
+ */
+function restoreCookedEnter(data: string | Buffer): string | Buffer {
+	if (typeof data === "string") {
+		const index = data.lastIndexOf("\n");
+		// Only convert if there is content before the LF; a bare LF is raw-mode input
+		if (index > 0) {
+			return `${data.slice(0, index)}\r${data.slice(index + 1)}`;
+		}
+		return data;
+	}
+	const index = data.lastIndexOf(0x0a);
+	// Only convert if there is content before the LF; a bare LF is raw-mode input
+	if (index > 0) {
+		const restored = Buffer.from(data);
+		restored[index] = 0x0d;
+		return restored;
+	}
+	return data;
+}
+
 type Osc11QuerySource = "startup" | "poll" | "mode2031";
 type Osc11QueuedSource = Exclude<Osc11QuerySource, "startup">;
 
@@ -285,6 +316,8 @@ type Osc11QueuedSource = Exclude<Osc11QuerySource, "startup">;
  */
 export class ProcessTerminal implements Terminal {
 	#wasRaw = false;
+	// The first stdin read after leaving cooked mode carries the cooked backlog.
+	#cookedBacklogPending = false;
 	#inputHandler?: (data: string) => void;
 	#resizeHandler?: () => void;
 	#kittyProtocolActive = false;
@@ -354,6 +387,8 @@ export class ProcessTerminal implements Terminal {
 
 		// Save previous state and enable raw mode
 		this.#wasRaw = process.stdin.isRaw || false;
+		// ICRNL is a POSIX line-discipline translation; Windows consoles do not apply it.
+		this.#cookedBacklogPending = !this.#wasRaw && process.platform !== "win32";
 		if (process.stdin.setRawMode) {
 			process.stdin.setRawMode(true);
 		}
@@ -676,6 +711,10 @@ export class ProcessTerminal implements Terminal {
 
 		// Handler that pipes stdin data through the buffer
 		this.#stdinDataHandler = (data: string | Buffer) => {
+			if (this.#cookedBacklogPending) {
+				this.#cookedBacklogPending = false;
+				data = restoreCookedEnter(data);
+			}
 			this.#stdinBuffer!.process(data);
 		};
 	}
