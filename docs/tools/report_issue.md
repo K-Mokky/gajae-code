@@ -35,17 +35,32 @@ Table `tool_issues`:
 | `gjc_version` | GJC version that recorded the report. |
 | `session_id` | Session id, or `NULL`. |
 
-The file is created with mode `0600` inside a `0700` directory. Nothing is uploaded; reports leave the machine only if you share the file.
+The file is created with mode `0600` inside a `0700` directory. The WAL and SHM sidecars are also protected with mode `0600`. Nothing is uploaded; reports leave the machine only if you share the file.
 
 ## Reading reports
-Use the read tool or CLI SQLite support. If `gjc config init-xdg` has been run, the database is stored in `$XDG_DATA_HOME/gjc/tool-issues.db` (typically `~/.local/share/gjc/tool-issues.db` on Linux); otherwise it is at `~/.gjc/tool-issues.db`.
+Use the read tool or CLI SQLite support. The database path is determined by `getToolIssuesDbPath()`, which checks in order:
+
+1. On Linux or macOS: if `$XDG_DATA_HOME/gjc` exists, use `$XDG_DATA_HOME/gjc/tool-issues.db`
+2. Otherwise: use `~/.gjc/tool-issues.db`
+
+Windows always uses `~/.gjc/tool-issues.db` (no XDG support).
+
+If unsure which path your installation uses, run:
 
 ```sh
-# Standard installation (no XDG)
+gjc read ~/.gjc/tool-issues.db:tool_issues?order=created_at:desc&limit=5
+```
+
+Example commands:
+
+```sh
+# Query by most recent reports
 gjc read '~/.gjc/tool-issues.db:tool_issues?order=created_at:desc&limit=50'
+
+# Count issues by tool
 gjc read '~/.gjc/tool-issues.db?q=SELECT tool, count(*) AS n FROM tool_issues GROUP BY tool ORDER BY n DESC'
 
-# XDG installation
+# If using XDG (when $XDG_DATA_HOME/gjc exists)
 gjc read "$XDG_DATA_HOME/gjc/tool-issues.db:tool_issues?order=created_at:desc&limit=50"
 ```
 

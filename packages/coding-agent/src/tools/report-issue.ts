@@ -11,7 +11,7 @@
  * and consent prompts are intentionally not part of this local-only port.
  */
 import { Database } from "bun:sqlite";
-import * as fs from "node:fs";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AgentTool, AgentToolResult } from "@gajae-code/agent-core";
 import { getToolIssuesDbPath, logger, prompt, VERSION } from "@gajae-code/utils";
@@ -46,14 +46,15 @@ export interface ToolIssueEntry {
 
 const dbHandles = new Map<string, Database>();
 
-function openToolIssueDb(dbPath: string): Database {
+async function openToolIssueDb(dbPath: string): Promise<Database> {
 	const existing = dbHandles.get(dbPath);
 	if (existing) return existing;
 	const dir = path.dirname(dbPath);
-	fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+	// Create directory with 0700 permissions
+	await fs.mkdir(dir, { recursive: true, mode: 0o700 });
 	// Enforce private permissions on existing parent directory
 	if (process.platform !== "win32") {
-		fs.chmodSync(dir, 0o700);
+		await fs.chmod(dir, 0o700);
 	}
 	const db = new Database(dbPath);
 	try {
@@ -73,15 +74,25 @@ function openToolIssueDb(dbPath: string): Database {
 		`);
 		// Protect the main database file and sidecars with private permissions
 		if (process.platform !== "win32") {
-			fs.chmodSync(dbPath, 0o600);
+			await fs.chmod(dbPath, 0o600);
 			// SQLite creates WAL and SHM sidecars; protect them too
 			const walPath = `${dbPath}-wal`;
 			const shmPath = `${dbPath}-shm`;
-			if (fs.existsSync(walPath)) fs.chmodSync(walPath, 0o600);
-			if (fs.existsSync(shmPath)) fs.chmodSync(shmPath, 0o600);
+			try {
+				await fs.stat(walPath);
+				await fs.chmod(walPath, 0o600);
+			} catch {
+				// WAL file may not exist yet
+			}
+			try {
+				await fs.stat(shmPath);
+				await fs.chmod(shmPath, 0o600);
+			} catch {
+				// SHM file may not exist yet
+			}
 		} else {
 			// On Windows, use the basic chmod for the main file
-			fs.chmodSync(dbPath, 0o600);
+			await fs.chmod(dbPath, 0o600);
 		}
 	} catch (error) {
 		db.close();
@@ -110,18 +121,16 @@ function truncateUtf8(text: string, maxBytes: number): string {
 /**
  * Truncate text by complete Unicode code points, avoiding incomplete surrogate pairs.
  * JavaScript strings use UTF-16 encoding, where astral characters use two code units
- * (high surrogate + low surrogate). Slicing at an arbitrary position can split a pair.
+ * (high surrogate + low surrogate). We must count actual code points, not UTF-16 code units.
  */
 function truncateByCodePoint(text: string, maxChars: number): string {
-	if (text.length <= maxChars) return text;
-	let result = text.slice(0, maxChars);
-	// Check if we cut in the middle of a surrogate pair:
-	// If the last character is a high surrogate (U+D800-U+DBFF),
-	// it needs its low surrogate pair which we've discarded.
-	const lastCode = result.charCodeAt(result.length - 1);
-	if (lastCode >= 0xd800 && lastCode <= 0xdbff) {
-		// Remove the orphaned high surrogate
-		result = result.slice(0, -1);
+	let codePointCount = 0;
+	let result = "";
+	// Iterate through actual code points using for-of, which handles surrogate pairs correctly
+	for (const codePoint of text) {
+		if (codePointCount >= maxChars) break;
+		result += codePoint;
+		codePointCount++;
 	}
 	return result;
 }
@@ -138,9 +147,9 @@ export function normalizeToolIssue(tool: string, report: string): { tool: string
 }
 
 /** Append one report to the tool-issue database at `dbPath`. */
-export function recordToolIssue(dbPath: string, entry: ToolIssueEntry): void {
-	openToolIssueDb(dbPath)
-		.prepare("INSERT INTO tool_issues (tool, report, model, gjc_version, session_id) VALUES (?, ?, ?, ?, ?)")
+export async function recordToolIssue(dbPath: string, entry: ToolIssueEntry): Promise<void> {
+	const db = await openToolIssueDb(dbPath);
+	db.prepare("INSERT INTO tool_issues (tool, report, model, gjc_version, session_id) VALUES (?, ?, ?, ?, ?)")
 		.run(entry.tool, entry.report, entry.model, VERSION, entry.sessionId);
 }
 
@@ -165,7 +174,7 @@ export class ReportIssueTool implements AgentTool<typeof reportIssueSchema, Repo
 		if (!tool) throw new ToolError("tool must name the tool that misbehaved.");
 		if (!report) throw new ToolError("report must describe the unexpected behavior.");
 		try {
-			recordToolIssue(this.#dbPath, {
+			await recordToolIssue(this.#dbPath, {
 				tool,
 				report,
 				model: this.#session.getActiveModelString?.() ?? null,

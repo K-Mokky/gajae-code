@@ -183,6 +183,54 @@ describe("normalizeToolIssue", () => {
 			expect(lastCode < 0xd800 || lastCode > 0xdbff).toBe(true);
 		}
 	});
+
+	test("truncates at 4000 code points, not UTF-16 code units", () => {
+		// A report with 4500 emojis: each emoji is 1 code point but 2 UTF-16 code units.
+		// Total: 4500 * 2 = 9000 UTF-16 code units
+		// Should truncate to 3999 emojis + ellipsis (still 4000 code points total)
+		const manyEmojis = "👍".repeat(4500);
+		const { report: normalized } = normalizeToolIssue("read", manyEmojis);
+
+		// Count code points in the result
+		let codePointCount = 0;
+		for (const _ of normalized) {
+			codePointCount++;
+		}
+
+		// Should be 3999 emojis + 1 ellipsis = 4000 code points
+		expect(codePointCount).toBe(4000);
+		expect(normalized.endsWith("…")).toBe(true);
+		// Ensure no splitting of emoji surrogate pairs
+		const encoded = Buffer.from(normalized, "utf8");
+		const decoded = encoded.toString("utf8");
+		expect(decoded).toBe(normalized);
+	});
+
+	test("respects 0700 directory and 0600 database permissions on creation", async () => {
+		if (process.platform === "win32") return; // Skip on Windows
+
+		closeToolIssueDbs();
+		const testDir = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-perms-test-"));
+		try {
+			const newDbPath = path.join(testDir, "deep", "nested", "tool-issues.db");
+			const tool = new ReportIssueTool(makeSession(), newDbPath);
+
+			// Execute a report to trigger database creation
+			await tool.execute("call-1", { tool: "test", report: "test report" });
+
+			// Verify directory permissions are 0700
+			const dirPath = path.dirname(newDbPath);
+			const dirStat = await fs.stat(dirPath);
+			expect(dirStat.mode & 0o777).toBe(0o700);
+
+			// Verify database file permissions are 0600
+			const dbStat = await fs.stat(newDbPath);
+			expect(dbStat.mode & 0o777).toBe(0o600);
+		} finally {
+			closeToolIssueDbs();
+			await fs.rm(testDir, { recursive: true, force: true });
+		}
+	});
 });
 
 describe("report_issue availability", () => {
