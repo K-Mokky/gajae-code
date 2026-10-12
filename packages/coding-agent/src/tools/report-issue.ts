@@ -49,12 +49,15 @@ const dbHandles = new Map<string, Database>();
 async function openToolIssueDb(dbPath: string): Promise<Database> {
 	const existing = dbHandles.get(dbPath);
 	if (existing) return existing;
-	const dir = path.dirname(dbPath);
-	// Create directory with 0700 permissions
-	await fs.mkdir(dir, { recursive: true, mode: 0o700 });
-	// Enforce private permissions on existing parent directory
-	if (process.platform !== "win32") {
-		await fs.chmod(dir, 0o700);
+	// Only a directory created here gets 0700; an existing shared config/data root keeps its mode.
+	await fs.mkdir(path.dirname(dbPath), { recursive: true, mode: 0o700 });
+	// Create (or tighten) the database file before SQLite opens it. SQLite's unix VFS creates the
+	// WAL/SHM sidecars with the main file's permissions, so they are private from their first byte.
+	const handle = await fs.open(dbPath, "a", 0o600);
+	try {
+		if (process.platform !== "win32") await handle.chmod(0o600);
+	} finally {
+		await handle.close();
 	}
 	const db = new Database(dbPath);
 	try {
@@ -72,28 +75,6 @@ async function openToolIssueDb(dbPath: string): Promise<Database> {
 			);
 			CREATE INDEX IF NOT EXISTS idx_tool_issues_tool_created ON tool_issues(tool, created_at);
 		`);
-		// Protect the main database file and sidecars with private permissions
-		if (process.platform !== "win32") {
-			await fs.chmod(dbPath, 0o600);
-			// SQLite creates WAL and SHM sidecars; protect them too
-			const walPath = `${dbPath}-wal`;
-			const shmPath = `${dbPath}-shm`;
-			try {
-				await fs.stat(walPath);
-				await fs.chmod(walPath, 0o600);
-			} catch {
-				// WAL file may not exist yet
-			}
-			try {
-				await fs.stat(shmPath);
-				await fs.chmod(shmPath, 0o600);
-			} catch {
-				// SHM file may not exist yet
-			}
-		} else {
-			// On Windows, use the basic chmod for the main file
-			await fs.chmod(dbPath, 0o600);
-		}
 	} catch (error) {
 		db.close();
 		throw error;
@@ -135,12 +116,18 @@ function truncateByCodePoint(text: string, maxChars: number): string {
 	return result;
 }
 
+function codePointLength(text: string): number {
+	let count = 0;
+	for (const _ of text) count++;
+	return count;
+}
+
 /** Normalize and clamp a report to the stored field limits. */
 export function normalizeToolIssue(tool: string, report: string): { tool: string; report: string } {
 	const normalizedTool = truncateUtf8(tool.trim(), MAX_TOOL_BYTES);
 	const trimmedReport = report.trim();
 	const normalizedReport =
-		trimmedReport.length > MAX_REPORT_CHARS
+		codePointLength(trimmedReport) > MAX_REPORT_CHARS
 			? `${truncateByCodePoint(trimmedReport, MAX_REPORT_CHARS - 1)}…`
 			: trimmedReport;
 	return { tool: normalizedTool, report: normalizedReport };
@@ -149,8 +136,13 @@ export function normalizeToolIssue(tool: string, report: string): { tool: string
 /** Append one report to the tool-issue database at `dbPath`. */
 export async function recordToolIssue(dbPath: string, entry: ToolIssueEntry): Promise<void> {
 	const db = await openToolIssueDb(dbPath);
-	db.prepare("INSERT INTO tool_issues (tool, report, model, gjc_version, session_id) VALUES (?, ?, ?, ?, ?)")
-		.run(entry.tool, entry.report, entry.model, VERSION, entry.sessionId);
+	db.prepare("INSERT INTO tool_issues (tool, report, model, gjc_version, session_id) VALUES (?, ?, ?, ?, ?)").run(
+		entry.tool,
+		entry.report,
+		entry.model,
+		VERSION,
+		entry.sessionId,
+	);
 }
 
 export class ReportIssueTool implements AgentTool<typeof reportIssueSchema, ReportIssueToolDetails> {

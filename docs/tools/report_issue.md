@@ -30,37 +30,27 @@ Table `tool_issues`:
 | `id` | Autoincrement key. |
 | `created_at` | UTC ISO-8601 timestamp with milliseconds. |
 | `tool` | Trimmed tool name, capped at 128 UTF-8 bytes. |
-| `report` | Trimmed report, capped at 4000 characters (`…` marks truncation). |
+| `report` | Trimmed report, capped at 4000 Unicode code points (`…` marks truncation). |
 | `model` | Active model string, or `NULL`. |
 | `gjc_version` | GJC version that recorded the report. |
 | `session_id` | Session id, or `NULL`. |
 
-The file is created with mode `0600` inside a `0700` directory. The WAL and SHM sidecars are also protected with mode `0600`. Nothing is uploaded; reports leave the machine only if you share the file.
+The database file is created with mode `0600` before SQLite opens it, so its WAL and SHM sidecars are also `0600`. A missing parent directory is created with mode `0700`; an existing one keeps its mode. Nothing is uploaded; reports leave the machine only if you share the file.
 
 ## Reading reports
-Use the read tool or CLI SQLite support. The database path is determined by `getToolIssuesDbPath()`, which checks in order:
+The path comes from `getToolIssuesDbPath()`:
 
-1. On Linux or macOS: if `$XDG_DATA_HOME/gjc` exists, use `$XDG_DATA_HOME/gjc/tool-issues.db`
-2. Otherwise: use `~/.gjc/tool-issues.db`
+1. On Linux or macOS, with the default profile (no custom agent directory), when `XDG_DATA_HOME` is set and `$XDG_DATA_HOME/gjc` exists: `$XDG_DATA_HOME/gjc/tool-issues.db`.
+2. Otherwise: `~/.gjc/tool-issues.db`.
 
-Windows always uses `~/.gjc/tool-issues.db` (no XDG support).
-
-If unsure which path your installation uses, run:
+`gjc config init-xdg` only creates the XDG directories; the database moves there once `XDG_DATA_HOME` is exported. Windows always uses `~/.gjc/tool-issues.db`.
 
 ```sh
-gjc read ~/.gjc/tool-issues.db:tool_issues?order=created_at:desc&limit=5
-```
+# Default location
+gjc read "$HOME/.gjc/tool-issues.db:tool_issues?order=created_at:desc&limit=50"
+gjc read "$HOME/.gjc/tool-issues.db?q=SELECT tool, count(*) AS n FROM tool_issues GROUP BY tool ORDER BY n DESC"
 
-Example commands:
-
-```sh
-# Query by most recent reports
-gjc read '~/.gjc/tool-issues.db:tool_issues?order=created_at:desc&limit=50'
-
-# Count issues by tool
-gjc read '~/.gjc/tool-issues.db?q=SELECT tool, count(*) AS n FROM tool_issues GROUP BY tool ORDER BY n DESC'
-
-# If using XDG (when $XDG_DATA_HOME/gjc exists)
+# XDG location (XDG_DATA_HOME set and $XDG_DATA_HOME/gjc present)
 gjc read "$XDG_DATA_HOME/gjc/tool-issues.db:tool_issues?order=created_at:desc&limit=50"
 ```
 

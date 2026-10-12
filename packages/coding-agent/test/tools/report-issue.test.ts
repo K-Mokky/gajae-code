@@ -160,50 +160,12 @@ describe("normalizeToolIssue", () => {
 		expect(normalizeToolIssue("read", "y".repeat(4000)).report).toBe("y".repeat(4000));
 	});
 
-	test("avoids splitting surrogate pairs when truncating at 4000 characters", () => {
-		// Create a report that places an astral character (emoji) across the boundary.
-		// The emoji 😀 (U+1F600) uses two UTF-16 code units (a surrogate pair: U+D83D U+DE00).
-		// Position it so that with naïve truncation it would split the pair.
-		// Total: 3998 'a's + emoji (2 code units) = 4000 code units at the boundary
-		const report = "a".repeat(3998) + "😀";
-		expect(report.length).toBe(4000);
-
-		const { report: normalized } = normalizeToolIssue("read", report);
-
-		// The truncated report should not have an orphaned high surrogate
-		// Valid code point check: can be encoded/decoded without corruption
-		const encoded = Buffer.from(normalized, "utf8");
-		const decoded = encoded.toString("utf8");
-		expect(decoded).toBe(normalized);
-
-		// The last character should not be a high surrogate code unit on its own
-		const lastCode = normalized.charCodeAt(normalized.length - 1);
-		// High surrogates are in range 0xD800-0xDBFF; they should not be present alone
-		if (normalized.length > 0 && !normalized.endsWith("…")) {
-			expect(lastCode < 0xd800 || lastCode > 0xdbff).toBe(true);
-		}
-	});
-
-	test("truncates at 4000 code points, not UTF-16 code units", () => {
-		// A report with 4500 emojis: each emoji is 1 code point but 2 UTF-16 code units.
-		// Total: 4500 * 2 = 9000 UTF-16 code units
-		// Should truncate to 3999 emojis + ellipsis (still 4000 code points total)
-		const manyEmojis = "👍".repeat(4500);
-		const { report: normalized } = normalizeToolIssue("read", manyEmojis);
-
-		// Count code points in the result
-		let codePointCount = 0;
-		for (const _ of normalized) {
-			codePointCount++;
-		}
-
-		// Should be 3999 emojis + 1 ellipsis = 4000 code points
-		expect(codePointCount).toBe(4000);
-		expect(normalized.endsWith("…")).toBe(true);
-		// Ensure no splitting of emoji surrogate pairs
-		const encoded = Buffer.from(normalized, "utf8");
-		const decoded = encoded.toString("utf8");
-		expect(decoded).toBe(normalized);
+	test("limits reports by code points below, at, and above 4000", () => {
+		// 👍 is one code point but two UTF-16 code units.
+		expect(normalizeToolIssue("read", "👍".repeat(3000)).report).toBe("👍".repeat(3000));
+		expect(normalizeToolIssue("read", "👍".repeat(4000)).report).toBe("👍".repeat(4000));
+		expect(normalizeToolIssue("read", "👍".repeat(4001)).report).toBe(`${"👍".repeat(3999)}…`);
+		expect(normalizeToolIssue("read", `${"a".repeat(3999)}😀b`).report).toBe(`${"a".repeat(3999)}…`);
 	});
 
 	test("respects 0700 directory and 0600 database permissions on creation", async () => {
@@ -229,6 +191,26 @@ describe("normalizeToolIssue", () => {
 		} finally {
 			closeToolIssueDbs();
 			await fs.rm(testDir, { recursive: true, force: true });
+		}
+	});
+
+	test("keeps an existing parent's mode and creates the database and sidecars private", async () => {
+		if (process.platform === "win32") return;
+
+		const sharedRoot = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-report-shared-"));
+		try {
+			await fs.chmod(sharedRoot, 0o755);
+			const sharedDbPath = path.join(sharedRoot, "tool-issues.db");
+
+			await new ReportIssueTool(makeSession(), sharedDbPath).execute("call-1", { tool: "test", report: "r" });
+
+			expect((await fs.stat(sharedRoot)).mode & 0o777).toBe(0o755);
+			for (const file of [sharedDbPath, `${sharedDbPath}-wal`, `${sharedDbPath}-shm`]) {
+				expect((await fs.stat(file)).mode & 0o777).toBe(0o600);
+			}
+		} finally {
+			closeToolIssueDbs();
+			await fs.rm(sharedRoot, { recursive: true, force: true });
 		}
 	});
 });
