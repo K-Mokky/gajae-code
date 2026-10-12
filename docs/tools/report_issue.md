@@ -41,12 +41,12 @@ The database file is created with mode `0600` before SQLite opens it, so its WAL
 The path comes from `getToolIssuesDbPath()`:
 
 1. On Linux or macOS, with the default profile (no custom agent directory), when `XDG_DATA_HOME` is set and `$XDG_DATA_HOME/gjc` exists: `$XDG_DATA_HOME/gjc/tool-issues.db`.
-2. Otherwise: `~/.gjc/tool-issues.db`.
+2. Otherwise: `tool-issues.db` in the config root, `~/<GJC_CONFIG_DIR>` (`~/.gjc` unless `GJC_CONFIG_DIR` is set).
 
-`gjc config init-xdg` only creates the XDG directories; the database moves there once `XDG_DATA_HOME` is exported. Windows always uses `~/.gjc/tool-issues.db`.
+`gjc config init-xdg` only creates the XDG directories; the database moves there once `XDG_DATA_HOME` is exported. Windows always uses the config root.
 
 ```sh
-# Default location
+# Default location (adjust `.gjc` if GJC_CONFIG_DIR is set)
 gjc read "$HOME/.gjc/tool-issues.db:tool_issues?order=created_at:desc&limit=50"
 gjc read "$HOME/.gjc/tool-issues.db?q=SELECT tool, count(*) AS n FROM tool_issues GROUP BY tool ORDER BY n DESC"
 
