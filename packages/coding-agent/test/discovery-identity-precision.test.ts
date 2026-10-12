@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { capturePathIdentity } from "../src/capability/fs";
 import { readContainedFile } from "../src/discovery/helpers";
@@ -8,7 +9,7 @@ describe("File identity exact bigint precision", () => {
 	it("captures exact large file IDs that exceed 2^53", async () => {
 		// Use the actual filesystem to verify exact ID capture.
 		// Create a temporary directory and stat it with bigint: true.
-		const tempDir = await fs.promises.mkdtemp(path.join("/tmp", "gjc-id-precision-"));
+		const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "gjc-id-precision-"));
 		try {
 			const stat = await fs.promises.stat(tempDir, { bigint: true });
 			const captured = await capturePathIdentity(tempDir);
@@ -25,8 +26,8 @@ describe("File identity exact bigint precision", () => {
 
 	it("rejects mismatched identities when comparing contained files", async () => {
 		// Create two temp directories and verify that mismatched identities are rejected.
-		const tempDir1 = await fs.promises.mkdtemp(path.join("/tmp", "gjc-id-precision-1-"));
-		const tempDir2 = await fs.promises.mkdtemp(path.join("/tmp", "gjc-id-precision-2-"));
+		const tempDir1 = await fs.promises.mkdtemp(path.join(os.tmpdir(), "gjc-id-precision-1-"));
+		const tempDir2 = await fs.promises.mkdtemp(path.join(os.tmpdir(), "gjc-id-precision-2-"));
 		try {
 			// Capture the true identity of tempDir1
 			const identity1 = await capturePathIdentity(tempDir1);
@@ -34,7 +35,7 @@ describe("File identity exact bigint precision", () => {
 
 			// Create a test file in tempDir2
 			const testFile = path.join(tempDir2, "test.txt");
-			await fs.promises.writeFile(testFile, "test content");
+			await Bun.write(testFile, "test content");
 
 			// readContainedFile should reject a file when given the wrong directory's identity
 			const resultWrongIdentity = await readContainedFile(tempDir2, testFile, identity1);
@@ -54,22 +55,20 @@ describe("File identity exact bigint precision", () => {
 		}
 	});
 
-	it("rejects two distinct inode values that round to the same double", () => {
-		// Demonstrate that two different bigint values can round to the same Number.
-		// At 2^60, rounding distance is 512.
-		// 2^60 + 1 and 2^60 + 2 round to the same double.
-		const large1: bigint = 2n ** 60n + 1n;
-		const large2: bigint = 2n ** 60n + 2n;
+	it("rejects an expected identity that differs from the root by a single inode", async () => {
+		// readContainedFile must compare bigint identities exactly: an off-by-one inode is a
+		// different directory even where a double would round both to the same value.
+		const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "gjc-id-precision-"));
+		try {
+			const file = path.join(root, "SYSTEM.md");
+			await Bun.write(file, "authorized");
+			const identity = await capturePathIdentity(root);
+			expect(identity).not.toBeNull();
 
-		const double1 = Number(large1);
-		const double2 = Number(large2);
-
-		// They round to the same value
-		expect(double1).toBe(double2);
-		// But the bigints are different
-		expect(large1).not.toBe(large2);
-
-		// With exact bigint comparison, they should not match
-		expect(large1 === large2).toBe(false);
+			expect(await readContainedFile(root, file, identity)).toBe("authorized");
+			expect(await readContainedFile(root, file, { dev: identity!.dev, ino: identity!.ino + 1n })).toBeNull();
+		} finally {
+			await fs.promises.rm(root, { force: true, recursive: true });
+		}
 	});
 });
