@@ -1,10 +1,10 @@
-// Vendored from can1357/oh-my-pi@68fb9863b377af566d3b56aa882a964654b5760a:crates/pi-builtins/src/mapfile.rs — MIT (c) 2025 Mario Zechner, 2025-2026 Can Bölük, 2026 Stencil Labs, Inc. Modified for gajae-code: yes, retained local array validation and synchronous file descriptor reads.
+// Vendored from can1357/oh-my-pi@68fb9863b377af566d3b56aa882a964654b5760a:crates/pi-builtins/src/mapfile.rs — MIT (c) 2025 Mario Zechner, 2025-2026 Can Bölük, 2026 Stencil Labs, Inc. Modified for gajae-code: yes, retained local array validation and synchronous file descriptor reads, one byte at a time with no read-ahead.
 use std::io::Write;
 
 use brush_core::{ErrorKind, ExecutionExitCode, ExecutionResult, builtins, env, escape, variables};
 use clap::Parser;
 
-use crate::line_input::{CTRL_C, CTRL_D, LineInput, ReadAhead, decode_line};
+use crate::line_input::{CTRL_C, CTRL_D, LineInput, decode_line};
 
 /// Read lines from standard input into an indexed array variable.
 #[derive(Parser)]
@@ -63,7 +63,7 @@ impl builtins::Command for MapFileCommand {
 		if let Some((_, var)) = context.shell.env().get(&self.array_var_name) {
 			// Refused before any input is read, as in bash. Assigning an element
 			// does not check this itself (so -O wrote into a readonly array), and
-			// a failure mid-loop would lose input read ahead of a pipe.
+			// failing at the first element would still consume its line.
 			if var.is_readonly() {
 				return Err(ErrorKind::ReadonlyVariable.into());
 			}
@@ -124,14 +124,10 @@ impl MapFileCommand {
 		};
 
 		let terminal = input_file.is_terminal();
-		// Without -n or -C every byte up to EOF is consumed before anything
-		// else reads the descriptor, so any input is read in blocks. -n may
-		// stop early, and a -C callback may read the descriptor itself or
-		// end the loop; then only a regular file, whose offset is given
-		// back, is (bash's mapfile reads a pipe unbuffered too).
-		let read_ahead =
-			if max_count == 0 && self.callback.is_none() { ReadAhead::ToEof } else { ReadAhead::Seekable };
-		let mut input = LineInput::new(input_file, read_ahead);
+		// Bytes are read one at a time, so a -C callback, a failed assignment
+		// or a later command finds the input right after the last line
+		// stored (bash's mapfile reads a pipe unbuffered too).
+		let mut input = LineInput::new(input_file);
 
 		while max_count == 0 || entry_count < max_count {
 			let mut line = vec![];
@@ -169,7 +165,6 @@ impl MapFileCommand {
 			if let Some(callback) = &self.callback
 				&& (entry_count + 1).is_multiple_of(callback_group_size)
 			{
-				input.give_back();
 				let result = run_callback(callback, array_index, &line_str, context).await?;
 				if !result.is_normal_flow() {
 					return Ok(Some(result));

@@ -3784,9 +3784,8 @@ mod tests {
 
 	/// Contract: `read -n` counts characters as the line decodes them, so
 	/// each invalid sequence, replaced by one U+FFFD, is one character. A lead
-	/// byte is known to be invalid only once the next byte arrives, and a
-	/// pipe cannot take that byte back: when it lies past the limit it stays
-	/// in the variable rather than being lost.
+	/// byte is known to be invalid only once the next byte arrives; when that
+	/// byte lies past the limit it is held for the next read of the input.
 	#[tokio::test(flavor = "multi_thread")]
 	async fn read_count_counts_invalid_bytes_as_they_decode() {
 		let (result, output) = execute_captured(
@@ -3797,14 +3796,14 @@ mod tests {
 		)
 		.await;
 		assert_eq!(result.exit_code, Some(0), "{output:?}");
-		assert_eq!(output, "[\u{FFFD}][A]\n[\u{FFFD}A][B]\n[\u{FFFD}\u{FFFD}][A]\n");
+		assert_eq!(output, "[\u{FFFD}][A]\n[\u{FFFD}A][B]\n[\u{FFFD}][\u{FFFD}A]\n");
 	}
 
-	/// Contract: from a regular file, the byte that showed a lead byte to be
-	/// invalid goes back to the file when it lies past the `-n` limit, so
-	/// the next reader gets it.
+	/// Contract: from a regular file too, the byte that showed a lead byte
+	/// to be invalid is held for the next read when it lies past the `-n`
+	/// limit; nothing seeks.
 	#[tokio::test(flavor = "multi_thread")]
-	async fn read_count_gives_a_file_the_byte_past_the_limit_back() {
+	async fn read_count_holds_a_file_byte_past_the_limit_for_the_next_read() {
 		let dir = tempfile::tempdir().expect("temporary directory");
 		let path = dir.path().join("invalid.txt");
 		std::fs::write(&path, b"\xC3A\n\xE0\x80A\n").expect("write fixture");
@@ -3816,6 +3815,155 @@ mod tests {
 		.await;
 		assert_eq!(result.exit_code, Some(0), "{output:?}");
 		assert_eq!(output, "[\u{FFFD}][A][\u{FFFD}][\u{FFFD}A]\n");
+	}
+
+	/// Contract: a `-n`/`-N` value never holds more characters than its
+	/// limit, also from a pipe: the byte read past the limit is held, and
+	/// the next `read` of the pipe gets it first.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn read_count_holds_the_byte_past_the_limit_for_the_next_read() {
+		let (result, output) = execute_captured(
+			"printf '\\303AB\\n' | { read -r -n 1 x; read -r y; echo \"[$x][$y]\"; }; printf \
+			 '\\303AB\\n' | { read -r -N 1 x; read -r y; echo \"[$x][$y]\"; }; printf \
+			 '\\342\\202A\\n' | { read -r -n 1 x; read -r y; echo \"[$x][$y]\"; }"
+				.to_owned(),
+		)
+		.await;
+		assert_eq!(result.exit_code, Some(0), "{output:?}");
+		assert_eq!(output, "[\u{FFFD}][AB]\n[\u{FFFD}][AB]\n[\u{FFFD}][A]\n");
+	}
+
+	/// Contract: when the byte past the limit was escaped, the backslash
+	/// before it is held too, so the next read sees both input bytes.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn read_count_holds_both_bytes_of_an_escape_past_the_limit() {
+		let (result, output) = execute_captured(
+			"printf '\\303\\134\\134B\\n' | { read -n 1 x; read -r y; printf '[%s][%s]\\n' \"$x\" \
+			 \"$y\"; }"
+				.to_owned(),
+		)
+		.await;
+		assert_eq!(result.exit_code, Some(0), "{output:?}");
+		assert_eq!(output, "[\u{FFFD}][\\\\B]\n");
+	}
+
+	/// Contract: held input belongs to the input it was read from, not to a
+	/// descriptor number: a here-string read in between does not see it,
+	/// and the next read of the pipe does.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn read_held_input_stays_with_its_input_not_the_descriptor_number() {
+		let (result, output) = execute_captured(
+			"printf '\\303A' | { read -r -n 1 x; read -r y <<< Z; read -r w; echo \"[$x][$y][$w]\"; }"
+				.to_owned(),
+		)
+		.await;
+		assert_eq!(result.exit_code, Some(0), "{output:?}");
+		assert_eq!(output, "[\u{FFFD}][Z][A]\n");
+	}
+
+	/// Contract: `mapfile` reads held input first and decodes each line as
+	/// UTF-8, replacing invalid sequences.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn mapfile_reads_held_input_first_and_decodes_utf8() {
+		let (result, output) = execute_captured(
+			"printf '\\303AB\\n\\303\\251\\n\\303A\\n' | { read -r -n 1 x; mapfile -t rest; echo \
+			 \"[$x][${rest[*]}]\"; }"
+				.to_owned(),
+		)
+		.await;
+		assert_eq!(result.exit_code, Some(0), "{output:?}");
+		assert_eq!(output, "[\u{FFFD}][AB é \u{FFFD}A]\n");
+	}
+
+	/// Contract: a subshell shares the held input of the pipe it reads, so
+	/// a held byte is consumed once.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn read_held_input_is_consumed_once_across_a_subshell() {
+		let (result, output) = execute_captured(
+			"printf '\\303AB\\n' | { read -r -n 1 x; ( read -r y; echo \"sub[$y]\" ); read -r z; \
+			 echo \"[$x][$z]\"; }"
+				.to_owned(),
+		)
+		.await;
+		assert_eq!(result.exit_code, Some(0), "{output:?}");
+		assert_eq!(output, "sub[AB]\n[\u{FFFD}][]\n");
+	}
+
+	/// Regression: `mapfile` reads a pipe only up to each delimiter, so when
+	/// assigning a line fails the rest of the pipe stays for the next reader.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn mapfile_assignment_failure_leaves_the_rest_of_a_pipe() {
+		let (_, output) = execute_captured(
+			"printf 'a\\nb\\nc\\n' | { mapfile -O 1 EPOCHSECONDS; echo \"rc=$?\"; cat; }".to_owned(),
+		)
+		.await;
+		assert!(output.contains("not yet implemented"), "{output:?}");
+		assert!(output.ends_with("rc=99\nb\nc\n"), "{output:?}");
+	}
+
+	/// Contract: at end of input, a character left incomplete decodes to one
+	/// U+FFFD and counts toward `-n`/`-N`, so reaching the limit with it is
+	/// success, as in bash; a short value is still end of input.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn read_count_counts_an_incomplete_character_at_eof() {
+		let (result, output) = execute_captured(
+			"printf 'a\\342' | { read -r -N 2 x; echo \"rc=$? [$x]\"; }; printf 'a\\342' | { read -r \
+			 -n 2 x; echo \"rc=$? [$x]\"; }; printf 'a\\342' | { read -r -n 3 x; echo \"rc=$? \
+			 [$x]\"; }; printf '\\342' | { read -r -n 1 x; echo \"rc=$? [$x]\"; }; printf 'ab' | { \
+			 read -r -N 3 x; echo \"rc=$? [$x]\"; }; printf 'a\\342' | { read -r -N 3 x; echo \
+			 \"rc=$? [$x]\"; }; printf 'a\\342' | { read -r x; echo \"rc=$? [$x]\"; }"
+				.to_owned(),
+		)
+		.await;
+		assert_eq!(result.exit_code, Some(0), "{output:?}");
+		assert_eq!(
+			output,
+			"rc=0 [a\u{FFFD}]\nrc=0 [a\u{FFFD}]\nrc=1 [a\u{FFFD}]\nrc=0 [\u{FFFD}]\nrc=1 [ab]\nrc=1 \
+			 [a\u{FFFD}]\nrc=1 [a\u{FFFD}]\n"
+		);
+	}
+
+	/// Contract: `read -t 0` reports input that is ready without reading it.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn read_t_0_reports_ready_input() {
+		let (result, output) = execute_captured("read -t 0 <<< x; echo \"rc=$?\"".to_owned()).await;
+		assert_eq!(result.exit_code, Some(0), "{output:?}");
+		assert_eq!(output, "rc=0\n");
+	}
+
+	/// Contract: a byte held from a regular file is not given back to the
+	/// file, so an external command reading next does not see it (as with
+	/// bash's pushback); the next builtin read does.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn read_count_holds_a_file_byte_that_external_readers_do_not_see() {
+		let dir = tempfile::tempdir().expect("temporary directory");
+		let path = dir.path().join("invalid.txt");
+		std::fs::write(&path, b"\xC3AB\n").expect("write fixture");
+		let path = path.to_string_lossy().replace('\\', "/");
+		let (result, output) = execute_captured(format!(
+			"{{ read -r -n 1 x; cat; read -r y; printf '[%s][%s]\\n' \"$x\" \"$y\"; }} < '{path}'"
+		))
+		.await;
+		assert_eq!(result.exit_code, Some(0), "{output:?}");
+		assert_eq!(output, "B\n[\u{FFFD}][A]\n");
+	}
+
+	/// Contract: held input belongs to one open of a file; opening the same
+	/// file again starts from its beginning and does not take it.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn read_from_a_reopened_file_does_not_see_held_input() {
+		let dir = tempfile::tempdir().expect("temporary directory");
+		let path = dir.path().join("invalid.txt");
+		std::fs::write(&path, b"\xC3AB\n").expect("write fixture");
+		let path = path.to_string_lossy().replace('\\', "/");
+		let (result, output) = execute_captured(format!(
+			"{{ read -r -n 1 x; read -r y < '{path}'; read -r z; printf '[%s][%s][%s]\\n' \"$x\" \
+			 \"$y\" \"$z\"; }} < '{path}'"
+		))
+		.await;
+		assert_eq!(result.exit_code, Some(0), "{output:?}");
+		assert_eq!(output, "[\u{FFFD}][\u{FFFD}AB][AB]\n");
 	}
 
 	/// Contract: `mapfile -n` from a file consumes exactly the lines it
@@ -3849,8 +3997,8 @@ mod tests {
 		assert_eq!(output, "cb:0:1:2\ncb:1:3:4\narr=1 3\n");
 	}
 
-	/// Contract: the same holds for a regular file, whose read-ahead mapfile
-	/// gives back to the shared offset before each callback.
+	/// Contract: the same holds for a regular file: mapfile reads only up to
+	/// each delimiter.
 	#[tokio::test(flavor = "multi_thread")]
 	async fn mapfile_callback_reads_the_next_line_of_a_file() {
 		let dir = tempfile::tempdir().expect("temporary directory");

@@ -1,4 +1,4 @@
-// Vendored from can1357/oh-my-pi@68fb9863b377af566d3b56aa882a964654b5760a:crates/pi-builtins/src/read.rs — MIT (c) 2025 Mario Zechner, 2025-2026 Can Bölük, 2026 Stencil Labs, Inc. Modified for gajae-code: yes, preserves cancellation, timeout, and readiness guards; polls a stream before every byte; counts -n/-N characters as the line decodes and gives a regular file the byte read past the limit back.
+// Vendored from can1357/oh-my-pi@68fb9863b377af566d3b56aa882a964654b5760a:crates/pi-builtins/src/read.rs — MIT (c) 2025 Mario Zechner, 2025-2026 Can Bölük, 2026 Stencil Labs, Inc. Modified for gajae-code: yes, preserves cancellation, timeout, and readiness guards; reads one byte at a time with no read-ahead, taking held input before polling a stream for every other byte; counts -n/-N characters as the line decodes, counting an incomplete character at EOF, and holds the input read past the limit with the open file description for the next read.
 use std::{
 	collections::VecDeque,
 	io::Write,
@@ -9,7 +9,7 @@ use brush_core::{ErrorKind, builtins, env, error, openfiles::OpenFile, variables
 use clap::Parser;
 use itertools::Itertools;
 
-use crate::line_input::{CTRL_C, CTRL_D, LineInput, ReadAhead, decode_line};
+use crate::line_input::{CTRL_C, CTRL_D, LineInput, decode_line};
 
 /// Exit code returned when `read` times out.
 /// This is 128 + SIGALRM (14) = 142, matching bash behavior.
@@ -297,8 +297,8 @@ enum ReadResult {
 /// This separates the concerns of byte-level I/O with timeout handling
 /// from the higher-level logic of line building and escape processing.
 struct InputReader {
-	/// The input source: a regular file is read ahead, and what lies past
-	/// the line is given back when `read` returns.
+	/// The input source, read one byte at a time; input read past a
+	/// `-n`/`-N` limit is held for the next read.
 	source:     LineInput,
 	/// Optional deadline for timeout.
 	deadline:   Option<Instant>,
@@ -347,17 +347,20 @@ impl InputReader {
 	) -> Self {
 		let terminal = input.is_terminal();
 		Self {
-			source: LineInput::new(input, ReadAhead::Seekable),
+			source: LineInput::new(input),
 			deadline: timeout.map(|t| Instant::now() + t),
 			terminal,
 			_term_mode: term_mode,
 		}
 	}
 
-	/// Checks if input is immediately available (for `-t 0`). Returns `false` if
-	/// an error occurs while checking for available input.
+	/// Checks if input is immediately available (for `-t 0`), held input
+	/// included, without consuming it. Returns `false` if an error occurs
+	/// while checking for available input.
 	fn check_input_available(&self) -> bool {
-		brush_core::sys::poll::poll_for_input(self.source.input(), Duration::ZERO).unwrap_or(false)
+		self.source.has_held()
+			|| brush_core::sys::poll::poll_for_input(self.source.input(), Duration::ZERO)
+				.unwrap_or(false)
 	}
 
 	#[cfg(unix)]
@@ -418,13 +421,12 @@ impl InputReader {
 	}
 
 	/// The text of a `-n`/`-N` read whose limit fell before the last byte of
-	/// `line`, which took `input_len` bytes of input. A regular file takes
-	/// those bytes back for the next reader. A pipe or terminal cannot, so
-	/// the byte stays in the line rather than being lost.
-	fn line_before_last_byte(&mut self, mut line: Vec<u8>, input_len: usize) -> String {
-		if self.source.unread(input_len) {
-			line.pop();
-		}
+	/// `line`. The `input` that byte took (with the backslash that escaped
+	/// it) is held for the next read of the open file description, so the
+	/// value never exceeds the limit and no input is lost.
+	fn line_before_last_byte(&self, mut line: Vec<u8>, input: &[u8]) -> String {
+		line.pop();
+		self.source.unread(input);
 		decode_line(line)
 	}
 
@@ -433,18 +435,23 @@ impl InputReader {
 	where
 		F: Fn() -> bool,
 	{
-		// A stream is polled before every byte. A count of bytes ready, taken
-		// once and trusted for later bytes, goes stale when another reader of
-		// a shared pipe drains it; the read would then block where neither
-		// `-t` nor cancellation is checked.
-		if !self.source.reads_ahead()
-			&& let Some(event) = self.wait_for_input(is_cancelled)?
-		{
-			return Ok(event);
-		}
 		ensure_not_cancelled(is_cancelled)?;
-		let Some(byte) = self.source.next_byte()? else {
-			return Ok(InputEvent::Eof);
+		// Held input is taken by one atomic pop and never waits. Any other byte
+		// is polled first: a ready count goes stale when another reader of a
+		// shared pipe drains it, and the read would then block where neither
+		// `-t` nor cancellation is checked. Never test for held input and then
+		// read.
+		let byte = if let Some(byte) = self.source.take_held() {
+			byte
+		} else {
+			if let Some(event) = self.wait_for_input(is_cancelled)? {
+				return Ok(event);
+			}
+			ensure_not_cancelled(is_cancelled)?;
+			let Some(byte) = self.source.read_byte()? else {
+				return Ok(InputEvent::Eof);
+			};
+			byte
 		};
 
 		// Control keys only mean something on a terminal; in a file or pipe
@@ -508,6 +515,17 @@ impl CharCount {
 		Limit::NotReached
 	}
 
+	/// At EOF the pending start of a character decodes to one U+FFFD, so it
+	/// counts as one character. Returns whether that reached `limit`.
+	fn finish(&mut self, limit: Option<usize>) -> bool {
+		if self.len == 0 {
+			return false;
+		}
+		self.len = 0;
+		self.chars += 1;
+		limit.is_some_and(|limit| self.chars >= limit)
+	}
+
 	/// The length of the first pending character once it is known: a
 	/// complete character, or an invalid sequence that decodes to one
 	/// U+FFFD. `None` while the pending bytes can still become a character.
@@ -546,6 +564,11 @@ where
 
 		match event {
 			InputEvent::Eof => {
+				// An incomplete character that reaches the limit completes the
+				// read, as in bash.
+				if count.finish(config.char_limit) {
+					return Ok(ReadResult::Line(decode_line(line)));
+				}
 				// Bash discards pending backslash on EOF.
 				return Ok(ReadResult::Eof((!line.is_empty()).then(|| decode_line(line))));
 			},
@@ -591,7 +614,9 @@ where
 							Limit::NotReached => continue,
 							Limit::Reached => return Ok(ReadResult::Line(decode_line(line))),
 							// The backslash before the byte lies past the limit too.
-							Limit::Passed => return Ok(ReadResult::Line(reader.line_before_last_byte(line, 2))),
+							Limit::Passed => {
+								return Ok(ReadResult::Line(reader.line_before_last_byte(line, &[BACKSLASH, byte])));
+							},
 						}
 					}
 
@@ -617,7 +642,7 @@ where
 				match count.push(byte, config.char_limit) {
 					Limit::NotReached => {},
 					Limit::Reached => return Ok(ReadResult::Line(decode_line(line))),
-					Limit::Passed => return Ok(ReadResult::Line(reader.line_before_last_byte(line, 1))),
+					Limit::Passed => return Ok(ReadResult::Line(reader.line_before_last_byte(line, &[byte]))),
 				}
 			},
 		}
@@ -1067,16 +1092,134 @@ mod tests {
 		let (reader, mut writer) = std::io::pipe()?;
 		let other = reader.try_clone()?;
 		writer.write_all(b"ab")?;
-		let input_file = brush_core::openfiles::OpenFile::Stream(Box::new(DrainedAfterFirstByte {
-			reader,
-			other,
-			drained: false,
-		}));
+		let input_file = brush_core::openfiles::OpenFile::Stream(
+			Box::new(DrainedAfterFirstByte { reader, other, drained: false }),
+			brush_core::openfiles::HeldInput::default(),
+		);
 
 		let result =
 			command.read_line(input_file, Vec::<u8>::new(), Some(Duration::from_millis(200)), || false)?;
 		assert!(matches!(result, ReadResult::TimedOut(Some(ref line)) if line == "a"));
 		drop(writer);
+		Ok(())
+	}
+
+	/// Contract: a `-n`/`-N` read of a pipe holds the byte read past its
+	/// limit, and the next read of the same pipe gets it first.
+	#[cfg(unix)]
+	#[test]
+	#[expect(clippy::panic_in_result_fn)]
+	fn test_read_line_count_holds_the_byte_past_the_limit() -> anyhow::Result<()> {
+		use std::io::Write;
+
+		let (reader, mut writer) = std::io::pipe()?;
+		writer.write_all(b"\xC3AB\n\xC3AB\n")?;
+		drop(writer);
+		let pipe = OpenFile::from(reader);
+		let plain = ReadCommand { raw_mode: true, ..test_command() };
+		let count = ReadCommand { raw_mode: true, return_after_n_chars: Some(1), ..test_command() };
+		let exact =
+			ReadCommand { raw_mode: true, return_after_n_chars_no_delimiter: Some(1), ..test_command() };
+
+		for limited in [count, exact] {
+			let result = limited.read_line(pipe.try_clone()?, Vec::<u8>::new(), None, || false)?;
+			assert!(matches!(result, ReadResult::Line(ref line) if line == "\u{FFFD}"));
+			let result = plain.read_line(pipe.try_clone()?, Vec::<u8>::new(), None, || false)?;
+			assert!(matches!(result, ReadResult::Line(ref line) if line == "AB"));
+		}
+		Ok(())
+	}
+
+	/// Contract: `-t 0` reports held input as ready without taking it.
+	#[cfg(unix)]
+	#[test]
+	#[expect(clippy::panic_in_result_fn)]
+	fn test_read_line_t_0_reports_held_input_ready() -> anyhow::Result<()> {
+		let command = test_command();
+		let (reader, _writer) = std::io::pipe()?;
+		let pipe = OpenFile::from(reader);
+		let held = pipe.held_input().expect("a pipe holds input").clone();
+
+		let result = command.read_line(pipe.try_clone()?, Vec::<u8>::new(), Some(Duration::ZERO), || false)?;
+		assert!(matches!(result, ReadResult::InputNotReady));
+		held.put_back(b"A");
+		let result = command.read_line(pipe, Vec::<u8>::new(), Some(Duration::ZERO), || false)?;
+		assert!(matches!(result, ReadResult::InputReady));
+		assert_eq!(held.pop(), Some(b'A'));
+		Ok(())
+	}
+
+	/// Contract: a read cancelled before it takes a byte leaves held input
+	/// in place.
+	#[cfg(unix)]
+	#[test]
+	#[expect(clippy::panic_in_result_fn)]
+	fn test_read_line_cancelled_leaves_held_input() -> anyhow::Result<()> {
+		let command = test_command();
+		let (reader, _writer) = std::io::pipe()?;
+		let pipe = OpenFile::from(reader);
+		let held = pipe.held_input().expect("a pipe holds input").clone();
+		held.put_back(b"A");
+
+		let err = command
+			.read_line(pipe, Vec::<u8>::new(), None, || true)
+			.expect_err("cancelled state must interrupt read builtin");
+		assert_eq!(err.to_string(), "interrupted");
+		assert_eq!(held.pop(), Some(b'A'));
+		Ok(())
+	}
+
+	/// Contract: held input is served without waiting on the descriptor;
+	/// the deadline applies once it runs out.
+	#[cfg(unix)]
+	#[test]
+	#[expect(clippy::panic_in_result_fn)]
+	fn test_read_line_serves_held_input_before_waiting() -> anyhow::Result<()> {
+		let command = test_command();
+		let (reader, _writer) = std::io::pipe()?;
+		let pipe = OpenFile::from(reader);
+		pipe.held_input().expect("a pipe holds input").put_back(b"A");
+
+		let result =
+			command.read_line(pipe, Vec::<u8>::new(), Some(Duration::from_millis(100)), || false)?;
+		assert!(matches!(result, ReadResult::TimedOut(Some(ref line)) if line == "A"));
+		Ok(())
+	}
+
+	/// Regression: when another reader of the description takes the held
+	/// byte between this read's checks, the read must poll before reading,
+	/// so it times out instead of blocking while the writer stays open.
+	#[cfg(unix)]
+	#[test]
+	#[expect(clippy::panic_in_result_fn)]
+	fn test_read_line_times_out_when_another_reader_drains_held_input() -> anyhow::Result<()> {
+		let (reader, writer) = std::io::pipe()?;
+		let a = OpenFile::from(reader);
+		a.held_input().expect("a pipe holds input").put_back(b"A");
+		let b = a.try_clone()?;
+		let drain = b.held_input().expect("a pipe holds input").clone();
+
+		let (sender, receiver) = std::sync::mpsc::channel();
+		let thread = std::thread::spawn(move || {
+			// The cancellation check runs right before the pop, so the other
+			// reader drains the byte exactly there.
+			let result = test_command().read_line(
+				a,
+				Vec::<u8>::new(),
+				Some(Duration::from_millis(200)),
+				move || {
+					drain.pop();
+					false
+				},
+			);
+			let _ = sender.send(matches!(result, Ok(ReadResult::TimedOut(None))));
+		});
+
+		let outcome = receiver.recv_timeout(Duration::from_secs(5));
+		drop(writer);
+		let _ = thread.join();
+		assert_eq!(outcome, Ok(true), "read must time out, not block or take the drained byte");
+		assert!(b.held_input().expect("a pipe holds input").is_empty());
 		Ok(())
 	}
 }
