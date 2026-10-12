@@ -45,10 +45,29 @@ export interface ToolIssueEntry {
 }
 
 const dbHandles = new Map<string, Database>();
+/** One in-flight initialization per path, so concurrent first reports share a single connection. */
+const dbOpens = new Map<string, Promise<Database>>();
 
-async function openToolIssueDb(dbPath: string): Promise<Database> {
-	const existing = dbHandles.get(dbPath);
-	if (existing) return existing;
+function openToolIssueDb(dbPath: string): Promise<Database> {
+	const pending = dbOpens.get(dbPath);
+	if (pending) return pending;
+	const opening = createToolIssueDb(dbPath).then(db => {
+		if (dbOpens.get(dbPath) !== opening) {
+			// closeToolIssueDbs() ran while this open was in flight; do not leak the handle.
+			db.close();
+			throw new Error("tool-issue database was closed during initialization");
+		}
+		dbHandles.set(dbPath, db);
+		return db;
+	});
+	dbOpens.set(dbPath, opening);
+	opening.catch(() => {
+		if (dbOpens.get(dbPath) === opening) dbOpens.delete(dbPath);
+	});
+	return opening;
+}
+
+async function createToolIssueDb(dbPath: string): Promise<Database> {
 	// Only a directory created here gets 0700; an existing shared config/data root keeps its mode.
 	await fs.mkdir(path.dirname(dbPath), { recursive: true, mode: 0o700 });
 	// Create (or tighten) the database file before SQLite opens it. SQLite's unix VFS creates the
@@ -79,7 +98,6 @@ async function openToolIssueDb(dbPath: string): Promise<Database> {
 		db.close();
 		throw error;
 	}
-	dbHandles.set(dbPath, db);
 	return db;
 }
 
@@ -87,6 +105,7 @@ async function openToolIssueDb(dbPath: string): Promise<Database> {
 export function closeToolIssueDbs(): void {
 	for (const db of dbHandles.values()) db.close();
 	dbHandles.clear();
+	dbOpens.clear();
 }
 
 function truncateUtf8(text: string, maxBytes: number): string {
@@ -136,13 +155,13 @@ export function normalizeToolIssue(tool: string, report: string): { tool: string
 /** Append one report to the tool-issue database at `dbPath`. */
 export async function recordToolIssue(dbPath: string, entry: ToolIssueEntry): Promise<void> {
 	const db = await openToolIssueDb(dbPath);
-	db.prepare("INSERT INTO tool_issues (tool, report, model, gjc_version, session_id) VALUES (?, ?, ?, ?, ?)").run(
+	db.run("INSERT INTO tool_issues (tool, report, model, gjc_version, session_id) VALUES (?, ?, ?, ?, ?)", [
 		entry.tool,
 		entry.report,
 		entry.model,
 		VERSION,
 		entry.sessionId,
-	);
+	]);
 }
 
 export class ReportIssueTool implements AgentTool<typeof reportIssueSchema, ReportIssueToolDetails> {

@@ -5,7 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { VERSION } from "@gajae-code/utils";
 import { BUILTIN_TOOL_DESCRIPTORS, type ToolSession } from "../../src/tools";
-import { closeToolIssueDbs, normalizeToolIssue, ReportIssueTool } from "../../src/tools/report-issue";
+import { closeToolIssueDbs, normalizeToolIssue, ReportIssueTool, recordToolIssue } from "../../src/tools/report-issue";
 import { TOOL_CATALOG } from "../../src/tools/tool-catalog.generated";
 import { ToolError } from "../../src/tools/tool-errors";
 
@@ -33,7 +33,7 @@ function readIssues(dbPath: string): StoredIssue[] {
 	const db = new Database(dbPath, { readonly: true });
 	try {
 		return db
-			.prepare("SELECT tool, report, model, gjc_version, session_id, created_at FROM tool_issues ORDER BY id")
+			.query("SELECT tool, report, model, gjc_version, session_id, created_at FROM tool_issues ORDER BY id")
 			.all() as StoredIssue[];
 	} finally {
 		db.close();
@@ -141,6 +141,21 @@ describe("report_issue tool", () => {
 		// Verify that closeToolIssueDbs can be called without crashing
 		// This ensures handles were properly managed
 		expect(() => closeToolIssueDbs()).not.toThrow();
+	});
+
+	test("concurrent first reports share one connection that closeToolIssueDbs releases", async () => {
+		const entry = { tool: "read", report: "r", model: null, sessionId: null };
+		await Promise.all([recordToolIssue(dbPath, entry), recordToolIssue(dbPath, entry)]);
+		closeToolIssueDbs();
+
+		expect(readIssues(dbPath)).toHaveLength(2);
+		// Leaving WAL mode needs exclusive access; an orphaned connection keeps the database locked.
+		const db = new Database(dbPath);
+		try {
+			expect(db.query("PRAGMA journal_mode=DELETE").get()).toEqual({ journal_mode: "delete" });
+		} finally {
+			db.close();
+		}
 	});
 });
 
