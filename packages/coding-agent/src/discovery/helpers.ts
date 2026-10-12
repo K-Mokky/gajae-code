@@ -991,6 +991,21 @@ export async function scanSkillsFromDir(
 	return { items, warnings };
 }
 
+/**
+ * Compare a bigint-stat identity with one captured by a plain `fs.stat`.
+ *
+ * A plain stat reports `dev`/`ino` as doubles, so 64-bit values above 2^53
+ * (common NTFS file IDs) are already rounded. Widening that rounded double to
+ * a bigint can never equal the exact value; narrowing the exact value with the
+ * same IEEE rounding reproduces what the plain stat reported.
+ */
+export function bigintIdentityMatchesNumeric(
+	actual: { readonly dev: bigint; readonly ino: bigint },
+	expected: FileIdentity,
+): boolean {
+	return Number(actual.dev) === expected.dev && Number(actual.ino) === expected.ino;
+}
+
 /** Read a regular file that remains contained by its configured root. */
 export async function readContainedFile(
 	root: string,
@@ -1003,11 +1018,7 @@ export async function readContainedFile(
 		const capturedRoot = await captureDirectoryIdentity(root, true);
 		if (!capturedRoot) return null;
 		rootIdentity = capturedRoot;
-		if (
-			expectedRootIdentity !== undefined &&
-			(rootIdentity.dev !== BigInt(expectedRootIdentity.dev) ||
-				rootIdentity.ino !== BigInt(expectedRootIdentity.ino))
-		)
+		if (expectedRootIdentity !== undefined && !bigintIdentityMatchesNumeric(rootIdentity, expectedRootIdentity))
 			return null;
 		await SkillDiscoveryTestHooks.afterContainedRootValidated?.(root);
 		if (!(await directoryIdentityIsCurrent(root, rootIdentity, true))) return null;
