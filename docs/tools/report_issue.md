@@ -38,11 +38,15 @@ Table `tool_issues`:
 The file is created with mode `0600` inside a `0700` directory. Nothing is uploaded; reports leave the machine only if you share the file.
 
 ## Reading reports
-Use the read tool or CLI SQLite support:
+Use the read tool or CLI SQLite support. If `gjc config init-xdg` has been run, the database is stored in `$XDG_DATA_HOME/gjc/tool-issues.db` (typically `~/.local/share/gjc/tool-issues.db` on Linux); otherwise it is at `~/.gjc/tool-issues.db`.
 
 ```sh
+# Standard installation (no XDG)
 gjc read '~/.gjc/tool-issues.db:tool_issues?order=created_at:desc&limit=50'
 gjc read '~/.gjc/tool-issues.db?q=SELECT tool, count(*) AS n FROM tool_issues GROUP BY tool ORDER BY n DESC'
+
+# XDG installation
+gjc read '$XDG_DATA_HOME/gjc/tool-issues.db:tool_issues?order=created_at:desc&limit=50'
 ```
 
 Delete the file to clear all reports.

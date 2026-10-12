@@ -49,7 +49,12 @@ const dbHandles = new Map<string, Database>();
 function openToolIssueDb(dbPath: string): Database {
 	const existing = dbHandles.get(dbPath);
 	if (existing) return existing;
-	fs.mkdirSync(path.dirname(dbPath), { recursive: true, mode: 0o700 });
+	const dir = path.dirname(dbPath);
+	fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+	// Enforce private permissions on existing parent directory
+	if (process.platform !== "win32") {
+		fs.chmodSync(dir, 0o700);
+	}
 	const db = new Database(dbPath);
 	try {
 		db.run(`
@@ -66,7 +71,18 @@ function openToolIssueDb(dbPath: string): Database {
 			);
 			CREATE INDEX IF NOT EXISTS idx_tool_issues_tool_created ON tool_issues(tool, created_at);
 		`);
-		fs.chmodSync(dbPath, 0o600);
+		// Protect the main database file and sidecars with private permissions
+		if (process.platform !== "win32") {
+			fs.chmodSync(dbPath, 0o600);
+			// SQLite creates WAL and SHM sidecars; protect them too
+			const walPath = `${dbPath}-wal`;
+			const shmPath = `${dbPath}-shm`;
+			if (fs.existsSync(walPath)) fs.chmodSync(walPath, 0o600);
+			if (fs.existsSync(shmPath)) fs.chmodSync(shmPath, 0o600);
+		} else {
+			// On Windows, use the basic chmod for the main file
+			fs.chmodSync(dbPath, 0o600);
+		}
 	} catch (error) {
 		db.close();
 		throw error;
@@ -91,12 +107,33 @@ function truncateUtf8(text: string, maxBytes: number): string {
 		.replace(/\uFFFD+$/u, "");
 }
 
+/**
+ * Truncate text by complete Unicode code points, avoiding incomplete surrogate pairs.
+ * JavaScript strings use UTF-16 encoding, where astral characters use two code units
+ * (high surrogate + low surrogate). Slicing at an arbitrary position can split a pair.
+ */
+function truncateByCodePoint(text: string, maxChars: number): string {
+	if (text.length <= maxChars) return text;
+	let result = text.slice(0, maxChars);
+	// Check if we cut in the middle of a surrogate pair:
+	// If the last character is a high surrogate (U+D800-U+DBFF),
+	// it needs its low surrogate pair which we've discarded.
+	const lastCode = result.charCodeAt(result.length - 1);
+	if (lastCode >= 0xd800 && lastCode <= 0xdbff) {
+		// Remove the orphaned high surrogate
+		result = result.slice(0, -1);
+	}
+	return result;
+}
+
 /** Normalize and clamp a report to the stored field limits. */
 export function normalizeToolIssue(tool: string, report: string): { tool: string; report: string } {
 	const normalizedTool = truncateUtf8(tool.trim(), MAX_TOOL_BYTES);
 	const trimmedReport = report.trim();
 	const normalizedReport =
-		trimmedReport.length > MAX_REPORT_CHARS ? `${trimmedReport.slice(0, MAX_REPORT_CHARS - 1)}…` : trimmedReport;
+		trimmedReport.length > MAX_REPORT_CHARS
+			? `${truncateByCodePoint(trimmedReport, MAX_REPORT_CHARS - 1)}…`
+			: trimmedReport;
 	return { tool: normalizedTool, report: normalizedReport };
 }
 

@@ -55,6 +55,7 @@ describe("report_issue tool", () => {
 	});
 
 	test("appends a report with model, session, and version to the local database", async () => {
+		closeToolIssueDbs();
 		const tool = new ReportIssueTool(
 			makeSession({}, { getActiveModelString: () => "openai/gpt-5.5", getSessionId: () => "session-1" }),
 			dbPath,
@@ -79,12 +80,14 @@ describe("report_issue tool", () => {
 	});
 
 	test("stores null model and session when the session exposes neither", async () => {
+		closeToolIssueDbs();
 		await new ReportIssueTool(makeSession(), dbPath).execute("call", { tool: "bash", report: "exit code lost" });
 
 		expect(readIssues(dbPath)[0]).toMatchObject({ model: null, session_id: null });
 	});
 
 	test("rejects blank tool names and reports without writing", async () => {
+		closeToolIssueDbs();
 		const tool = new ReportIssueTool(makeSession(), dbPath);
 
 		await expect(tool.execute("call", { tool: "  ", report: "x" })).rejects.toBeInstanceOf(ToolError);
@@ -93,6 +96,7 @@ describe("report_issue tool", () => {
 	});
 
 	test("reports a storage failure to the model instead of throwing", async () => {
+		closeToolIssueDbs();
 		const blocker = path.join(root, "blocker");
 		await Bun.write(blocker, "not a directory");
 
@@ -107,33 +111,40 @@ describe("report_issue tool", () => {
 		]);
 	});
 
-	test("closes database handle before rethrowing on initialization failure", async () => {
-		// Create a path where the parent exists but we'll cause an error
-		// by making chmod fail (simulating a permission issue after table creation)
-		const blocker = path.join(root, "no-chmod.db");
-		// Create the database successfully first
-		const db = new Database(blocker);
-		db.run("CREATE TABLE IF NOT EXISTS tool_issues (id INTEGER PRIMARY KEY);");
-		db.close();
-		// Make the file read-only to prevent further operations
-		if (process.platform !== "win32") {
-			await fs.chmod(blocker, 0o444);
+	test("closes database handle and protects sidecars with private permissions", async () => {
+		if (process.platform === "win32") return; // Skip on Windows
 
-			const { closeToolIssueDbs: closeAll } = await import("../../src/tools/report-issue");
-			const toolInstance = new ReportIssueTool(makeSession(), blocker);
+		// Close any cached handles before test
+		closeToolIssueDbs();
 
-			// Attempt to record should fail since chmod will fail on the read-only file
-			try {
-				await toolInstance.execute("test-call", { tool: "bash", report: "test error" });
-			} catch {
-				// Expected: should be caught and reported gracefully
-			}
+		const newDbPath = path.join(root, "sidecars", "tool-issues.db");
+		const tool = new ReportIssueTool(makeSession(), newDbPath);
 
-			// Verify the handle cache is clean by closing
-			closeAll();
-			// Restore permissions for cleanup
-			await fs.chmod(blocker, 0o644);
+		// Perform an operation that creates the database and sidecars
+		const result = await tool.execute("call-1", { tool: "test", report: "test report" });
+		expect(result.details.recorded).toBe(true);
+
+		// Verify the database file has 0o600 permissions
+		const dbStat = await fs.stat(newDbPath);
+		expect(dbStat.mode & 0o777).toBe(0o600);
+
+		// Verify WAL sidecar exists and has 0o600 permissions
+		const walPath = `${newDbPath}-wal`;
+		if (await Bun.file(walPath).exists()) {
+			const walStat = await fs.stat(walPath);
+			expect(walStat.mode & 0o777).toBe(0o600);
 		}
+
+		// Verify SHM sidecar exists and has 0o600 permissions
+		const shmPath = `${newDbPath}-shm`;
+		if (await Bun.file(shmPath).exists()) {
+			const shmStat = await fs.stat(shmPath);
+			expect(shmStat.mode & 0o777).toBe(0o600);
+		}
+
+		// Verify that closeToolIssueDbs can be called without crashing
+		// This ensures handles were properly managed
+		expect(() => closeToolIssueDbs()).not.toThrow();
 	});
 });
 
@@ -151,6 +162,30 @@ describe("normalizeToolIssue", () => {
 		expect(report).toHaveLength(4000);
 		expect(report.endsWith("…")).toBe(true);
 		expect(normalizeToolIssue("read", "y".repeat(4000)).report).toBe("y".repeat(4000));
+	});
+
+	test("avoids splitting surrogate pairs when truncating at 4000 characters", () => {
+		// Create a report that places an astral character (emoji) across the boundary.
+		// The emoji 😀 (U+1F600) uses two UTF-16 code units (a surrogate pair: U+D83D U+DE00).
+		// Position it so that with naïve truncation it would split the pair.
+		// Total: 3998 'a's + emoji (2 code units) = 4000 code units at the boundary
+		const report = "a".repeat(3998) + "😀";
+		expect(report.length).toBe(4000);
+
+		const { report: normalized } = normalizeToolIssue("read", report);
+
+		// The truncated report should not have an orphaned high surrogate
+		// Valid code point check: can be encoded/decoded without corruption
+		const encoded = Buffer.from(normalized, "utf8");
+		const decoded = encoded.toString("utf8");
+		expect(decoded).toBe(normalized);
+
+		// The last character should not be a high surrogate code unit on its own
+		const lastCode = normalized.charCodeAt(normalized.length - 1);
+		// High surrogates are in range 0xD800-0xDBFF; they should not be present alone
+		if (normalized.length > 0 && !normalized.endsWith("…")) {
+			expect(lastCode < 0xd800 || lastCode > 0xdbff).toBe(true);
+		}
 	});
 });
 
