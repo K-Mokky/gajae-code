@@ -1387,6 +1387,9 @@ async function retireUnusableBroker(
 					`SDK broker ${stale.pid} shutdown and identity-bound cleanup both failed.`,
 				);
 			}
+		} else {
+			await waitForBrokerDiscoveryOwnerGone(settings.agentDir, stale, deadline);
+			return;
 		}
 	}
 	await waitForBrokerIdentityGone(stale, deadline);

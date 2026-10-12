@@ -524,8 +524,15 @@ it("spends the parent discovery budget one composition leg at a time", async () 
 		startedAt: clock.timing.now(),
 		heartbeatAt: clock.timing.now(),
 	};
-	// Mock observeProcessIncarnation to always return absent so the process "dies" after retirement budget expires
-	const readSpy = spyOn(brokerDiscovery, "readBrokerDiscovery").mockImplementation(() => Promise.resolve(unretirable));
+	// Model discovery-owner retirement transition: return unretirable for a while,
+	// then null when retirement is about to complete, to show the discovery owner has retired.
+	const retirementDeadline = clock.timing.now() + BROKER_DISCOVERY_BUDGET.staleRetirementMs;
+	const readSpy = spyOn(brokerDiscovery, "readBrokerDiscovery").mockImplementation(() => {
+		// Keep returning unretirable while inside retirement window.
+		// Once enough time has passed, return null to complete retirement.
+		const now = clock.timing.now();
+		return Promise.resolve(now < retirementDeadline ? unretirable : null);
+	});
 	setEnsureBrokerTimingForTest(clock.timing);
 	try {
 		const budgetStart = clock.timing.now();
