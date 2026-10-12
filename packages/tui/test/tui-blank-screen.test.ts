@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { describe, expect, it } from "bun:test";
 import { type Component, TUI } from "@gajae-code/tui";
 import { VirtualTerminal } from "./virtual-terminal";
 
@@ -37,10 +37,19 @@ describe("TUI frame state consistency (issue #6501)", () => {
 
 			// Stop and restart (simulates suspend+restart or editor mode transitions)
 			tui.stop();
-			await new Promise(resolve => setTimeout(resolve, 10));
+			await Bun.sleep(10);
+
+			// Clear the terminal and log to verify content is actually re-painted after start()
+			term.clear();
+			term.clearWriteLog();
 
 			tui.start();
 			await term.waitForRender();
+
+			// Verify that content was actually written to the terminal after restart
+			// (this catches the bug where #hardwareCursorRow was stale, preventing repaints)
+			const writeLog = term.getWriteLog();
+			expect(writeLog.length).toBeGreaterThan(0);
 
 			// Verify content is still visible (not blank)
 			viewport = term.getViewport().map(line => line.trimEnd());
@@ -61,15 +70,22 @@ describe("TUI frame state consistency (issue #6501)", () => {
 
 		try {
 			for (let i = 0; i < 3; i++) {
+				term.clear();
+				term.clearWriteLog();
+
 				tui.start();
 				await term.waitForRender();
 
-				const viewport = term.getViewport().map(line => line.trimEnd());
 				// Verify content is visible on each cycle
+				const viewport = term.getViewport().map(line => line.trimEnd());
 				expect(viewport.some(line => line.includes("content"))).toBe(true);
 
+				// Verify that content was actually written to the terminal
+				const writeLog = term.getWriteLog();
+				expect(writeLog.length).toBeGreaterThan(0);
+
 				tui.stop();
-				await new Promise(resolve => setTimeout(resolve, 10));
+				await Bun.sleep(10);
 			}
 		} finally {
 			tui.stop();
@@ -92,11 +108,19 @@ describe("TUI frame state consistency (issue #6501)", () => {
 			expect(viewport[1]).toBe("second");
 
 			tui.stop();
-			await new Promise(resolve => setTimeout(resolve, 10));
+			await Bun.sleep(10);
+
+			// Clear the terminal and log to verify content is actually re-painted after start()
+			term.clear();
+			term.clearWriteLog();
 
 			// Restart and render - content must be displayed correctly from the beginning
 			tui.start();
 			await term.waitForRender();
+
+			// Verify that content was actually written to the terminal after restart
+			const writeLog = term.getWriteLog();
+			expect(writeLog.length).toBeGreaterThan(0);
 
 			viewport = term.getViewport().map(line => line.trimEnd());
 			// Critical check: viewport must start with the first line, not skip content
