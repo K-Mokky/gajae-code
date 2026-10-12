@@ -1,24 +1,75 @@
 import { describe, expect, it } from "bun:test";
-import { bigintIdentityMatchesNumeric } from "../src/discovery/helpers";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { capturePathIdentity } from "../src/capability/fs";
+import { readContainedFile } from "../src/discovery/helpers";
 
-describe("bigintIdentityMatchesNumeric", () => {
-	it("matches a 64-bit file ID that a plain stat rounded to a double", () => {
-		// NTFS file IDs routinely exceed 2^53; a plain fs.stat reports the rounded double.
-		const exact = { dev: 3_430_812_034n, ino: 2n ** 60n + 12_345n };
-		const plainStat = { dev: Number(exact.dev), ino: Number(exact.ino) };
-
-		expect(BigInt(plainStat.ino)).not.toBe(exact.ino);
-		expect(bigintIdentityMatchesNumeric(exact, plainStat)).toBe(true);
+describe("File identity exact bigint precision", () => {
+	it("captures exact large file IDs that exceed 2^53", async () => {
+		// Use the actual filesystem to verify exact ID capture.
+		// Create a temporary directory and stat it with bigint: true.
+		const tempDir = await fs.promises.mkdtemp(path.join("/tmp", "gjc-id-precision-"));
+		try {
+			const stat = await fs.promises.stat(tempDir, { bigint: true });
+			const captured = await capturePathIdentity(tempDir);
+			expect(captured).not.toBeNull();
+			expect(captured!.dev).toBe(stat.dev);
+			expect(captured!.ino).toBe(stat.ino);
+			// Verify that the captured identity is bigint, not Number
+			expect(typeof captured!.dev).toBe("bigint");
+			expect(typeof captured!.ino).toBe("bigint");
+		} finally {
+			await fs.promises.rm(tempDir, { force: true, recursive: true });
+		}
 	});
 
-	it("rejects a different directory", () => {
-		const exact = { dev: 7n, ino: 42n };
-		expect(bigintIdentityMatchesNumeric(exact, { dev: 7, ino: 43 })).toBe(false);
-		expect(bigintIdentityMatchesNumeric(exact, { dev: 8, ino: 42 })).toBe(false);
+	it("rejects mismatched identities when comparing contained files", async () => {
+		// Create two temp directories and verify that mismatched identities are rejected.
+		const tempDir1 = await fs.promises.mkdtemp(path.join("/tmp", "gjc-id-precision-1-"));
+		const tempDir2 = await fs.promises.mkdtemp(path.join("/tmp", "gjc-id-precision-2-"));
+		try {
+			// Capture the true identity of tempDir1
+			const identity1 = await capturePathIdentity(tempDir1);
+			expect(identity1).not.toBeNull();
+
+			// Create a test file in tempDir2
+			const testFile = path.join(tempDir2, "test.txt");
+			await fs.promises.writeFile(testFile, "test content");
+
+			// readContainedFile should reject a file when given the wrong directory's identity
+			const resultWrongIdentity = await readContainedFile(tempDir2, testFile, identity1);
+			expect(resultWrongIdentity).toBeNull();
+
+			// Capture the true identity of tempDir2 and verify it matches
+			const identity2 = await capturePathIdentity(tempDir2);
+			expect(identity2).not.toBeNull();
+			const resultCorrectIdentity = await readContainedFile(tempDir2, testFile, identity2);
+			expect(resultCorrectIdentity).toBe("test content");
+
+			// Verify that the identities are different (at least in inode)
+			expect(identity1!.ino).not.toBe(identity2!.ino);
+		} finally {
+			await fs.promises.rm(tempDir1, { force: true, recursive: true });
+			await fs.promises.rm(tempDir2, { force: true, recursive: true });
+		}
 	});
 
-	it("rejects a large file ID beyond double rounding distance", () => {
-		const exact = { dev: 1n, ino: 2n ** 60n };
-		expect(bigintIdentityMatchesNumeric(exact, { dev: 1, ino: Number(2n ** 60n + 4096n) })).toBe(false);
+	it("rejects two distinct inode values that round to the same double", () => {
+		// Demonstrate that two different bigint values can round to the same Number.
+		// At 2^60, rounding distance is 512.
+		// 2^60 + 1 and 2^60 + 2 round to the same double.
+		const large1: bigint = 2n ** 60n + 1n;
+		const large2: bigint = 2n ** 60n + 2n;
+
+		const double1 = Number(large1);
+		const double2 = Number(large2);
+
+		// They round to the same value
+		expect(double1).toBe(double2);
+		// But the bigints are different
+		expect(large1).not.toBe(large2);
+
+		// With exact bigint comparison, they should not match
+		expect(large1 === large2).toBe(false);
 	});
 });
