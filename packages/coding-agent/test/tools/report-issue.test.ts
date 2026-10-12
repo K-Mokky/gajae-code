@@ -5,7 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { VERSION } from "@gajae-code/utils";
 import { BUILTIN_TOOL_DESCRIPTORS, type ToolSession } from "../../src/tools";
-import { closeToolIssueDbs, normalizeToolIssue, ReportIssueTool, recordToolIssue } from "../../src/tools/report-issue";
+import { normalizeToolIssue, ReportIssueTool, recordToolIssue } from "../../src/tools/report-issue";
 import { TOOL_CATALOG } from "../../src/tools/tool-catalog.generated";
 import { ToolError } from "../../src/tools/tool-errors";
 
@@ -50,12 +50,10 @@ describe("report_issue tool", () => {
 	});
 
 	afterEach(async () => {
-		closeToolIssueDbs();
 		await fs.rm(root, { recursive: true, force: true });
 	});
 
 	test("appends a report with model, session, and version to the local database", async () => {
-		closeToolIssueDbs();
 		const tool = new ReportIssueTool(
 			makeSession({}, { getActiveModelString: () => "openai/gpt-5.5", getSessionId: () => "session-1" }),
 			dbPath,
@@ -80,14 +78,12 @@ describe("report_issue tool", () => {
 	});
 
 	test("stores null model and session when the session exposes neither", async () => {
-		closeToolIssueDbs();
 		await new ReportIssueTool(makeSession(), dbPath).execute("call", { tool: "bash", report: "exit code lost" });
 
 		expect(readIssues(dbPath)[0]).toMatchObject({ model: null, session_id: null });
 	});
 
 	test("rejects blank tool names and reports without writing", async () => {
-		closeToolIssueDbs();
 		const tool = new ReportIssueTool(makeSession(), dbPath);
 
 		await expect(tool.execute("call", { tool: "  ", report: "x" })).rejects.toBeInstanceOf(ToolError);
@@ -96,7 +92,6 @@ describe("report_issue tool", () => {
 	});
 
 	test("reports a storage failure to the model instead of throwing", async () => {
-		closeToolIssueDbs();
 		const blocker = path.join(root, "blocker");
 		await Bun.write(blocker, "not a directory");
 
@@ -111,51 +106,28 @@ describe("report_issue tool", () => {
 		]);
 	});
 
-	test("closes database handle and protects sidecars with private permissions", async () => {
-		if (process.platform === "win32") return; // Skip on Windows
-
-		// Close any cached handles before test
-		closeToolIssueDbs();
-
-		const newDbPath = path.join(root, "sidecars", "tool-issues.db");
-		const tool = new ReportIssueTool(makeSession(), newDbPath);
-
-		// Perform an operation that creates the database and sidecars
-		const result = await tool.execute("call-1", { tool: "test", report: "test report" });
-		expect(result.details).toEqual({ recorded: true, tool: "test" });
-
-		// Verify the database file has 0o600 permissions
-		const dbStat = await fs.stat(newDbPath);
-		expect(dbStat.mode & 0o777).toBe(0o600);
-
-		// Verify WAL sidecar exists and has 0o600 permissions
-		const walPath = `${newDbPath}-wal`;
-		const walStat = await fs.stat(walPath);
-		expect(walStat.mode & 0o777).toBe(0o600);
-
-		// Verify SHM sidecar exists and has 0o600 permissions
-		const shmPath = `${newDbPath}-shm`;
-		const shmStat = await fs.stat(shmPath);
-		expect(shmStat.mode & 0o777).toBe(0o600);
-
-		// Verify that closeToolIssueDbs can be called without crashing
-		// This ensures handles were properly managed
-		expect(() => closeToolIssueDbs()).not.toThrow();
-	});
-
-	test("concurrent first reports share one connection that closeToolIssueDbs releases", async () => {
+	test("releases its connection after every report, including concurrent first reports", async () => {
 		const entry = { tool: "read", report: "r", model: null, sessionId: null };
 		await Promise.all([recordToolIssue(dbPath, entry), recordToolIssue(dbPath, entry)]);
-		closeToolIssueDbs();
 
 		expect(readIssues(dbPath)).toHaveLength(2);
-		// Leaving WAL mode needs exclusive access; an orphaned connection keeps the database locked.
+		// Leaving WAL mode needs exclusive access; a leftover connection keeps the database locked.
 		const db = new Database(dbPath);
 		try {
 			expect(db.query("PRAGMA journal_mode=DELETE").get()).toEqual({ journal_mode: "delete" });
 		} finally {
 			db.close();
 		}
+	});
+
+	test("records into a fresh database after the user deletes the file", async () => {
+		const entry = { tool: "read", report: "r", model: null, sessionId: null };
+		await recordToolIssue(dbPath, entry);
+		await fs.rm(dbPath);
+
+		await recordToolIssue(dbPath, { ...entry, report: "after delete" });
+
+		expect(readIssues(dbPath).map(issue => issue.report)).toEqual(["after delete"]);
 	});
 });
 
@@ -186,7 +158,6 @@ describe("normalizeToolIssue", () => {
 	test("respects 0700 directory and 0600 database permissions on creation", async () => {
 		if (process.platform === "win32") return; // Skip on Windows
 
-		closeToolIssueDbs();
 		const testDir = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-perms-test-"));
 		try {
 			const newDbPath = path.join(testDir, "deep", "nested", "tool-issues.db");
@@ -204,7 +175,6 @@ describe("normalizeToolIssue", () => {
 			const dbStat = await fs.stat(newDbPath);
 			expect(dbStat.mode & 0o777).toBe(0o600);
 		} finally {
-			closeToolIssueDbs();
 			await fs.rm(testDir, { recursive: true, force: true });
 		}
 	});
@@ -217,14 +187,22 @@ describe("normalizeToolIssue", () => {
 			await fs.chmod(sharedRoot, 0o755);
 			const sharedDbPath = path.join(sharedRoot, "tool-issues.db");
 
-			await new ReportIssueTool(makeSession(), sharedDbPath).execute("call-1", { tool: "test", report: "r" });
+			const tool = new ReportIssueTool(makeSession(), sharedDbPath);
+			await tool.execute("call-1", { tool: "test", report: "r" });
+			// SQLite removes WAL/SHM when the last connection closes; keep one open so they persist.
+			const reader = new Database(sharedDbPath);
+			try {
+				reader.query("SELECT count(*) FROM tool_issues").get();
+				await tool.execute("call-2", { tool: "test", report: "r" });
 
-			expect((await fs.stat(sharedRoot)).mode & 0o777).toBe(0o755);
-			for (const file of [sharedDbPath, `${sharedDbPath}-wal`, `${sharedDbPath}-shm`]) {
-				expect((await fs.stat(file)).mode & 0o777).toBe(0o600);
+				expect((await fs.stat(sharedRoot)).mode & 0o777).toBe(0o755);
+				for (const file of [sharedDbPath, `${sharedDbPath}-wal`, `${sharedDbPath}-shm`]) {
+					expect((await fs.stat(file)).mode & 0o777).toBe(0o600);
+				}
+			} finally {
+				reader.close();
 			}
 		} finally {
-			closeToolIssueDbs();
 			await fs.rm(sharedRoot, { recursive: true, force: true });
 		}
 	});
