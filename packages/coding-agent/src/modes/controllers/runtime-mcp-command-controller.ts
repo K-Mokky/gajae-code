@@ -19,6 +19,7 @@ import {
 	updateMCPServer,
 } from "../../runtime-mcp/config-writer";
 import { canonicalMCPResourceUri, type MCPOAuthConfig, MCPOAuthFlow } from "../../runtime-mcp/oauth-flow";
+import { nativeMcpSource } from "../../runtime-mcp/project-host-values";
 import {
 	clearSmitheryApiKey,
 	createSmitheryCliAuthSession,
@@ -44,7 +45,8 @@ import { parseCommandArgs } from "../shared";
 import { buildOAuthLoginAnchor, createOAuthUrlCopyLease } from "../shared/oauth-url-copy";
 import { theme } from "../theme/theme";
 import type { InteractiveModeContext } from "../types";
-import { matchesAppInterrupt } from "../utils/keybinding-matchers";
+import { focusedUiOwnsInterrupt } from "../utils/interrupt-ownership";
+import { matchesAppClear, matchesAppInterrupt } from "../utils/keybinding-matchers";
 import { groupBySource, parseRemoveArgs, readScopeFlag, showCommandMessage } from "./command-controller-shared";
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
@@ -645,7 +647,9 @@ export class MCPCommandController {
 		const cancellationUnsubscribe =
 			signal === undefined && typeof this.ctx.ui.addInputListener === "function"
 				? this.ctx.ui.addInputListener(data => {
-						if (data !== "\x03" && !matchesAppInterrupt(data)) return;
+						const isClearKey = data === "\x03" || matchesAppClear(data);
+						if (!isClearKey && !matchesAppInterrupt(data)) return;
+						if (!isClearKey && focusedUiOwnsInterrupt(this.ctx)) return;
 						userController.abort(new Error("OAuth flow cancelled"));
 						return { consume: true };
 					})
@@ -812,7 +816,7 @@ export class MCPCommandController {
 	 * Test connection to an MCP server.
 	 * Throws an error if connection fails (used for auto-detection).
 	 */
-	async #handleTestConnection(config: MCPServerConfig): Promise<void> {
+	async #handleTestConnection(config: MCPServerConfig, source?: SourceMeta): Promise<void> {
 		const testName = `test_${Date.now()}`;
 		const manager =
 			this.ctx.mcpManager ??
@@ -820,7 +824,7 @@ export class MCPCommandController {
 				sharedPoolIdleMs: this.ctx.settings.get("mcp.sharedPoolIdleMs"),
 			});
 		if (!this.ctx.mcpManager) manager.setAuthStorage(this.ctx.session.modelRegistry.authStorage);
-		await manager.withPreparedLease(testName, config, async () => {});
+		await manager.withPreparedLease(testName, config, async () => {}, { source });
 	}
 
 	async #findConfiguredServer(
@@ -877,7 +881,10 @@ export class MCPCommandController {
 		return next;
 	}
 
-	async #resolveOAuthEndpointsFromServer(config: MCPServerConfig): Promise<{
+	async #resolveOAuthEndpointsFromServer(
+		config: MCPServerConfig,
+		source?: SourceMeta,
+	): Promise<{
 		authorizationUrl: string;
 		tokenUrl: string;
 		clientId?: string;
@@ -885,11 +892,12 @@ export class MCPCommandController {
 		issuer?: string;
 		authorizationResponseIssSupported?: boolean;
 	}> {
-		// First test if server actually needs auth by connecting without OAuth
+		// First test if server actually needs auth by connecting without OAuth.
+		// A stored file keeps its source so project `!` and secret names stay gated.
 		let connectionSucceeded = false;
 		let connectionError: Error | undefined;
 		try {
-			await this.#handleTestConnection(this.#stripOAuthAuth(config));
+			await this.#handleTestConnection(this.#stripOAuthAuth(config), source);
 			connectionSucceeded = true;
 		} catch (error) {
 			connectionError = error as Error;
@@ -964,10 +972,10 @@ export class MCPCommandController {
 		}
 	}
 
-	async #syncManagerConnection(name: string, config: MCPServerConfig): Promise<void> {
+	async #syncManagerConnection(name: string, config: MCPServerConfig, source?: SourceMeta): Promise<void> {
 		if (!this.ctx.mcpManager) return;
 		if (this.ctx.mcpManager.getConnectionStatus(name) !== "disconnected") return;
-		await this.ctx.mcpManager.connectServers({ [name]: config }, {});
+		await this.ctx.mcpManager.connectServers({ [name]: config }, source ? { [name]: source } : {});
 		if (this.ctx.mcpManager.getConnectionStatus(name) === "connected") {
 			await this.ctx.session.refreshMCPTools(this.ctx.mcpManager.getTools());
 		}
@@ -995,9 +1003,10 @@ export class MCPCommandController {
 			// report as connected to avoid false-negative messaging.
 			if (!isConnected && !isConnecting && config.enabled !== false) {
 				try {
-					await this.#handleTestConnection(config);
+					const source = nativeMcpSource(scope, filePath);
+					await this.#handleTestConnection(config, source);
 					isConnected = true;
-					await this.#syncManagerConnection(name, config);
+					await this.#syncManagerConnection(name, config, source);
 				} catch {
 					// Keep disconnected status
 				}
@@ -1273,7 +1282,8 @@ export class MCPCommandController {
 				return;
 			}
 
-			const { config } = found;
+			const { config, scope, filePath } = found;
+			const source = nativeMcpSource(scope, filePath);
 			if (config.enabled === false) {
 				this.ctx.showError(`Server "${name}" is disabled. Run /mcp enable ${name} first.`);
 				return;
@@ -1310,10 +1320,10 @@ export class MCPCommandController {
 					}
 
 					lines.push("");
-					await this.#syncManagerConnection(name, config);
+					await this.#syncManagerConnection(name, config, source);
 					this.#showMessage(lines.join("\n"));
 				},
-				{ signal: abortController.signal },
+				{ signal: abortController.signal, source },
 			);
 		} catch (error) {
 			if (abortController.signal.aborted || (error instanceof Error && error.name === "AbortError")) {
@@ -1489,7 +1499,8 @@ export class MCPCommandController {
 			}
 
 			const baseConfig = this.#stripOAuthAuth(found.config);
-			const oauth = await this.#resolveOAuthEndpointsFromServer(baseConfig);
+			const source = nativeMcpSource(found.scope, found.filePath);
+			const oauth = await this.#resolveOAuthEndpointsFromServer(baseConfig, source);
 			const oauthClientSecret = found.config.oauth?.clientSecret ?? currentAuth?.clientSecret ?? "";
 
 			this.#showMessage(["", theme.fg("muted", `Reauthorizing "${name}"...`), ""].join("\n"));
@@ -1839,7 +1850,9 @@ export class MCPCommandController {
 		const oauthUrlCopyLease = createOAuthUrlCopyLease(this.ctx);
 		const abortController = new AbortController();
 		const interruptUnsubscribe = this.ctx.ui.addInputListener?.(data => {
-			if (data !== "\x03" && !matchesAppInterrupt(data)) return;
+			const isClearKey = data === "\x03" || matchesAppClear(data);
+			if (!isClearKey && !matchesAppInterrupt(data)) return;
+			if (!isClearKey && focusedUiOwnsInterrupt(this.ctx)) return;
 			abortController.abort(new Error("Smithery authorization cancelled."));
 			return { consume: true };
 		});

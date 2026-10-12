@@ -1,14 +1,21 @@
-import { createHash } from "node:crypto";
+import { type ChildProcess, spawn } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
 import * as nodeFs from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { exactRemoveDirectoryTree, type NativeDirectoryTreeSnapshot, snapshotDirectoryTree } from "@gajae-code/natives";
-import { logger, postmortem } from "@gajae-code/utils";
+import {
+	exactRemoveDirectoryTree,
+	exactUnlinkDirect,
+	type NativeDirectoryTreeSnapshot,
+	snapshotDirectoryTree,
+} from "@gajae-code/natives";
+import { getAgentDir, logger, postmortem } from "@gajae-code/utils";
 import { CliParseError, Command } from "@gajae-code/utils/cli";
 import type { Args as ParsedArgs } from "../cli/args";
 import { isSafeSdkInternalAgentDir, scanPublicCommand } from "../cli/public-command-entry";
 import { PublicCommandFailure } from "../cli/public-command-errors";
+import { FileLockAcquireError } from "../config/file-lock";
 import { parseModelString } from "../config/model-resolver";
 import { Settings } from "../config/settings";
 import { usePostmortemSignalExitAuthority } from "../lsp/client";
@@ -23,11 +30,16 @@ import {
 	writeBrokerStartupExitRecordBounded,
 } from "../sdk/broker/broker-exit";
 import { readBrokerDiscovery } from "../sdk/broker/discovery";
+import { type EndpointFileRead, readEndpointFile } from "../sdk/broker/endpoint-authority";
 import {
+	BROKER_DISCOVERY_BUDGET,
 	emitBrokerStartupTestSignal,
+	reapBrokerTrampolineChild,
 	reconcileBrokerGenerationForStartup,
+	SDK_BROKER_AUTOSTART_ENV,
 	withBrokerStartupLock,
 } from "../sdk/broker/ensure";
+import { waitForBrokerHandoffAcknowledgement, waitForBrokerHandoffDecision } from "../sdk/broker/hop";
 import {
 	LifecycleFailurePublicationCleanupError,
 	LifecycleReadinessCleanupError,
@@ -42,6 +54,7 @@ import {
 	writeSessionLifecycleReady,
 } from "../sdk/broker/lifecycle";
 import { processIncarnation } from "../sdk/broker/process-incarnation";
+import { resolveSdkInternalSpawnCommand } from "../sdk/broker/runtime";
 import { writeBrokerStartupFailureMarker } from "../sdk/broker/startup-failure";
 import { runSdkStderrDrainer } from "../sdk/broker/stderr-drainer";
 import { renderSdkSearchTable, runSdkSearch, runSdkSessionCli } from "../sdk/cli";
@@ -651,6 +664,7 @@ export async function runSessionHost(
 	let startupComplete = false;
 	let readinessPublicationCleanupComplete = true;
 	let revokePendingReadinessMarker: (() => Promise<boolean>) | undefined;
+	let revokePublishedReadinessMarker: (() => Promise<boolean>) | undefined;
 	let readinessRevocation: Promise<boolean> | undefined;
 	let startupInterruption: SdkStartupFailure | undefined;
 	const interrupted = Promise.withResolvers<SdkStartupFailure>();
@@ -1265,20 +1279,76 @@ export async function runSessionHost(
 		return failureRollback;
 	};
 	const sessionEndpointPath = path.join(request.stateRoot, "sdk", `${request.sessionId}.json`);
-	const exitAfterSessionDisposal = async (reason?: "detached_idle"): Promise<void> => {
-		await disposeSession(reason);
+	const removeOwnedSessionEndpoint = async (): Promise<boolean> => {
+		try {
+			await fs.stat(sessionEndpointPath);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") return true;
+			return false;
+		}
+		const endpoint: EndpointFileRead | undefined = await readEndpointFile(sessionEndpointPath);
+		if (!endpoint) return false;
+		let parsed: { pid?: unknown; sessionId?: unknown };
+		try {
+			parsed = JSON.parse(endpoint.source) as { pid?: unknown; sessionId?: unknown };
+		} catch {
+			return false;
+		}
+		if (parsed.pid !== process.pid || parsed.sessionId !== request.sessionId) {
+			return false;
+		}
+		const removal = (() => {
+			try {
+				return exactUnlinkDirect(sessionEndpointPath, {
+					dev: endpoint.dev,
+					ino: endpoint.ino,
+					nlink: endpoint.nlink,
+					size: endpoint.size,
+					mtimeNs: endpoint.mtimeNs,
+					quarantineName: `.gjc-delete-endpoint-${request.sessionId}-${randomUUID()}`,
+					sha256: createHash("sha256").update(endpoint.source).digest("hex"),
+					allowHardLink: true,
+				});
+			} catch (error) {
+				logger.warn("SDK host endpoint cleanup failed", { error: String(error) });
+				return undefined;
+			}
+		})();
+		if (!removal) return false;
+		return (
+			removal.ok ||
+			removal.code === "not_found" ||
+			(removal.code === "cleanup_pending" &&
+				removal.payloadDurable === true &&
+				!removal.retainedSuccessorPath &&
+				!removal.retainedUnknownPath)
+		);
+	};
+	let unregisterHostPostmortem: (() => void) | undefined;
+	let sessionDisposalExit: Promise<void> | undefined;
+	const exitAfterSessionDisposal = async (reason?: "detached_idle", exitProcess = true): Promise<void> => {
 		let failure: SdkStartupFailure | undefined;
+		let ownsEndpoint = false;
+		const endpointCleanup = (async (): Promise<boolean> => {
+			let complete = await removeOwnedSessionEndpoint();
+			for (let attempt = 0; !complete && attempt < 20; attempt += 1) {
+				await Bun.sleep(25);
+				complete = await removeOwnedSessionEndpoint();
+			}
+			return complete;
+		})();
+		let [endpointCleanupComplete, readinessRevoked] = await Promise.all([
+			endpointCleanup,
+			revokePublishedReadinessMarker?.() ?? Promise.resolve(true),
+		]);
+		await disposeSession(reason);
+		endpointCleanupComplete = await removeOwnedSessionEndpoint();
 		try {
 			const endpoint = JSON.parse(await fs.readFile(sessionEndpointPath, "utf8")) as {
 				pid?: unknown;
 				sessionId?: unknown;
 			};
-			if (endpoint.pid === process.pid && endpoint.sessionId === request.sessionId)
-				failure = {
-					phase: "startup",
-					reason: "failed",
-					message: `SDK host endpoint remained after graceful shutdown: ${request.sessionId}`,
-				};
+			ownsEndpoint = endpoint.pid === process.pid && endpoint.sessionId === request.sessionId;
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
 				failure = {
@@ -1286,27 +1356,57 @@ export async function runSessionHost(
 					reason: "failed",
 					message: `SDK host endpoint cleanup could not be verified: ${request.sessionId}`,
 				};
-			}
+			} else endpointCleanupComplete = true;
 		}
+		if (!ownsEndpoint && !failure && !readinessRevoked && revokePublishedReadinessMarker) {
+			failure = {
+				phase: "startup",
+				reason: "failed",
+				message: `SDK host readiness marker cleanup could not be verified: ${request.sessionId}`,
+			};
+		}
+		if (ownsEndpoint && !endpointCleanupComplete && !failure)
+			failure = {
+				phase: "startup",
+				reason: "failed",
+				message: `SDK host endpoint remained after graceful shutdown: ${request.sessionId}`,
+			};
 		if (failure) {
 			process.exitCode = 1;
 			process.stderr.write(`${failure.message}\n`);
 			await writeFailure(failure, rollback.result).catch(() => {});
 		}
-		process.exit(process.exitCode ?? 0);
+		unregisterHostPostmortem?.();
+		unregisterHostPostmortem = undefined;
+		if (exitProcess) process.exit(process.exitCode ?? 0);
 	};
 	let stopping = false;
+	const requestSessionStop = (reason?: "detached_idle", exitProcess = true): Promise<void> => {
+		if (stopping) return sessionDisposalExit ?? Promise.resolve();
+		stopping = true;
+		sessionDisposalExit = exitAfterSessionDisposal(reason, exitProcess);
+		return sessionDisposalExit;
+	};
 	const stop = (reason?: "detached_idle") => {
 		if (startupComplete) {
-			if (stopping) return;
-			stopping = true;
-			void exitAfterSessionDisposal(reason);
+			void requestSessionStop(reason);
 			return;
 		}
 		const failure = capability.normalizeFailure("startup", "failed", "SDK lifecycle host terminated.");
 		interruptStartup(failure);
 	};
-	const onReadySignal = (): void => stop();
+	const registerHostPostmortem = (): void => {
+		if (unregisterHostPostmortem) return;
+		unregisterHostPostmortem = postmortem.register("sdk-session-host:exit", async reason => {
+			if (reason !== postmortem.Reason.SIGTERM && reason !== postmortem.Reason.SIGINT) return;
+			// The postmortem signal authority defaults to 143/130; a session host
+			// signal is graceful and must preserve its cleanup result instead.
+			await requestSessionStop(undefined, false);
+			process.exitCode = 0;
+			process.exit(0);
+		});
+	};
+	registerHostPostmortem();
 
 	try {
 		const startupThinkingLevel = request.modelId ? parseModelString(request.modelId)?.thinkingLevel : undefined;
@@ -1354,6 +1454,7 @@ export async function runSessionHost(
 						effectMarker,
 						() => startupInterruption === undefined && now() < request.semanticReadyDeadlineAt,
 						revoke => {
+							revokePublishedReadinessMarker = revoke;
 							revokePendingReadinessMarker = revoke;
 							if (startupInterruption !== undefined) startReadinessRevocation(revoke);
 							else if (now() >= request.semanticReadyDeadlineAt) {
@@ -1388,8 +1489,6 @@ export async function runSessionHost(
 		revokePendingReadinessMarker = undefined;
 		readinessRevocation = undefined;
 		removeStartupSignalHandlers();
-		process.once("SIGTERM", onReadySignal);
-		process.once("SIGINT", onReadySignal);
 	} catch (error) {
 		if (error instanceof LifecycleReadinessCleanupError) constructionCleanupComplete = false;
 		const failure =
@@ -1402,8 +1501,6 @@ export async function runSessionHost(
 			await failAfterRollback(durableFailure);
 		} finally {
 			removeStartupSignalHandlers();
-			process.removeListener("SIGTERM", onReadySignal);
-			process.removeListener("SIGINT", onReadySignal);
 		}
 		throw error;
 	}
@@ -1441,6 +1538,7 @@ export async function runSessionHost(
 
 export type SdkInternalArgv =
 	| { action: "broker-internal"; agentDir: string }
+	| { action: "broker-trampoline-internal"; agentDir: string }
 	| { action: "session-host-internal" }
 	| { action: "stderr-drain-internal"; logPath: string; maxBytes: number };
 
@@ -1455,6 +1553,14 @@ export function parseSdkInternalArgv(argv: readonly string[]): SdkInternalArgv {
 		isSafeSdkInternalAgentDir(argv[2])
 	)
 		return { action: "broker-internal", agentDir: argv[2] };
+	if (
+		argv[0] === "broker-trampoline-internal" &&
+		argv.length === 3 &&
+		argv[1] === "--agent-dir" &&
+		typeof argv[2] === "string" &&
+		isSafeSdkInternalAgentDir(argv[2])
+	)
+		return { action: "broker-trampoline-internal", agentDir: argv[2] };
 	if (
 		argv[0] === "stderr-drain-internal" &&
 		argv.length === 5 &&
@@ -1494,13 +1600,23 @@ export default class Sdk extends Command {
 	async run(): Promise<void> {
 		if (
 			this.argv[0] !== "broker-internal" &&
+			this.argv[0] !== "broker-trampoline-internal" &&
 			this.argv[0] !== "session-host-internal" &&
 			this.argv[0] !== "stderr-drain-internal"
 		) {
 			const scan = scanPublicCommand("sdk", this.argv);
 			if (scan.kind !== "operation") throw new PublicCommandFailure({ kind: "usage", proof: "pre-effect" });
 			const { args, flags } = scan;
+			// `--attach-only` is the flag form of GJC_SDK_BROKER_AUTOSTART=0 for this invocation.
+			if (flags["attach-only"] === true) process.env[SDK_BROKER_AUTOSTART_ENV] = "0";
 			const operation = scan.descriptor.command[1];
+			if (operation === "broker") {
+				const brokerAgentDir = path.resolve((flags["agent-dir"] as string | undefined) ?? getAgentDir());
+				if (!isSafeSdkInternalAgentDir(brokerAgentDir))
+					throw new PublicCommandFailure({ kind: "usage", proof: "pre-effect" });
+				await runSdkInternal({ action: "broker-internal", agentDir: brokerAgentDir }, true);
+				return;
+			}
 			const stringFlag = (name: string): string | undefined => flags[name] as string | undefined;
 			const timeoutMs = flags["timeout-ms"] === undefined ? undefined : Number(flags["timeout-ms"]);
 			if (operation === "spawn") {
@@ -1595,373 +1711,472 @@ export default class Sdk extends Command {
 			throw new PublicCommandFailure({ kind: "usage", proof: "pre-effect" });
 		}
 
-		const internal = parseSdkInternalArgv(this.argv);
-		if (internal.action === "broker-internal") usePostmortemSignalExitAuthority();
-		if (internal.action === "session-host-internal") {
-			await runSessionHost();
-			return;
-		}
-		if (internal.action === "stderr-drain-internal") {
-			await runSdkStderrDrainer(internal.logPath, internal.maxBytes);
-			return;
-		}
-		const agentDir = path.resolve(internal.agentDir);
-		let broker: Broker | undefined;
-		let runningBroker: Broker | undefined;
-		let stopSweep: (() => void) | undefined;
-		let startupExitRequested = false;
-		let startupExitReason: "startup-deadline" | "startup-signal" | undefined;
-		let startupExitLogged = false;
-		let pendingShutdownSignal: "SIGTERM" | "SIGINT" | undefined;
-		let startupExitTask: Promise<boolean> | undefined;
-		const startupStartedAt = process.hrtime.bigint();
-		let startupExitWrite: Promise<BrokerStartupExitWriteStatus> | undefined;
-		const startupAbortController = new AbortController();
-		let candidateStartTask: Promise<unknown> | undefined;
-		const waitForStartupAbortCleanup = async (): Promise<void> => {
-			const task = candidateStartTask;
-			if (!task) return;
-			await Promise.race([
-				task.then(
-					() => undefined,
-					() => undefined,
-				),
-				Bun.sleep(BROKER_STARTUP_MARKER_WRITE_TIMEOUT_MS),
-			]);
-		};
-		const startupSignalExitCode = (signal: "SIGTERM" | "SIGINT"): 130 | 143 => (signal === "SIGINT" ? 130 : 143);
-		const makeStartupExitRecord = (
-			reason: "startup-deadline" | "startup-signal",
-			exitCode: 1 | 130 | 143,
-			signal: "SIGTERM" | "SIGINT" | null,
-			timeoutMs?: number,
-		): BrokerStartupExitRecord & Record<string, unknown> => ({
-			version: 1,
-			reason,
-			mode: "startup",
-			fenceReason: null,
-			fencedForMs: 0,
-			uptimeMs: Math.max(0, Number((process.hrtime.bigint() - startupStartedAt) / 1_000_000n)),
-			pid: process.pid,
-			signal,
-			exitCode,
-			timeoutMs: timeoutMs ?? null,
-			writtenAt: Date.now(),
-		});
-		const beginStartupExitRecordWrite = (record: BrokerStartupExitRecord): Promise<BrokerStartupExitWriteStatus> => {
-			const testDelayMs = Number(process.env.GJC_SDK_TEST_BROKER_STARTUP_EXIT_RECORD_DELAY_MS ?? 0);
-			const beforeWriteForTest =
-				Number.isSafeInteger(testDelayMs) && testDelayMs > 0 && testDelayMs <= 10_000
-					? async () => {
-							await emitBrokerStartupTestSignal("startup-exit-record-fallback-waiting");
-							await Bun.sleep(testDelayMs);
-						}
-					: undefined;
-			startupExitWrite ??= writeBrokerStartupExitRecordBounded(
-				agentDir,
-				record,
-				record.reason === "startup-signal"
-					? BROKER_STARTUP_SIGNAL_EXIT_RECORD_WRITE_TIMEOUT_MS
-					: BROKER_STARTUP_MARKER_WRITE_TIMEOUT_MS,
-				beforeWriteForTest,
-			);
-			return startupExitWrite;
-		};
-		const brokerReadyForSignal = (): Broker | undefined =>
-			runningBroker ?? (broker?.ownsDiscovery ? broker : undefined);
-		const writeStartupExitLog = (
-			record: BrokerStartupExitRecord & Record<string, unknown>,
-			message: string,
-		): void => {
-			if (startupExitLogged) return;
-			startupExitLogged = true;
-			const level = record.exitCode === 1 ? "error" : "warn";
-			if (record.exitCode === 1) logger.error("sdk broker: startup watchdog forcing exit", record);
-			else logger.warn("sdk broker: startup interrupted", record);
-			process.stderr.write(`${JSON.stringify({ level, message, ...record })}\n`);
-		};
-		const exitDuringStartup = (
-			reason: "startup-deadline" | "startup-signal",
-			exitCode: 1 | 130 | 143,
-			signal: "SIGTERM" | "SIGINT" | null,
-			timeoutMs?: number,
-		): Promise<boolean> => {
-			// The first startup exit cause owns both the persisted reason and the process exit code.
-			if (startupExitTask) return startupExitReason === reason ? startupExitTask : Promise.resolve(false);
-			if (startupExitRequested) return Promise.resolve(false);
-			startupExitRequested = true;
-			startupExitReason = reason;
-			const exitRecord = makeStartupExitRecord(reason, exitCode, signal, timeoutMs);
-			const message =
-				reason === "startup-deadline"
-					? `SDK broker startup exceeded its ${timeoutMs}ms fence deadline.`
-					: `SDK broker startup interrupted by ${signal} before readiness.`;
-			writeStartupExitLog(exitRecord, message);
-			startupExitTask = (async () => {
-				const exitRecordWrite = await beginStartupExitRecordWrite(exitRecord);
-				const exitRecordWritten = exitRecordWrite.kind === "written";
-				if (!exitRecordWritten)
-					logger.error("sdk broker: startup exit record write timed out", {
-						reason: "startup-exit-record-write-failed-or-timed-out",
-						exitReason: reason,
-						exitRecordWriteStatus: exitRecordWrite.kind,
-						...(exitRecordWrite.kind === "failed" && exitRecordWrite.code
-							? { exitRecordWriteErrorCode: exitRecordWrite.code }
-							: {}),
-						pid: process.pid,
-						exitCode,
-					});
-				return true;
-			})();
-			return startupExitTask;
-		};
-		const unregisterPostmortem = postmortem.register("sdk-broker:exit", async reason => {
-			const signal =
-				reason === postmortem.Reason.SIGTERM
-					? "SIGTERM"
-					: reason === postmortem.Reason.SIGINT
-						? "SIGINT"
-						: pendingShutdownSignal;
-			if (!signal) return;
-			pendingShutdownSignal = signal;
-			if (startupExitTask && startupExitReason === "startup-deadline") {
-				await startupExitTask;
-				await waitForStartupAbortCleanup();
-				process.exit(1);
-				return;
-			}
-			const activeBroker = brokerReadyForSignal();
-			if (activeBroker) {
-				runningBroker = activeBroker;
-				stopSweep?.();
-				await activeBroker.stop({ kind: "signal", signal });
-				return;
-			}
-			startupAbortController.abort();
-			await exitDuringStartup("startup-signal", startupSignalExitCode(signal), signal);
-			// Startup may remain blocked in awaited I/O after abort. Bound best-effort
-			// rollback so shared postmortem can exit with the original signal status.
-			await waitForStartupAbortCleanup();
-		});
-		const finishPendingStartupSignal = async (): Promise<boolean> => {
-			const signal = pendingShutdownSignal;
-			if (!signal) return false;
-			await exitDuringStartup("startup-signal", startupSignalExitCode(signal), signal);
-			return true;
-		};
+		await runSdkInternal(parseSdkInternalArgv(this.argv));
+	}
+}
+
+/**
+ * Runs one parsed SDK internal entry point. `publicBrokerRun` is set only by
+ * the stable `gjc sdk broker run` contract, which must report a lost ownership
+ * race as a failure so its supervisor sees it, instead of the quiet exit 0 that
+ * the detached autostart entry uses.
+ */
+async function runSdkInternal(internal: SdkInternalArgv, publicBrokerRun = false): Promise<void> {
+	if (internal.action === "broker-trampoline-internal") {
+		if (process.platform === "win32") throw new CliParseError("Broker trampoline is unavailable on Windows.");
+		const retainChildUntilPublication = process.env.GJC_BROKER_TRAMPOLINE_RETAIN_UNTIL_PUBLICATION === "1";
+		const command = resolveSdkInternalSpawnCommand("broker-internal");
+		const brokerEnvironment = { ...command.env };
+		delete brokerEnvironment.GJC_BROKER_TRAMPOLINE_RETAIN_UNTIL_PUBLICATION;
+		let child: ChildProcess;
 		try {
-			const startupOperation = async (deadline: number): Promise<Broker | undefined> => {
-				const remainingMs = Math.max(1, deadline - Date.now());
-				const testWatchdogMs = Number(process.env.GJC_SDK_TEST_BROKER_STARTUP_WATCHDOG_MS ?? 0);
-				const watchdogMs =
-					Number.isSafeInteger(testWatchdogMs) && testWatchdogMs > 0 && testWatchdogMs <= remainingMs
-						? testWatchdogMs
-						: remainingMs;
-				const startupWatchdog = setTimeout(() => {
-					startupAbortController.abort();
-					void exitDuringStartup("startup-deadline", 1, null, watchdogMs).then(async started => {
-						if (!started) {
-							// A prior startup signal owns the exit cause; its postmortem callback
-							// returns after bounded cleanup and preserves the signal status.
-							return;
-						}
-						await waitForStartupAbortCleanup();
-						process.exit(1);
-					});
-				}, watchdogMs);
-				try {
-					const existing = await reconcileBrokerGenerationForStartup({ agentDir }, deadline);
-					if (startupAbortController.signal.aborted) return undefined;
-					if (existing) {
-						logger.info("sdk broker: startup reused an existing owner", {
-							reason: "existing-owner-reused",
-							ownerId: existing.ownerId,
-							pid: existing.pid,
-							exitCode: 0,
-						});
-						return undefined;
-					}
-					if (process.env.GJC_SDK_TEST_BROKER_STARTUP_STALL === "1") {
-						const stalled = Promise.withResolvers<void>();
-						await stalled.promise;
-					}
-					const testStartupSignal = process.env.GJC_SDK_TEST_BROKER_STARTUP_SIGNAL;
-					if (testStartupSignal === "SIGTERM" || testStartupSignal === "SIGINT") {
-						await emitBrokerStartupTestSignal("startup-signal-ready");
-						process.kill(process.pid, testStartupSignal);
-						const waiting = Promise.withResolvers<void>();
-						await waiting.promise;
-					}
-					const startupGateFile = process.env.GJC_SDK_TEST_BROKER_STARTUP_GATE_FILE;
-					if (startupGateFile) {
-						await emitBrokerStartupTestSignal("startup-gate-waiting");
-						await waitForBrokerStartupTestGate(startupGateFile);
-						await emitBrokerStartupTestSignal("startup-gate-released");
-					}
-					const startupDelayMs = Number(process.env.GJC_SDK_TEST_BROKER_STARTUP_DELAY_MS ?? 0);
-					if (Number.isSafeInteger(startupDelayMs) && startupDelayMs > 0 && startupDelayMs <= 10_000) {
-						await Bun.sleep(startupDelayMs);
-					}
-					if (startupAbortController.signal.aborted) return undefined;
-					// The real broker-internal entry point is the only place that reads this
-					// launcher-supplied environment variable; it is validated here and handed
-					// to Broker as a typed setting, never read a second time inside broker.ts
-					// from process.env directly.
-					const restartRequestEnv = process.env.GJC_BROKER_RESTART_REQUEST;
-					const restartRequestId =
-						typeof restartRequestEnv === "string" && /^[A-Za-z0-9_-]{1,256}$/.test(restartRequestEnv)
-							? restartRequestEnv
-							: undefined;
-					const testPostPublicationDelayMs = Number(
-						process.env.GJC_SDK_TEST_BROKER_POST_PUBLICATION_DELAY_MS ?? 0,
-					);
-					const startupPostPublicationDelayMs =
-						Number.isSafeInteger(testPostPublicationDelayMs) &&
-						testPostPublicationDelayMs > 0 &&
-						testPostPublicationDelayMs <= 10_000
-							? testPostPublicationDelayMs
-							: undefined;
-					const testPrePublicationDelayMs = Number(process.env.GJC_SDK_TEST_BROKER_PRE_PUBLICATION_DELAY_MS ?? 0);
-					const startupPrePublicationDelayMs =
-						Number.isSafeInteger(testPrePublicationDelayMs) &&
-						testPrePublicationDelayMs > 0 &&
-						testPrePublicationDelayMs <= 10_000
-							? testPrePublicationDelayMs
-							: undefined;
-					const testAfterDiscoveryWriteDelayMs = Number(
-						process.env.GJC_SDK_TEST_BROKER_AFTER_DISCOVERY_WRITE_DELAY_MS ?? 0,
-					);
-					const startupAfterDiscoveryWriteTestHook =
-						Number.isSafeInteger(testAfterDiscoveryWriteDelayMs) &&
-						testAfterDiscoveryWriteDelayMs > 0 &&
-						testAfterDiscoveryWriteDelayMs <= 10_000
-							? async () => {
-									await emitBrokerStartupTestSignal("discovery-written-before-retain");
-									const signal = startupAbortController.signal;
-									if (signal.aborted) return;
-									const wait = Promise.withResolvers<void>();
-									const timer = setTimeout(wait.resolve, testAfterDiscoveryWriteDelayMs);
-									const onAbort = (): void => wait.resolve();
-									signal.addEventListener("abort", onAbort, { once: true });
-									try {
-										await wait.promise;
-									} finally {
-										clearTimeout(timer);
-										signal.removeEventListener("abort", onAbort);
-									}
-								}
-							: undefined;
-					const candidate = new Broker({
-						agentDir,
-						startupAbortSignal: startupAbortController.signal,
-						onStartupReady: () => clearTimeout(startupWatchdog),
-						masterOrphanGraceMs: (await Settings.loadForScope({ cwd: process.cwd(), agentDir })).get(
-							"sdk.masterOrphanGraceMs",
-						),
-						resolveDirectoryMigration: async cwd => {
-							const settings = await Settings.loadForScope({ cwd, agentDir });
-							try {
-								const policy = settings.get("session.directoryMigration");
-								return policy === "disabled" ? "disabled" : "copy-retain";
-							} finally {
-								await settings.close();
-							}
-						},
-						...(startupPrePublicationDelayMs === undefined
-							? {}
-							: {
-									startupPrePublicationDelayMs,
-									startupPrePublicationTestHook: async () => {
-										await emitBrokerStartupTestSignal("pre-publication-ready");
-									},
-								}),
-						...(startupAfterDiscoveryWriteTestHook === undefined ? {} : { startupAfterDiscoveryWriteTestHook }),
-						...(startupPostPublicationDelayMs === undefined ? {} : { startupPostPublicationDelayMs }),
-						...(restartRequestId === undefined ? {} : { restartRequestId }),
-					});
-					broker = candidate;
-					candidateStartTask = candidate.start();
-					await candidateStartTask;
-					if (candidate.ownsDiscovery) runningBroker = candidate;
-					return candidate;
-				} finally {
-					clearTimeout(startupWatchdog);
-				}
-			};
-			broker = await withBrokerStartupLock(agentDir, startupOperation, {
-				onAcquired: () => void emitBrokerStartupTestSignal("fence-acquired"),
-				onContended: () => void emitBrokerStartupTestSignal("fence-contended"),
+			child = spawn(command.file, [...command.args, "--agent-dir", internal.agentDir], {
+				detached: true,
+				stdio: ["ignore", "ignore", "inherit"],
+				env: brokerEnvironment,
+				...(command.kind === "bun-source" ? { cwd: command.cwd } : {}),
 			});
 		} catch (error) {
-			if (pendingShutdownSignal) {
-				await finishPendingStartupSignal();
-				return;
-			}
-			if (broker) {
-				try {
-					await broker.stop({ kind: "startup-failure" });
-				} catch {
-					// Preserve the startup/fence failure that made this bootstrap unusable.
-				}
-			}
-			// This process spawns detached with stdio ignored (see ensure.ts), so the
-			// durable marker is the only channel the caller has to see why start()
-			// failed instead of a bare exit code (#3963).
-			const startupFailureIncarnation = processIncarnation(process.pid);
-			const markerWritten = await writeBrokerStartupFailureMarkerBounded(agentDir, {
-				reason: error instanceof Error ? error.message : String(error),
-				exitCode: 1,
-				signal: null,
-				pid: process.pid,
-				...(startupFailureIncarnation === undefined ? {} : { incarnation: startupFailureIncarnation }),
-			});
-			logger.error("sdk broker: startup failed", {
-				reason: "startup-failure",
-				pid: process.pid,
-				exitCode: 1,
-				markerWritten,
-			});
-			unregisterPostmortem();
+			throw new Error("Broker trampoline could not start broker.", { cause: error });
+		}
+		let spawnError: Error | undefined;
+		child.once("error", error => {
+			spawnError = error;
+		});
+		if (child.pid === undefined) throw new Error("Broker trampoline could not start broker.");
+		const incarnation = processIncarnation(child.pid);
+		if (!incarnation) {
+			await reapBrokerTrampolineChild(child, child.pid);
+			throw new Error("Broker trampoline could not observe broker identity.");
+		}
+		if (spawnError) throw new Error("Broker trampoline could not start broker.", { cause: spawnError });
+		const stdoutWrite = Promise.withResolvers<void>();
+		process.stdout.write(`${child.pid}\t${incarnation}\n`, error => {
+			if (error) stdoutWrite.reject(error);
+			else stdoutWrite.resolve();
+		});
+		try {
+			await stdoutWrite.promise;
+		} catch (error) {
+			await reapBrokerTrampolineChild(child, child.pid, incarnation);
 			throw error;
 		}
-		if (!broker) {
-			if (pendingShutdownSignal) {
-				await finishPendingStartupSignal();
+		if (retainChildUntilPublication) {
+			const decision = await waitForBrokerHandoffDecision(process.stdin);
+			if (decision === "abort") {
+				await reapBrokerTrampolineChild(child, child.pid, incarnation);
 				return;
 			}
-			unregisterPostmortem();
-			return;
+		} else if (!(await waitForBrokerHandoffAcknowledgement(process.stdin))) {
+			await reapBrokerTrampolineChild(child, child.pid, incarnation);
+			throw new Error("Broker trampoline handoff was not acknowledged; its direct child was reaped.");
 		}
-		if (!broker.ownsDiscovery) {
-			if (pendingShutdownSignal) {
-				if (runningBroker) await runningBroker.completion;
-				else await finishPendingStartupSignal();
-				return;
-			}
-			// Another broker owns discovery; this process exits cleanly (code 0) as
-			// the race loser. Record why so a caller polling for a winner that never
-			// appears can diagnose the loss instead of seeing only a bare exit 0.
-			const losingIncarnation = processIncarnation(process.pid);
-			await writeBrokerStartupFailureMarkerBounded(agentDir, {
-				reason: "Another broker owns the lock/discovery; this broker exited as the race loser.",
-				exitCode: 0,
-				signal: null,
-				pid: process.pid,
-				...(losingIncarnation === undefined ? {} : { incarnation: losingIncarnation }),
-			});
-			unregisterPostmortem();
-			return;
-		}
-		runningBroker = broker;
-		// A live broker must not keep advertising sessions whose host process is
-		// gone; the sweep is the broker-side half of the host reaping bound.
-		stopSweep = startBrokerDeadRegistrationSweep(runningBroker);
-		try {
-			await runningBroker.completion;
-		} finally {
-			stopSweep?.();
-			if (!pendingShutdownSignal) unregisterPostmortem();
-		}
-		if (!pendingShutdownSignal) process.exit(0);
+		child.unref();
+		return;
 	}
+	if (internal.action === "broker-internal" || internal.action === "session-host-internal")
+		usePostmortemSignalExitAuthority();
+	if (internal.action === "session-host-internal") {
+		await runSessionHost();
+		return;
+	}
+	if (internal.action === "stderr-drain-internal") {
+		await runSdkStderrDrainer(internal.logPath, internal.maxBytes);
+		return;
+	}
+	const agentDir = path.resolve(internal.agentDir);
+	let broker: Broker | undefined;
+	let runningBroker: Broker | undefined;
+	let stopSweep: (() => void) | undefined;
+	let startupExitRequested = false;
+	let startupExitReason: BrokerStartupExitRecord["reason"] | undefined;
+	let startupExitLogged = false;
+	let pendingShutdownSignal: "SIGTERM" | "SIGINT" | undefined;
+	let startupExitTask: Promise<boolean> | undefined;
+	const startupStartedAt = process.hrtime.bigint();
+	let startupExitWrite: Promise<BrokerStartupExitWriteStatus> | undefined;
+	const startupAbortController = new AbortController();
+	let candidateStartTask: Promise<unknown> | undefined;
+	const waitForStartupAbortCleanup = async (): Promise<void> => {
+		const task = candidateStartTask;
+		if (!task) return;
+		await Promise.race([
+			task.then(
+				() => undefined,
+				() => undefined,
+			),
+			Bun.sleep(BROKER_STARTUP_MARKER_WRITE_TIMEOUT_MS),
+		]);
+	};
+	const startupSignalExitCode = (signal: "SIGTERM" | "SIGINT"): 130 | 143 => (signal === "SIGINT" ? 130 : 143);
+	const makeStartupExitRecord = (
+		reason: BrokerStartupExitRecord["reason"],
+		exitCode: 1 | 130 | 143,
+		signal: "SIGTERM" | "SIGINT" | null,
+		timeoutMs?: number,
+		blockingLockPath?: string,
+	): BrokerStartupExitRecord & Record<string, unknown> => ({
+		version: 1,
+		reason,
+		mode: "startup",
+		fenceReason: null,
+		fencedForMs: 0,
+		uptimeMs: Math.max(0, Number((process.hrtime.bigint() - startupStartedAt) / 1_000_000n)),
+		pid: process.pid,
+		signal,
+		exitCode,
+		timeoutMs: timeoutMs ?? null,
+		writtenAt: Date.now(),
+		...(blockingLockPath === undefined ? {} : { blockingLockPath }),
+	});
+	const beginStartupExitRecordWrite = (record: BrokerStartupExitRecord): Promise<BrokerStartupExitWriteStatus> => {
+		const testDelayMs = Number(process.env.GJC_SDK_TEST_BROKER_STARTUP_EXIT_RECORD_DELAY_MS ?? 0);
+		const beforeWriteForTest =
+			Number.isSafeInteger(testDelayMs) && testDelayMs > 0 && testDelayMs <= 10_000
+				? async () => {
+						await emitBrokerStartupTestSignal("startup-exit-record-fallback-waiting");
+						await Bun.sleep(testDelayMs);
+					}
+				: undefined;
+		startupExitWrite ??= writeBrokerStartupExitRecordBounded(
+			agentDir,
+			record,
+			record.reason === "startup-signal"
+				? BROKER_STARTUP_SIGNAL_EXIT_RECORD_WRITE_TIMEOUT_MS
+				: BROKER_STARTUP_MARKER_WRITE_TIMEOUT_MS,
+			beforeWriteForTest,
+		);
+		return startupExitWrite;
+	};
+	const brokerReadyForSignal = (): Broker | undefined => runningBroker ?? (broker?.ownsDiscovery ? broker : undefined);
+	const writeStartupExitLog = (record: BrokerStartupExitRecord & Record<string, unknown>, message: string): void => {
+		if (startupExitLogged) return;
+		startupExitLogged = true;
+		const level = record.exitCode === 1 ? "error" : "warn";
+		if (record.exitCode === 1) logger.error("sdk broker: startup watchdog forcing exit", record);
+		else logger.warn("sdk broker: startup interrupted", record);
+		process.stderr.write(`${JSON.stringify({ level, message, ...record })}\n`);
+	};
+	const exitDuringStartup = (
+		reason: BrokerStartupExitRecord["reason"],
+		exitCode: 1 | 130 | 143,
+		signal: "SIGTERM" | "SIGINT" | null,
+		timeoutMs?: number,
+		blockingLockPath?: string,
+	): Promise<boolean> => {
+		// The first startup exit cause owns both the persisted reason and the process exit code.
+		if (startupExitTask) return startupExitReason === reason ? startupExitTask : Promise.resolve(false);
+		if (startupExitRequested) return Promise.resolve(false);
+		startupExitRequested = true;
+		startupExitReason = reason;
+		const exitRecord = makeStartupExitRecord(reason, exitCode, signal, timeoutMs, blockingLockPath);
+		const message =
+			reason === "startup-lock-blocked" && blockingLockPath
+				? `SDK broker startup blocked by retained removal transition ${blockingLockPath}.`
+				: reason === "startup-deadline"
+					? `SDK broker startup exceeded its ${timeoutMs}ms fence deadline.`
+					: `SDK broker startup interrupted by ${signal} before readiness.`;
+		writeStartupExitLog(exitRecord, message);
+		startupExitTask = (async () => {
+			const exitRecordWrite = await beginStartupExitRecordWrite(exitRecord);
+			const exitRecordWritten = exitRecordWrite.kind === "written";
+			if (!exitRecordWritten)
+				logger.error("sdk broker: startup exit record write timed out", {
+					reason: "startup-exit-record-write-failed-or-timed-out",
+					exitReason: reason,
+					exitRecordWriteStatus: exitRecordWrite.kind,
+					...(exitRecordWrite.kind === "failed" && exitRecordWrite.code
+						? { exitRecordWriteErrorCode: exitRecordWrite.code }
+						: {}),
+					pid: process.pid,
+					exitCode,
+				});
+			return true;
+		})();
+		return startupExitTask;
+	};
+	const unregisterPostmortem = postmortem.register("sdk-broker:exit", async reason => {
+		const signal =
+			reason === postmortem.Reason.SIGTERM
+				? "SIGTERM"
+				: reason === postmortem.Reason.SIGINT
+					? "SIGINT"
+					: pendingShutdownSignal;
+		if (!signal) return;
+		pendingShutdownSignal = signal;
+		if (startupExitTask && startupExitReason !== "startup-signal") {
+			await startupExitTask;
+			await waitForStartupAbortCleanup();
+			process.exit(1);
+			return;
+		}
+		const activeBroker = brokerReadyForSignal();
+		if (activeBroker) {
+			runningBroker = activeBroker;
+			stopSweep?.();
+			await activeBroker.stop({ kind: "signal", signal });
+			return;
+		}
+		startupAbortController.abort();
+		await exitDuringStartup("startup-signal", startupSignalExitCode(signal), signal);
+		// Startup may remain blocked in awaited I/O after abort. Bound best-effort
+		// rollback so shared postmortem can exit with the original signal status.
+		await waitForStartupAbortCleanup();
+	});
+	const finishPendingStartupSignal = async (): Promise<boolean> => {
+		const signal = pendingShutdownSignal;
+		if (!signal) return false;
+		await exitDuringStartup("startup-signal", startupSignalExitCode(signal), signal);
+		return true;
+	};
+	try {
+		const startupOperation = async (deadline: number): Promise<Broker | undefined> => {
+			const remainingMs = Math.max(1, deadline - Date.now());
+			const testWatchdogMs = Number(process.env.GJC_SDK_TEST_BROKER_STARTUP_WATCHDOG_MS ?? 0);
+			const watchdogMs =
+				Number.isSafeInteger(testWatchdogMs) && testWatchdogMs > 0 && testWatchdogMs <= remainingMs
+					? testWatchdogMs
+					: remainingMs;
+			const startupCheckpointDeadline = performance.now() + watchdogMs - 1_000;
+			const startupWatchdog = setTimeout(() => {
+				startupAbortController.abort();
+				void exitDuringStartup("startup-deadline", 1, null, watchdogMs).then(async started => {
+					if (!started) {
+						// A prior startup signal owns the exit cause; its postmortem callback
+						// returns after bounded cleanup and preserves the signal status.
+						return;
+					}
+					await waitForStartupAbortCleanup();
+					process.exit(1);
+				});
+			}, watchdogMs);
+			try {
+				// `gjc sdk broker run` never retires another owner, even one this generation cannot
+				// reuse: any live incumbent is a refusal. Autostart repairs unusable generations.
+				const existing = publicBrokerRun
+					? ((await readBrokerDiscovery(agentDir)) ?? undefined)
+					: await reconcileBrokerGenerationForStartup({ agentDir }, deadline);
+				if (startupAbortController.signal.aborted) return undefined;
+				if (existing) {
+					logger.info("sdk broker: startup reused an existing owner", {
+						reason: "existing-owner-reused",
+						ownerId: existing.ownerId,
+						pid: existing.pid,
+						exitCode: 0,
+					});
+					return undefined;
+				}
+				if (process.env.GJC_SDK_TEST_BROKER_STARTUP_STALL === "1") {
+					const stalled = Promise.withResolvers<void>();
+					await stalled.promise;
+				}
+				const testStartupSignal = process.env.GJC_SDK_TEST_BROKER_STARTUP_SIGNAL;
+				if (testStartupSignal === "SIGTERM" || testStartupSignal === "SIGINT") {
+					await emitBrokerStartupTestSignal("startup-signal-ready");
+					process.kill(process.pid, testStartupSignal);
+					const waiting = Promise.withResolvers<void>();
+					await waiting.promise;
+				}
+				const startupGateFile = process.env.GJC_SDK_TEST_BROKER_STARTUP_GATE_FILE;
+				if (startupGateFile) {
+					await emitBrokerStartupTestSignal("startup-gate-waiting");
+					await waitForBrokerStartupTestGate(startupGateFile);
+					await emitBrokerStartupTestSignal("startup-gate-released");
+				}
+				const startupDelayMs = Number(process.env.GJC_SDK_TEST_BROKER_STARTUP_DELAY_MS ?? 0);
+				if (Number.isSafeInteger(startupDelayMs) && startupDelayMs > 0 && startupDelayMs <= 10_000) {
+					await Bun.sleep(startupDelayMs);
+				}
+				if (startupAbortController.signal.aborted) return undefined;
+				// The real broker-internal entry point is the only place that reads this
+				// launcher-supplied environment variable; it is validated here and handed
+				// to Broker as a typed setting, never read a second time inside broker.ts
+				// from process.env directly.
+				const restartRequestEnv = process.env.GJC_BROKER_RESTART_REQUEST;
+				const restartRequestId =
+					typeof restartRequestEnv === "string" && /^[A-Za-z0-9_-]{1,256}$/.test(restartRequestEnv)
+						? restartRequestEnv
+						: undefined;
+				const testPostPublicationDelayMs = Number(process.env.GJC_SDK_TEST_BROKER_POST_PUBLICATION_DELAY_MS ?? 0);
+				const startupPostPublicationDelayMs =
+					Number.isSafeInteger(testPostPublicationDelayMs) &&
+					testPostPublicationDelayMs > 0 &&
+					testPostPublicationDelayMs <= 10_000
+						? testPostPublicationDelayMs
+						: undefined;
+				const testPrePublicationDelayMs = Number(process.env.GJC_SDK_TEST_BROKER_PRE_PUBLICATION_DELAY_MS ?? 0);
+				const startupPrePublicationDelayMs =
+					Number.isSafeInteger(testPrePublicationDelayMs) &&
+					testPrePublicationDelayMs > 0 &&
+					testPrePublicationDelayMs <= 10_000
+						? testPrePublicationDelayMs
+						: undefined;
+				const testAfterDiscoveryWriteDelayMs = Number(
+					process.env.GJC_SDK_TEST_BROKER_AFTER_DISCOVERY_WRITE_DELAY_MS ?? 0,
+				);
+				const startupAfterDiscoveryWriteTestHook =
+					Number.isSafeInteger(testAfterDiscoveryWriteDelayMs) &&
+					testAfterDiscoveryWriteDelayMs > 0 &&
+					testAfterDiscoveryWriteDelayMs <= 10_000
+						? async () => {
+								await emitBrokerStartupTestSignal("discovery-written-before-retain");
+								const signal = startupAbortController.signal;
+								if (signal.aborted) return;
+								const wait = Promise.withResolvers<void>();
+								const timer = setTimeout(wait.resolve, testAfterDiscoveryWriteDelayMs);
+								const onAbort = (): void => wait.resolve();
+								signal.addEventListener("abort", onAbort, { once: true });
+								try {
+									await wait.promise;
+								} finally {
+									clearTimeout(timer);
+									signal.removeEventListener("abort", onAbort);
+								}
+							}
+						: undefined;
+				const candidate = new Broker({
+					agentDir,
+					startupAbortSignal: startupAbortController.signal,
+					startupCheckpointDeadline,
+					onStartupReady: () => clearTimeout(startupWatchdog),
+					masterOrphanGraceMs: (await Settings.loadForScope({ cwd: process.cwd(), agentDir })).get(
+						"sdk.masterOrphanGraceMs",
+					),
+					resolveDirectoryMigration: async cwd => {
+						const settings = await Settings.loadForScope({ cwd, agentDir });
+						try {
+							const policy = settings.get("session.directoryMigration");
+							return policy === "disabled" ? "disabled" : "copy-retain";
+						} finally {
+							await settings.close();
+						}
+					},
+					...(startupPrePublicationDelayMs === undefined
+						? {}
+						: {
+								startupPrePublicationDelayMs,
+								startupPrePublicationTestHook: async () => {
+									await emitBrokerStartupTestSignal("pre-publication-ready");
+								},
+							}),
+					...(startupAfterDiscoveryWriteTestHook === undefined ? {} : { startupAfterDiscoveryWriteTestHook }),
+					...(startupPostPublicationDelayMs === undefined ? {} : { startupPostPublicationDelayMs }),
+					...(restartRequestId === undefined ? {} : { restartRequestId }),
+				});
+				broker = candidate;
+				candidateStartTask = candidate.start();
+				await candidateStartTask;
+				if (candidate.ownsDiscovery) runningBroker = candidate;
+				return candidate;
+			} finally {
+				clearTimeout(startupWatchdog);
+			}
+		};
+		broker = await withBrokerStartupLock(agentDir, startupOperation, {
+			onAcquired: () => void emitBrokerStartupTestSignal("fence-acquired"),
+			onContended: () => void emitBrokerStartupTestSignal("fence-contended"),
+		});
+	} catch (error) {
+		if (pendingShutdownSignal) {
+			await finishPendingStartupSignal();
+			return;
+		}
+		// A retained removal transition is an explicit acquire failure, not only
+		// an exhausted ordinary contention timeout.
+		if (error instanceof FileLockAcquireError && error.orphanPath) {
+			await exitDuringStartup(
+				"startup-lock-blocked",
+				1,
+				null,
+				BROKER_DISCOVERY_BUDGET.startupLockWaitMs,
+				error.orphanPath,
+			);
+		}
+		if (broker) {
+			try {
+				await broker.stop({ kind: "startup-failure" });
+			} catch {
+				// Preserve the startup/fence failure that made this bootstrap unusable.
+			}
+		}
+		// This process spawns detached with stdio ignored (see ensure.ts), so the
+		// durable marker is the only channel the caller has to see why start()
+		// failed instead of a bare exit code (#3963).
+		const startupFailureIncarnation = processIncarnation(process.pid);
+		const markerWritten = await writeBrokerStartupFailureMarkerBounded(agentDir, {
+			reason: error instanceof Error ? error.message : String(error),
+			exitCode: 1,
+			signal: null,
+			pid: process.pid,
+			...(startupFailureIncarnation === undefined ? {} : { incarnation: startupFailureIncarnation }),
+		});
+		logger.error("sdk broker: startup failed", {
+			reason: "startup-failure",
+			pid: process.pid,
+			exitCode: 1,
+			markerWritten,
+		});
+		unregisterPostmortem();
+		throw error;
+	}
+	if (!broker) {
+		if (pendingShutdownSignal) {
+			await finishPendingStartupSignal();
+			return;
+		}
+		unregisterPostmortem();
+		if (publicBrokerRun) failPublicBrokerRun(agentDir);
+		return;
+	}
+	if (!broker.ownsDiscovery) {
+		if (pendingShutdownSignal) {
+			if (runningBroker) await runningBroker.completion;
+			else await finishPendingStartupSignal();
+			return;
+		}
+		// Another broker owns discovery. The detached autostart entry exits cleanly
+		// (code 0) as the race loser; `gjc sdk broker run` fails instead, because
+		// its supervisor must not mistake a competing owner for its own broker.
+		// Record why so a caller polling for a winner that never appears can
+		// diagnose the loss instead of seeing only a bare exit code.
+		const losingIncarnation = processIncarnation(process.pid);
+		await writeBrokerStartupFailureMarkerBounded(agentDir, {
+			reason: "Another broker owns the lock/discovery; this broker exited as the race loser.",
+			exitCode: publicBrokerRun ? 1 : 0,
+			signal: null,
+			pid: process.pid,
+			...(losingIncarnation === undefined ? {} : { incarnation: losingIncarnation }),
+		});
+		unregisterPostmortem();
+		if (publicBrokerRun) failPublicBrokerRun(agentDir);
+		return;
+	}
+	runningBroker = broker;
+	// A live broker must not keep advertising sessions whose host process is
+	// gone; the sweep is the broker-side half of the host reaping bound.
+	stopSweep = startBrokerDeadRegistrationSweep(runningBroker);
+	try {
+		await runningBroker.completion;
+	} finally {
+		stopSweep?.();
+		if (!pendingShutdownSignal) unregisterPostmortem();
+	}
+	if (pendingShutdownSignal) return;
+	// A supervised broker that lost its root or could not renew its heartbeat
+	// must exit as a failure, so the supervisor restarts it. A requested
+	// shutdown or a committed restart handoff is a clean stop.
+	const terminal = runningBroker.terminalExit;
+	if (publicBrokerRun && (terminal?.mode !== "owned-root" || terminal.reason === "heartbeat-renewal-blocked")) {
+		process.stderr.write(
+			`gjc sdk broker run: SDK broker stopped abnormally (${terminal?.mode ?? "unknown"}: ${terminal?.reason ?? "unknown"}).\n`,
+		);
+		process.exit(1);
+	}
+	process.exit(0);
+}
+
+/** `gjc sdk broker run` did not become the owner: another broker already serves this agent dir. */
+function failPublicBrokerRun(agentDir: string): void {
+	process.stderr.write(`gjc sdk broker run: another SDK broker already owns ${agentDir}.\n`);
+	process.exitCode = 1;
 }

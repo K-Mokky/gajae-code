@@ -2,6 +2,55 @@
 
 ## [Unreleased]
 
+## [0.18.10] - 2026-10-12
+
+## [0.18.9] - 2026-10-11
+
+### Added
+
+- Export a Windows ordinal case-folding primitive for filesystem-aware path identity.
+
+### Fixed
+
+- Use volume capabilities as a conservative fallback when per-directory case flags are unsupported.
+
+## [0.18.8] - 2026-10-08
+
+### Added
+
+- Add a no-follow native empty-directory snapshot that stops at the first child and revalidates root and parent identities without recursive traversal or payload hashing.
+
+### Changed
+
+- Hash the file descriptor already exclusively owned by exact regular-file matching rather than duplicating it, preserving no-follow, byte, identity and post-hash pathname validation with deterministic descriptor cleanup.
+
+### Fixed
+
+- Avoid redundant ancestor metadata probes during POSIX exact deletion while retaining a fresh no-follow directory open for every ancestor, exact parent and file validation, and quarantine safeguards. Failed opens remain failures; symlink diagnostics never authorize retries or deletion.
+
+- Refresh the Darwin ARM64 diagnostic artifact descriptor from a genuine current-source native build after the strict native prerequisite changes. Digest and version validation remain enforced.
+
+- Accept Windows managed roots owned by the built-in Administrators group after elevated setup, while continuing to reject other owner SIDs and validate the root DACL.
+
+## [0.18.7] - 2026-10-04
+
+### Fixed
+
+- Keep owner-only native acquisition policy checks compatible with strict macOS Clippy and regenerate matching diagnostic-artifact provenance without relaxing readonly security or loader validation.
+
+## [0.18.6] - 2026-10-03
+
+### Fixed
+
+- `embed-native --reset` restores the constant null stub before the provenance gate runs, so an untrusted artifact in the directory can no longer block unembedding. Normal embedding still verifies the trusted record before any `require` or output mutation.
+- The non-Darwin diagnostic snapshot stubs are lint-clean opaque types with `const` unsupported answers instead of uninhabited enums, and `NativeDiagnosticSnapshot.close` releases the lease without an explicit drop of a non-`Drop` value.
+- The unsupported lease stubs keep their method receivers, with the `unused_self` suppression scoped to those two methods so the lease API stays identical on every target.
+- Diagnostic loader, provenance and CI-shell test fixtures create their workspaces under the canonical absolute `os.tmpdir()`, so an unset `TMPDIR` no longer produces a relative path that the deletion guard refuses.
+
+- Restored whole-block fuzzy `findMatch` speed after the pi-edit integration: content lines are normalized once per search and each target line is scored with a bit-parallel UTF-16 Levenshtein, so scores stay byte-identical while the scan is about 4x faster.
+
+## [0.18.5] - 2026-09-30
+
 ## [0.18.4] - 2026-09-30
 
 ## [0.18.3] - 2026-09-30

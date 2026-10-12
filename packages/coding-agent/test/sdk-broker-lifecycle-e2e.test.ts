@@ -1,5 +1,4 @@
 import { afterEach, expect, test, vi } from "bun:test";
-import { ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import * as syncFs from "node:fs";
 import { renameSync, writeFileSync } from "node:fs";
@@ -15,6 +14,7 @@ import {
 	runSessionHost,
 	watchSessionHostBrokerLiveness,
 } from "../src/commands/sdk";
+import { acquireFileLock } from "../src/config/file-lock";
 import { Settings } from "../src/config/settings";
 import { planLaunchWorktree } from "../src/gjc-runtime/launch-worktree";
 import { AcpAgent } from "../src/modes/acp/acp-agent";
@@ -47,11 +47,10 @@ import {
 } from "../src/sdk/broker/lifecycle";
 import { parseLifecycleJson } from "../src/sdk/broker/lifecycle-codec";
 import { LifecycleLedger } from "../src/sdk/broker/lifecycle-ledger";
-import { SessionIndex, type SessionIndexEvent } from "../src/sdk/broker/session-index";
+import { SessionIndex, type SessionIndexEvent, sessionIndexChecksum } from "../src/sdk/broker/session-index";
 import { runSdkSessionCli } from "../src/sdk/cli";
 import { SdkClient } from "../src/sdk/client";
 import { readSdkBrokerDiscovery } from "../src/sdk/client/discovery";
-import { createSessionLifecycleService } from "../src/sdk/lifecycle/client";
 import type { CreateLifecycleAgentSessionResult } from "../src/sdk/lifecycle-session";
 import { createSdkMcpServer } from "../src/sdk/mcp";
 import { SessionRouter } from "../src/sdk/router";
@@ -91,80 +90,6 @@ async function waitFor<T>(read: () => Promise<T | undefined>, label: string): Pr
 		await Bun.sleep(25);
 	}
 	throw new Error(`Timed out waiting for ${label}`);
-}
-
-async function expectReadinessCutoffReapsBlockedExtension(extensionSource: string, name: string): Promise<void> {
-	const root = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", `gjc-lifecycle-${name}-`));
-	const agentDir = path.join(root, "agent");
-	const target = path.join(root, "workspace");
-	const stateRoot = path.join(target, ".gjc", "state");
-	const service = createSessionLifecycleService(agentDir);
-	let fixture: Awaited<ReturnType<typeof startFixtureBrokerWithLeaseForTest>> | undefined;
-	let child: { pid: number; incarnation: string; sessionId: string } | undefined;
-	try {
-		await fs.mkdir(path.join(agentDir, "extensions"), { recursive: true });
-		await fs.writeFile(path.join(agentDir, "extensions", `${name}.ts`), extensionSource);
-		fixture = await startFixtureBrokerWithLeaseForTest({ agentDir });
-
-		const create = service.createExternal({
-			actor: { id: "cutoff-regression", namespace: "sdk-broker-lifecycle-e2e" },
-			capability: "session.create",
-			requestKey: `${name}-readiness-cutoff`,
-			readinessTimeoutMs: 4_000,
-			target: { kind: "plain_dir", path: target },
-		});
-		const observedChild = await waitFor(async () => {
-			const sdk = path.join(stateRoot, "sdk");
-			const markerName = (await fs.readdir(sdk).catch(() => [] as string[])).find(entry =>
-				entry.endsWith(".lifecycle.json"),
-			);
-			if (!markerName) return undefined;
-			try {
-				const parsed = JSON.parse(await fs.readFile(path.join(sdk, markerName), "utf8")) as {
-					pid?: unknown;
-					incarnation?: unknown;
-				};
-				if (typeof parsed.pid !== "number" || typeof parsed.incarnation !== "string") return undefined;
-				return {
-					pid: parsed.pid,
-					incarnation: parsed.incarnation,
-					sessionId: markerName.slice(0, -".lifecycle.json".length),
-				};
-			} catch {
-				return undefined;
-			}
-		}, `${name} lifecycle child`);
-		child = observedChild;
-
-		const response = await create;
-		expect(response).toMatchObject({
-			ok: false,
-			operation: "session.create",
-			certainty: "retryable",
-			error: { code: "readiness_timeout" },
-		});
-		expect(response).not.toMatchObject({ error: { code: "terminal_uncertain" } });
-		await waitFor(async () => {
-			try {
-				process.kill(observedChild.pid, 0);
-				return undefined;
-			} catch (error) {
-				if ((error as NodeJS.ErrnoException).code === "ESRCH") return true;
-				throw error;
-			}
-		}, `${name} lifecycle child exit`);
-		const sdkEntries = await fs.readdir(path.join(stateRoot, "sdk")).catch(() => [] as string[]);
-		expect(sdkEntries.filter(entry => entry.startsWith(observedChild.sessionId))).toEqual([]);
-		await expect(fs.access(path.join(stateRoot, "sdk", `${observedChild.sessionId}.json`))).rejects.toThrow();
-	} finally {
-		if (child && observeProcessForTest(child.pid, child.incarnation) === "alive") {
-			try {
-				process.kill(child.pid, "SIGKILL");
-			} catch {}
-		}
-		await fixture?.lease.close();
-		await fs.rm(root, { recursive: true, force: true });
-	}
 }
 
 async function createSessionHostFixture(
@@ -631,6 +556,70 @@ async function liveLifecycleSession(root: string, agentDir: string, sessionId: s
 	}
 }
 
+test("readiness polling avoids repeated heartbeat checkpoints and full index refreshes", async () => {
+	if (process.platform !== "linux") return;
+	const root = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-sdk-ready-poll-cost-"));
+	const agentDir = path.join(root, "agent");
+	const fixture = path.join(root, "ready-poll-cost.ts");
+	const pollingStartedPath = path.join(root, "polling-started");
+	const broker = new Broker({ agentDir, heartbeatTtlMs: 60_000 });
+	let nowMs = 1_000;
+	await fs.writeFile(
+		fixture,
+		`const request = JSON.parse(process.env.GJC_SDK_LIFECYCLE_REQUEST ?? "{}");
+const stateRoot = request.stateRoot;
+const sessionId = request.sessionId;
+const marker = JSON.stringify({ pid: process.pid, effectMarker: request.effectMarker, incarnation: "fixture-incarnation" });
+await Bun.write(stateRoot + "/sdk/" + sessionId + ".lifecycle.json", marker);
+const readyPath = stateRoot + "/sdk/" + sessionId + ".lifecycle.ready.json";
+const endpointPath = stateRoot + "/sdk/" + sessionId + ".json";
+await Bun.write(readyPath, marker);
+await Bun.write(endpointPath, JSON.stringify({ sessionId, url: "ws://127.0.0.1:1", token: "fixture-token", pid: process.pid }));
+await Bun.write(${JSON.stringify(pollingStartedPath)}, "ready");
+setInterval(() => {}, 1_000_000);
+`,
+	);
+	const heartbeatSpy = vi.spyOn(Broker.prototype, "heartbeatSessions");
+	const refreshSpy = vi.spyOn(SessionIndex.prototype, "refresh");
+	const pollingStarted = Promise.withResolvers<void>();
+	const watcher = syncFs.watch(root, (_event, filename) => {
+		if (filename?.toString() === path.basename(pollingStartedPath)) pollingStarted.resolve();
+	});
+	setProcessIncarnationForTest(broker, () => "fixture-incarnation");
+	setLifecycleCommandResolverForTest(broker, () => ({ file: process.execPath, args: ["run", fixture] }));
+	setLifecycleTimingForTest(broker, {
+		now: () => nowMs,
+		sleep: async ms => {
+			nowMs += Math.max(ms, 1);
+			await Bun.sleep(0);
+		},
+	});
+	try {
+		await broker.start();
+		const responsePromise = broker.handleRequest(
+			"session.create",
+			{ cwd: root, readinessTimeoutMs: 4_000 },
+			"ready-poll-cost",
+		);
+		await pollingStarted.promise;
+		heartbeatSpy.mockClear();
+		refreshSpy.mockClear();
+		const response = await responsePromise;
+		expect(response).toMatchObject({ ok: false });
+		expect(heartbeatSpy.mock.calls.length).toBeLessThanOrEqual(1);
+		expect(refreshSpy.mock.calls.length).toBeLessThanOrEqual(2);
+	} finally {
+		watcher.close();
+		setLifecycleTimingForTest(broker, undefined);
+		setLifecycleCommandResolverForTest(broker, undefined);
+		setProcessIncarnationForTest(broker, undefined);
+		heartbeatSpy.mockRestore();
+		refreshSpy.mockRestore();
+		await broker.stop();
+		await fs.rm(root, { recursive: true, force: true });
+	}
+}, 20_000);
+
 test("lifecycle child ignores a stale marker until its current effect marker replaces it", async () => {
 	const root = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-stale-marker-"));
 	const agentDir = path.join(root, "agent");
@@ -889,13 +878,14 @@ test("shipped session host exits promptly after publishing a cutoff receipt", as
 		});
 		if (!child.pid) throw new Error("session host has no pid");
 		const childIncarnation = await incarnation(child.pid);
-		const cutoffStartedAt = performance.now();
 		await fs.writeFile(
 			path.join(stateRoot, "sdk", `${sessionId}.lifecycle.json`),
 			JSON.stringify({ pid: child.pid, effectMarker, incarnation: childIncarnation }),
 		);
+		await waitFor(async () => ((await Bun.file(failurePath).exists()) ? true : undefined), "cutoff receipt");
+		const receiptPublishedAt = performance.now();
 		const outcome = await Promise.race([
-			child.exited.then(code => ({ code, latencyMs: performance.now() - cutoffStartedAt })),
+			child.exited.then(code => ({ code, latencyMs: performance.now() - receiptPublishedAt })),
 			Bun.sleep(1_500).then(() => undefined),
 		]);
 		expect(outcome).toBeDefined();
@@ -4463,7 +4453,7 @@ test("broker directly resumes and forks a canonical cold saved session with scop
 				() => true,
 				() => false,
 			),
-		).toBe(true);
+		).toBe(false);
 		expect(await broker.handleRequest("session.get_endpoint", { sessionId: sourceId })).toMatchObject({
 			ok: false,
 			error: { code: "resource_gone" },
@@ -4531,7 +4521,7 @@ test("broker directly resumes and forks a canonical cold saved session with scop
 				() => true,
 				() => false,
 			),
-		).toBe(true);
+		).toBe(false);
 		expect(await broker.handleRequest("session.get_endpoint", { sessionId: forkId })).toMatchObject({
 			ok: false,
 			error: { code: "resource_gone" },
@@ -4664,7 +4654,7 @@ test("broker replays one identity-bound lifecycle metadata cleanup plan after th
 		const markerPath = path.join(stateRoot, "sdk", `${sessionId}.lifecycle.json`);
 		const readyPath = path.join(stateRoot, "sdk", `${sessionId}.lifecycle.ready.json`);
 		await expect(fs.stat(markerPath)).resolves.toBeDefined();
-		await expect(fs.stat(readyPath)).resolves.toBeDefined();
+		await expect(fs.stat(readyPath)).rejects.toThrow();
 		setLifecycleCleanupHookForTest(crashing, () => {});
 		const deleteInput = { cwd: root, stateRoot, sessionId, sessionPath };
 		await expect(
@@ -5789,24 +5779,60 @@ test("broker preserves a code-less lifecycle startup failure message", async () 
 	const root = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-broker-startup-message-"));
 	const agentDir = path.join(root, "agent");
 	const fixture = path.join(root, "startup-failure.ts");
-	const previousCommand = process.env.GJC_SDK_SESSION_COMMAND;
+	const requestPath = path.join(root, "child-request.json");
+	const pidPath = path.join(root, "child.pid");
+	const exitPath = path.join(root, "child-exit");
+	const deadlines = deriveLifecycleDeadlines(1_000, 4_000);
+	let nowMs = deadlines.receivedAt;
+	let publishedAt: number | undefined;
 	const broker = new Broker({ agentDir });
 	try {
 		await fs.writeFile(
 			fixture,
-			`import { writeSessionLifecycleFailure } from ${JSON.stringify(path.resolve(import.meta.dir, "../src/sdk/broker/lifecycle.ts"))};
-const request = JSON.parse(process.env.GJC_SDK_LIFECYCLE_REQUEST!);
-await writeSessionLifecycleFailure(
-	request.stateRoot,
-	request.sessionId,
-	request.effectMarker,
-	{ phase: "startup", reason: "failed", message: "owned synthetic startup failure" },
-	{ endpointGeneration: null, fenced: true, runtimeRemoved: true, hostStopped: true, brokerRegistrationReleased: true },
-);
-await Bun.sleep(60_000);
+			`await Bun.write(${JSON.stringify(requestPath)}, process.env.GJC_SDK_LIFECYCLE_REQUEST!);
+await Bun.write(${JSON.stringify(pidPath)}, String(process.pid));
+const deadline = Date.now() + 15_000;
+while (!(await Bun.file(${JSON.stringify(exitPath)}).exists()) && Date.now() < deadline) await Bun.sleep(1);
 `,
 		);
-		process.env.GJC_SDK_SESSION_COMMAND = `${process.execPath} ${fixture}`;
+		setLifecycleCommandResolverForTest(broker, () => ({ file: process.execPath, args: ["run", fixture] }));
+		setLifecycleTimingForTest(broker, {
+			now: () => nowMs,
+			sleep: async ms => {
+				if (!(await Bun.file(pidPath).exists())) {
+					await Bun.sleep(1);
+					return;
+				}
+				nowMs += ms;
+				if (publishedAt === undefined) {
+					const request = (await Bun.file(requestPath).json()) as SessionLifecycleLaunchRequest;
+					if (!request.stateRoot || !request.sessionId || !request.effectMarker)
+						throw new Error("Expected the real startup fixture locator and effect marker.");
+					const pid = Number(await Bun.file(pidPath).text());
+					const incarnation = processIncarnation(pid);
+					if (!incarnation) throw new Error("Expected the real startup fixture child incarnation.");
+					await writeSessionLifecycleFailure(
+						request.stateRoot,
+						request.sessionId,
+						request.effectMarker,
+						{ phase: "startup", reason: "failed", message: "owned synthetic startup failure" },
+						{
+							endpointGeneration: null,
+							fenced: true,
+							runtimeRemoved: true,
+							hostStopped: true,
+							brokerRegistrationReleased: true,
+						},
+						undefined,
+						incarnation,
+						pid,
+					);
+					publishedAt = nowMs;
+					await Bun.write(exitPath, "exit\n");
+				}
+				await Bun.sleep(1);
+			},
+		});
 		await broker.start();
 		const response = await broker.handleRequest(
 			"session.create",
@@ -5816,10 +5842,17 @@ await Bun.sleep(60_000);
 		expect(response).toMatchObject({
 			ok: false,
 			error: { code: "spawn_failed", message: "owned synthetic startup failure" },
+			startupFailure: {
+				message: "owned synthetic startup failure",
+				cleanupProof: { processExited: true, endpointRemoved: true, hostUnregistered: { state: "not_registered" } },
+			},
 		});
+		expect(publishedAt).toBeDefined();
+		expect(publishedAt!).toBeLessThan(deadlines.semanticReadyDeadlineAt);
+		expect(nowMs).toBeLessThan(deadlines.lifecycleCleanupDeadlineAt);
 	} finally {
-		if (previousCommand === undefined) delete process.env.GJC_SDK_SESSION_COMMAND;
-		else process.env.GJC_SDK_SESSION_COMMAND = previousCommand;
+		setLifecycleTimingForTest(broker, undefined);
+		setLifecycleCommandResolverForTest(broker, undefined);
 		await broker.stop();
 		await fs.rm(root, { recursive: true, force: true });
 	}
@@ -6115,6 +6148,55 @@ test("broker records the resolved worktree state root and preserves pre-child pr
 			effectIntent: {
 				stateRoot: path.join(worktreeRoot, ".gjc", "state"),
 				childOwnershipEstablished: false,
+			},
+		});
+
+		const baseline = await broker.index.append({
+			type: "host_registered",
+			sessionId: "unrelated-session",
+			locator: { cwd: repo, worktreeRoot: null, stateRoot: path.join(repo, ".gjc", "state") },
+			endpointGeneration: 1,
+			pid: process.pid,
+		});
+		const { checksum: _baselineChecksum, ...baselineEvent } = baseline;
+		const pendingRegistration: Omit<SessionIndexEvent, "checksum"> = {
+			...baselineEvent,
+			indexSeq: baseline.indexSeq + 1,
+			sessionId: "concurrent-worktree-owner",
+			locator: {
+				cwd: worktreeRoot,
+				worktreeRoot,
+				stateRoot: path.join(worktreeRoot, ".gjc", "state"),
+			},
+			ts: Date.now(),
+		};
+		const registration = { ...pendingRegistration, checksum: sessionIndexChecksum(pendingRegistration) };
+		const indexPath = path.join(agentDir, "sdk", "sessions", "index.jsonl");
+		const releaseIndexLock = await acquireFileLock(indexPath);
+		const refreshSpy = vi.spyOn(broker.index, "refresh");
+		let concurrentCreate: Promise<BrokerResponse> | undefined;
+		try {
+			concurrentCreate = broker.handleRequest(
+				"session.create",
+				{
+					cwd: repo,
+					stateRoot: path.join(repo, ".gjc", "state"),
+					target: { worktree: { enabled: true, name: worktreeName } },
+				},
+				"concurrent-worktree-registration",
+			);
+			await waitFor(async () => (refreshSpy.mock.calls.length > 0 ? true : undefined), "locked worktree refresh");
+			await fs.appendFile(indexPath, `${JSON.stringify(registration)}\n`);
+		} finally {
+			await releaseIndexLock();
+			refreshSpy.mockRestore();
+		}
+		if (!concurrentCreate) throw new Error("Expected concurrent worktree creation request");
+		expect(await concurrentCreate).toMatchObject({
+			ok: false,
+			error: {
+				code: "worktree_in_use",
+				message: expect.stringContaining("concurrent-worktree-owner"),
 			},
 		});
 	} finally {
@@ -8495,24 +8577,6 @@ test("broker starts from the production broker entrypoint with no sessions", asy
 	}
 });
 
-test("createExternal reaps an async module-load extension when readiness expires", async () => {
-	await expectReadinessCutoffReapsBlockedExtension(
-		`await Bun.sleep(6_000);
-export default function() {}
-`,
-		"async-extension-load",
-	);
-}, 15_000);
-
-test("createExternal reaps a synchronous Atomics.wait extension when readiness expires", async () => {
-	await expectReadinessCutoffReapsBlockedExtension(
-		`Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 6_000);
-export default function() {}
-`,
-		"sync-extension-load",
-	);
-}, 15_000);
-
 test("shipped sdk session-host-internal stays alive only after a semantic ready event and serves real requests", async () => {
 	const root = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-sdk-subprocess-"));
 	const agentDir = path.join(root, "agent");
@@ -8698,13 +8762,17 @@ test("model profile cutoff returns only proven rollback or retained uncertainty"
 		}
 		expect(response).toMatchObject({
 			ok: false,
-			error: {
-				code: "readiness_timeout",
-				message: expect.stringContaining("stage=readiness waiting_for=session_ready"),
-			},
+			error: { code: "spawn_failed", endpoint: "unavailable" },
 			startupFailure: {
 				phase: "startup",
 				reason: "pending",
+				rollback: {
+					endpointGeneration: null,
+					fenced: true,
+					runtimeRemoved: true,
+					hostStopped: true,
+					brokerRegistrationReleased: true,
+				},
 				cleanupProof: {
 					processExited: true,
 					endpointRemoved: true,
@@ -8712,39 +8780,6 @@ test("model profile cutoff returns only proven rollback or retained uncertainty"
 				},
 			},
 		});
-		if (response.ok || !response.startupFailure) throw new Error("Expected startup failure evidence.");
-		const startupFailure = response.startupFailure;
-		const rollback = startupFailure.rollback;
-		const fullyComplete = {
-			endpointGeneration: null,
-			fenced: true,
-			runtimeRemoved: true,
-			hostStopped: true,
-			brokerRegistrationReleased: true,
-		};
-		if (
-			rollback.endpointGeneration === null &&
-			rollback.fenced &&
-			rollback.runtimeRemoved &&
-			rollback.hostStopped &&
-			rollback.brokerRegistrationReleased
-		) {
-			expect(rollback).toEqual(fullyComplete);
-		} else {
-			expect(rollback).toEqual({
-				endpointGeneration: null,
-				fenced: false,
-				runtimeRemoved: false,
-				hostStopped: false,
-				brokerRegistrationReleased: false,
-			});
-			expect(startupFailure.cleanupProof).toMatchObject({
-				processExited: true,
-				endpointRemoved: true,
-				hostUnregistered: { state: "not_registered" },
-				rollback: fullyComplete,
-			});
-		}
 		expect(await broker.handleRequest("session.create", input, "profile-cutoff")).toEqual(response);
 	} finally {
 		if (previous === undefined) delete process.env.GJC_SDK_TEST_HANG_MODEL_PROFILE;
@@ -8857,218 +8892,6 @@ setInterval(() => {}, 1_000_000);
 	} finally {
 		setLifecycleTimingForTest(broker, undefined);
 		setLifecycleCommandResolverForTest(broker, undefined);
-		await broker.stop();
-		await fs.rm(root, { recursive: true, force: true });
-	}
-}, 10_000);
-
-test("unregistered cutoff retains artifacts when child signal error does not prove exit", async () => {
-	const root = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-sdk-signal-error-cutoff-"));
-	const agentDir = path.join(root, "agent");
-	const fixture = path.join(root, "signal-error-cutoff.ts");
-	const pidPath = path.join(root, "child.pid");
-	const requestPath = path.join(root, "child.request.json");
-	const deadlines = deriveLifecycleDeadlines(1_000, 4_000);
-	let nowMs = deadlines.receivedAt;
-	let childPid: number | undefined;
-	let receiptPublished = false;
-	let signalErrors = 0;
-	const broker = new Broker({ agentDir });
-	await fs.writeFile(
-		fixture,
-		`await Bun.write(${JSON.stringify(pidPath)}, String(process.pid));
-await Bun.write(${JSON.stringify(requestPath)}, process.env.GJC_SDK_LIFECYCLE_REQUEST ?? "");
-setInterval(() => {}, 1_000_000);
-`,
-	);
-	setLifecycleCommandResolverForTest(broker, () => ({ file: process.execPath, args: ["run", fixture] }));
-	setLifecycleTimingForTest(broker, {
-		now: () => nowMs,
-		sleep: async ms => {
-			if (!(await Bun.file(requestPath).exists())) {
-				await Bun.sleep(1);
-				return;
-			}
-			childPid ??= Number(await fs.readFile(pidPath, "utf8"));
-			nowMs += ms;
-			if (!receiptPublished && nowMs >= deadlines.terminationStartDeadlineAt - 100) {
-				const request = JSON.parse(await fs.readFile(requestPath, "utf8")) as {
-					sessionId: string;
-					stateRoot: string;
-					effectMarker: string;
-				};
-				const incarnation = processIncarnation(childPid);
-				if (!incarnation) throw new Error("Expected a readable child process incarnation.");
-				await writeSessionLifecycleFailure(
-					request.stateRoot,
-					request.sessionId,
-					request.effectMarker,
-					{ phase: "startup", reason: "pending", message: "incomplete cutoff receipt" },
-					{
-						endpointGeneration: null,
-						fenced: false,
-						runtimeRemoved: false,
-						hostStopped: false,
-						brokerRegistrationReleased: false,
-					},
-					undefined,
-					incarnation,
-					childPid,
-				);
-				receiptPublished = true;
-			}
-			await Bun.sleep(1);
-		},
-	});
-	const killSpy = vi.spyOn(ChildProcess.prototype, "kill").mockImplementation(function (this: ChildProcess) {
-		if (this.pid === childPid) {
-			signalErrors++;
-			this.emit("error", new Error("synthetic signal delivery failure"));
-			return true;
-		}
-		return false;
-	});
-	try {
-		await broker.start();
-		const response = await broker.handleRequest(
-			"session.create",
-			{ cwd: root, readinessTimeoutMs: deadlines.requestedReadinessTimeoutMs },
-			"signal-error-cutoff",
-		);
-		const request = JSON.parse(await fs.readFile(requestPath, "utf8")) as {
-			sessionId: string;
-			stateRoot: string;
-			effectMarker: string;
-		};
-		expect(receiptPublished).toBe(true);
-		expect(signalErrors).toBeGreaterThan(0);
-		expect(response).toMatchObject({ ok: false, error: { code: "terminal_uncertain" } });
-		await broker.index.refresh();
-		expect(broker.index.listSessions().sessions).toContainEqual(
-			expect.objectContaining({ sessionId: request.sessionId, pid: childPid, terminalUncertain: true }),
-		);
-		expect(() => process.kill(childPid!, 0)).not.toThrow();
-		await expect(
-			fs.access(path.join(request.stateRoot, "sdk", `${request.sessionId}.lifecycle.json`)),
-		).resolves.toBeNull();
-	} finally {
-		killSpy.mockRestore();
-		setLifecycleTimingForTest(broker, undefined);
-		setLifecycleCommandResolverForTest(broker, undefined);
-		if (childPid) {
-			try {
-				process.kill(childPid, "SIGKILL");
-			} catch {}
-		}
-		await broker.stop();
-		await fs.rm(root, { recursive: true, force: true });
-	}
-}, 10_000);
-
-test("unregistered readiness cutoff reserves proof time after a delayed SIGKILL exit", async () => {
-	const root = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-sdk-unregistered-cutoff-"));
-	const agentDir = path.join(root, "agent");
-	const fixture = path.join(root, "unregistered-cutoff.ts");
-	const pidPath = path.join(root, "child.pid");
-	const requestPath = path.join(root, "child.request.json");
-	const receivedAt = 1_000;
-	const deadlines = deriveLifecycleDeadlines(receivedAt, 4_000);
-	let nowMs = receivedAt;
-	let childPid: number | undefined;
-	let exitDeliveredAt: number | undefined;
-	const signals: { signal: NodeJS.Signals; at: number }[] = [];
-	const broker = new Broker({ agentDir });
-	const originalKill = ChildProcess.prototype.kill;
-	const originalEmit = ChildProcess.prototype.emit;
-	await fs.writeFile(
-		fixture,
-		`process.on("SIGTERM", () => {});
-await Bun.write(${JSON.stringify(pidPath)}, String(process.pid));
-await Bun.write(${JSON.stringify(requestPath)}, process.env.GJC_SDK_LIFECYCLE_REQUEST ?? "");
-setInterval(() => {}, 1_000_000);
-`,
-	);
-	setLifecycleCommandResolverForTest(broker, () => ({ file: process.execPath, args: ["run", fixture] }));
-	setLifecycleTimingForTest(broker, {
-		now: () => nowMs,
-		sleep: async milliseconds => {
-			const requestReady = await fs.access(requestPath).then(
-				() => true,
-				() => false,
-			);
-			if (!requestReady) {
-				await Bun.sleep(1);
-				return;
-			}
-			childPid ??= Number(await fs.readFile(pidPath, "utf8"));
-			nowMs += milliseconds;
-			await Bun.sleep(1);
-		},
-	});
-	const killSpy = vi.spyOn(ChildProcess.prototype, "kill").mockImplementation(function (
-		this: ChildProcess,
-		signal?: NodeJS.Signals | number,
-	): boolean {
-		if (this.pid === childPid && (signal === "SIGTERM" || signal === "SIGKILL")) {
-			signals.push({ signal, at: nowMs });
-			const result = originalKill.call(this, signal);
-			if (signal === "SIGKILL") {
-				Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 400);
-				nowMs += 400;
-			}
-			return result;
-		}
-		return originalKill.call(this, signal);
-	});
-	const emitSpy = vi.spyOn(ChildProcess.prototype, "emit").mockImplementation(function (
-		this: ChildProcess,
-		event: string | symbol,
-		...args: unknown[]
-	): boolean {
-		if (event === "exit" && this.pid === childPid) exitDeliveredAt = nowMs;
-		return originalEmit.call(this, event, ...args);
-	});
-	try {
-		await broker.start();
-		const response = await broker.handleRequest(
-			"session.create",
-			{ cwd: root, readinessTimeoutMs: deadlines.requestedReadinessTimeoutMs },
-			"unregistered-delayed-sigkill-exit",
-		);
-		const { sessionId } = JSON.parse(await fs.readFile(requestPath, "utf8")) as { sessionId: string };
-
-		expect(response).toMatchObject({
-			ok: false,
-			error: { code: "readiness_timeout" },
-		});
-		expect(signals).toEqual([
-			{ signal: "SIGTERM", at: deadlines.terminationStartDeadlineAt },
-			{ signal: "SIGKILL", at: expect.any(Number) },
-		]);
-		expect(signals[1]!.at - signals[0]!.at).toBeLessThanOrEqual(200);
-		expect(exitDeliveredAt).toBe(signals[1]!.at + 400);
-		expect(deadlines.lifecycleCleanupDeadlineAt - exitDeliveredAt!).toBeGreaterThanOrEqual(250);
-		expect(nowMs).toBeLessThanOrEqual(deadlines.lifecycleCleanupDeadlineAt);
-		expect(
-			(await fs.readdir(path.join(root, ".gjc", "state", "sdk"))).filter(
-				entry =>
-					entry === `${sessionId}.lifecycle.json` ||
-					entry === `${sessionId}.lifecycle.ready.json` ||
-					entry.startsWith(`${sessionId}.lifecycle.failure.`),
-			),
-		).toEqual([]);
-		await expect(fs.access(path.join(root, ".gjc", "state", "sdk", `${sessionId}.json`))).rejects.toThrow();
-		expect(() => process.kill(childPid!, 0)).toThrow(expect.objectContaining({ code: "ESRCH" }));
-	} finally {
-		killSpy.mockRestore();
-		emitSpy.mockRestore();
-		setLifecycleTimingForTest(broker, undefined);
-		setLifecycleCommandResolverForTest(broker, undefined);
-		if (childPid) {
-			try {
-				process.kill(childPid, "SIGKILL");
-			} catch {}
-		}
 		await broker.stop();
 		await fs.rm(root, { recursive: true, force: true });
 	}

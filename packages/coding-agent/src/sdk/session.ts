@@ -47,13 +47,8 @@ import {
 	providerSupportsAppendOnlyAuto,
 	resolveAppendOnlyMode,
 } from "../append-only-mode";
-import {
-	type AsyncJob,
-	AsyncJobManager,
-	asyncJobEndpointId as deriveAsyncJobEndpointId,
-	isBackgroundJobSupportEnabled,
-	jobElapsedMs,
-} from "../async";
+import { type AsyncJob, AsyncJobManager, isBackgroundJobSupportEnabled, jobElapsedMs } from "../async";
+import { asyncJobEndpointId as deriveAsyncJobEndpointId } from "../async/endpoint-id";
 import { resolveBrowserBackend } from "../browser-backend";
 import { loadCapability, reset as resetCapabilities } from "../capability";
 import { type Rule, ruleCapability, setActiveRules } from "../capability/rule";
@@ -65,6 +60,7 @@ import {
 	resolveMissingSessionModelRecovery,
 } from "../config/model-profile-activation";
 import { resolveModelProfileName } from "../config/model-profile-contract";
+import type { ModelProfileOwnershipMarker } from "../config/model-profile-ownership";
 import { resolveProfileBindings } from "../config/model-profiles";
 import { kNoAuth, ModelRegistry } from "../config/model-registry";
 import {
@@ -84,12 +80,15 @@ import { Settings, type SkillsSettings } from "../config/settings";
 import { resolveEagerTaskDelegation } from "../config/task-delegation";
 import { CursorExecHandlers } from "../cursor";
 import { EditTool } from "../edit";
+import { disposeVmContextsByOwner } from "../eval/js/context-manager";
+import { disposeKernelSessionsByOwner } from "../eval/py/executor";
 import type { MasterModeContext } from "../master-mode/context";
 import { describeFoldReceipt } from "../session/fold-coordinator";
 import type { BashRestrictionProfile } from "../tools/bash-allowed-prefixes";
 import { SearchTool } from "../tools/search";
 import "../discovery";
 import { resolveConfigValue } from "../config/resolve-config-value";
+import { resolveGlobalUserSkillLinkTrust } from "../config/skill-settings-defaults";
 import { getEmbeddedDefaultGjcSkills } from "../defaults/gjc-defaults";
 import { BUNDLED_GROK_BUILD_EXTENSION_ID, getBundledGrokBuildExtensionFactory } from "../defaults/gjc-grok-cli";
 import { initializeWithSettings, releaseSettingsScope } from "../discovery";
@@ -161,7 +160,13 @@ import {
 	type MCPToolCache,
 	resolveMCPToolCache,
 } from "../runtime-mcp";
+import { createMCPFormInputHandler } from "../runtime-mcp/elicitation";
 import type { MCPLoadResult } from "../runtime-mcp/manager";
+import {
+	omitPluginMcpNameShadows,
+	retainPluginMcpMandatoryNames,
+	survivingPluginMcpToolNames,
+} from "../runtime-mcp/plugin-mcp-name-filter";
 import { MCP_STARTUP_WAIT_GRACE_MS } from "../runtime-mcp/startup-policy";
 import type { MCPServerConfig } from "../runtime-mcp/types";
 import {
@@ -182,7 +187,7 @@ import { AgentSession, type ForkContextSeed, isSessionDisposalIncompleteError } 
 import { AuthBrokerClient, AuthStorage, RemoteAuthCredentialStore } from "../session/auth-storage";
 import { type CustomMessage, convertToLlm } from "../session/messages";
 import { primaryControlSurfaceFor } from "../session/primary-control-surface";
-import { createReadonlySessionManager, SessionManager } from "../session/session-manager";
+import { createReadonlySessionManager, SessionManager, sessionArtifactCapability } from "../session/session-manager";
 import {
 	parsePersistedCredentialSelector,
 	resolveStartupAuthConfig,
@@ -489,6 +494,8 @@ export interface CreateAgentSessionOptions {
 	modelPattern?: string;
 	/** Active profile inherited by a nested SDK/subagent session. */
 	activeModelProfile?: string;
+	/** Model profile ownership marker for propagating parent profile ownership to subagent sessions. */
+	modelProfileOwnershipMarker?: ModelProfileOwnershipMarker;
 	/** Thinking selector. Default: from settings, else unset */
 	thinkingLevel?: ThinkingLevel;
 	/** Runtime substitution metadata for the initial model_change session event. */
@@ -581,6 +588,18 @@ export interface CreateAgentSessionOptions {
 	 * @internal CLI-only ordering guard; SDK callers retain immediate startup by default.
 	 */
 	deferMemoryBackendStartup?: boolean;
+	/**
+	 * Skip optional model-catalog discovery during lifecycle startup. ACP hosts must
+	 * publish their endpoint before unrelated provider credential refreshes begin.
+	 * @internal lifecycle-only startup guard.
+	 */
+	deferOptionalModelRefresh?: boolean;
+
+	/**
+	 * Defer model profile activation until explicit model pin validation occurs.
+	 * @internal Lifecycle-only: prevents default profile activation before pin resolution.
+	 */
+	deferModelProfileActivation?: boolean;
 
 	/** Enable LSP integration (tool, formatting, diagnostics, warmup). Default: true */
 	enableLsp?: boolean;
@@ -697,6 +716,22 @@ export interface CreateAgentSessionResult {
 	 * this session published. Undefined when no GJC bundles participated.
 	 */
 	gjcRuntimeSnapshot?: GjcRuntimeSnapshotProvider;
+}
+
+/**
+ * Start optional provider/model discovery only when it is safe to add work to
+ * the caller's startup graph. Lifecycle hosts deliberately skip this during
+ * construction: discovery preflights every configured provider and may refresh
+ * an unrelated OAuth credential while several hosts are opening the same DB.
+ */
+export function startOptionalModelRefresh(
+	modelRegistry: Pick<ModelRegistry, "refreshInBackground">,
+	credentialSessionId: string | undefined,
+	deferred: boolean,
+): boolean {
+	if (deferred) return false;
+	modelRegistry.refreshInBackground("online-if-uncached", credentialSessionId);
+	return true;
 }
 
 export interface DeferredMcpConfigStartupResult {
@@ -2053,6 +2088,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		const hasThinkingEntry = existingBranch.some(entry => entry.type === "thinking_level_change");
 		const hasServiceTierEntry = existingBranch.some(entry => entry.type === "service_tier_change");
 
+		// Apply inherited model profile ownership marker to subagent sessions when a parent provides one.
+		// This must occur after computing hasExistingSession to avoid marking a fresh session as resumed.
+		if (options.modelProfileOwnershipMarker !== undefined) {
+			sessionManager.appendModelProfileOwnershipMarker(options.modelProfileOwnershipMarker);
+		}
+
 		for (const entry of existingBranch) {
 			if (entry.type !== "custom" || entry.customType !== "auth-credential-pin") continue;
 			const data = entry.data;
@@ -2157,7 +2198,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				settings,
 			);
 			await refreshMissingQualifiedModelProviders(startupModelSelectors, modelRegistry, credentialSessionId);
-			modelRegistry.refreshInBackground("online-if-uncached", credentialSessionId);
+			startOptionalModelRefresh(modelRegistry, credentialSessionId, options.deferOptionalModelRefresh === true);
 		}
 
 		const hasExplicitModel = options.model !== undefined || options.modelPattern !== undefined;
@@ -2392,6 +2433,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				profileAuthority,
 				cwd,
 				disabledExtensions: settings.get("disabledExtensions"),
+				allowExternalUserSkillSymlinks: resolveGlobalUserSkillLinkTrust({
+					trustUserSkills: settings.getGlobal("skills.trustUserSkills"),
+					enablePiUser: settings.getGlobal("skills.enablePiUser"),
+				}),
 			});
 			skills = withEmbeddedDefaultGjcSkills(skillsResult.skills);
 			skillWarnings = skillsResult.warnings;
@@ -2631,7 +2676,19 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		let ownedMcpManagerTools: readonly CustomTool[] = [];
 		let publishOwnedMcpTools = false;
 		const notificationDebounceTimers = new Map<string, Timer>();
+		const installMcpInputHandler = (manager: MCPManager): void => {
+			manager.setInputRequestHandler(
+				createMCPFormInputHandler({
+					getUi: () => {
+						const context = toolContextStore.getContext();
+						return { ui: context.ui, hasUI: context.hasUI === true };
+					},
+					getAskAnswerSource: () => session.getAskAnswerSource(),
+				}),
+			);
+		};
 		const wireMcpManagerCallbacks = (manager: MCPManager): void => {
+			installMcpInputHandler(manager);
 			manager.setOnPromptsChanged(serverName => {
 				const promptCommands = buildMCPPromptCommands(manager);
 				session.setMCPPromptCommands(promptCommands);
@@ -2762,9 +2819,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 						for (const tool of result.tools) {
 							const serverName = tool.mcpServerName;
 							if (serverName === undefined) continue;
-							if (pluginNames.has(serverName)) pluginMcpToolNames.push(tool.name);
-							else conventionalMcpToolNames.push(tool.name);
+							if (!pluginNames.has(serverName)) conventionalMcpToolNames.push(tool.name);
 						}
+						pluginMcpToolNames.push(...survivingPluginMcpToolNames(result.tools as CustomTool[]));
 					}
 				} catch (error) {
 					logger.warn("Failed to recreate MCP authority after session rescope", {
@@ -3158,9 +3215,18 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			getSessionFile: () => sessionManager.getSessionFile() ?? null,
 			getSessionAgentDir: () => session?.getSessionAgentDir() ?? options.agentDir ?? settings.getAgentDir(),
 			getEvalKernelOwnerId: () => evalKernelOwnerId,
-			assertEvalExecutionAllowed: () => session?.assertEvalExecutionAllowed(),
-			trackEvalExecution: (execution, abortController) =>
-				session ? session.trackEvalExecution(execution, abortController) : execution,
+			assertEvalExecutionAllowed: () => {
+				if (!session) throw new Error("Eval execution is unavailable until session initialization completes");
+				session.assertEvalExecutionAllowed();
+			},
+			trackEvalExecution: (execution, abortController) => {
+				if (!session) {
+					abortController.abort(new Error("Eval execution is unavailable until session initialization completes"));
+					void execution.catch(() => {});
+					throw new Error("Eval execution is unavailable until session initialization completes");
+				}
+				return session.trackEvalExecution(execution, abortController);
+			},
 			getAsyncJobManager: () => asyncJobManager,
 			waitForUserSteering: signal => {
 				if (agent) return agent.waitForSteeringArrival(signal);
@@ -3243,19 +3309,21 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			peekQueueInvoker: () => session.peekQueueInvoker(),
 			peekStandingResolveHandler: () => session.peekStandingResolveHandler(),
 			setStandingResolveHandler: handler => session.setStandingResolveHandler(handler),
-			allocateOutputArtifact: async toolType => {
-				try {
-					return await sessionManager.allocateArtifactPath(toolType);
-				} catch {
-					return {};
-				}
+			allocateOutputArtifact: toolType => sessionManager.allocateArtifactPath(toolType),
+			captureArtifactPublication: () => {
+				const capability = sessionArtifactCapability(sessionManager);
+				if (!capability) throw new Error("Session artifact publication authority is unavailable.");
+				return capability.captureArtifactPublication();
 			},
 			getArtifactManager: () => sessionManager.getArtifactManager(),
 			isArtifactManagerAuthorized: manager => sessionManager.isArtifactManagerAuthorized(manager),
 			adoptArtifactManager: manager => sessionManager.adoptArtifactManager(manager),
 			releaseArtifactManager: manager => sessionManager.releaseArtifactManager(manager),
 			ensureArtifactManager: () => sessionManager.ensureArtifactManager(),
-			registerSessionCleanup: cleanup => session?.registerToolSessionTransitionCleanup(cleanup) ?? (() => {}),
+			registerSessionCleanup: cleanup => {
+				if (!session) throw new Error("Cannot register session cleanup before session initialization completes");
+				return session.registerToolSessionTransitionCleanup(cleanup);
+			},
 			mcpConfigPath: explicitMcpConfigPath,
 			settings,
 			authStorage,
@@ -3663,6 +3731,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					: {}),
 			});
 			owned.setAuthStorage(authStorage);
+			installMcpInputHandler(owned);
 			mcpManager = owned;
 			ownsMcpManager = true;
 			registerOwnedMcpManagerCleanup(owned);
@@ -3876,7 +3945,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		const inlineExtensions: ExtensionFactory[] = [...(options.extensions ?? [])];
 		const discoveredHookExtensions: Array<{ factory: ExtensionFactory; name: string }> = [];
 		if (customTools.length > 0) {
-			inlineExtensions.push(createCustomToolsExtension(customTools));
+			inlineExtensions.push(createCustomToolsExtension(omitPluginMcpNameShadows(customTools)));
 		}
 		if (!options.disableExtensionDiscovery) {
 			try {
@@ -3992,6 +4061,14 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 							// INTERNAL terminal-abort seams, threaded directly from the
 							// owning session (NOT on the public extension context).
 							terminalAbortSeams: {
+								getTerminalRunOwnerForEvent: event => {
+									if (!session) throw new Error("Terminal owner session is not initialized.");
+									return session.getTerminalRunOwnerForEvent(event);
+								},
+								getRunOwnerDomain: handle => {
+									if (!session) throw new Error("Terminal owner session is not initialized.");
+									return session.getRunOwnerDomain(handle);
+								},
 								getTerminalTurnEpoch: () => {
 									if (!session) throw new Error("Terminal abort session is not initialized.");
 									return session.getTerminalTurnEpoch();
@@ -4408,19 +4485,6 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			// Re-resolve the allowed set: extension factories above may have
 			// registered providers/models that weren't visible at startup.
 			const allowedFallbackCandidates = await resolveAllowedModels(modelRegistry, settings, modelMatchPreferences);
-			// A fresh provider discovery can disprove a bundled model while the
-			// general available catalog retains it for offline/profile compatibility.
-			// Exclude only those positively disproved bundled entries from the
-			// unconfigured startup path; explicit model/profile resolution above keeps
-			// its existing precedence and semantics.
-			const profileAvailableKeys = new Set(
-				modelRegistry
-					.getAvailableForProfileActivation()
-					.map(candidate => `${candidate.provider}\u0000${candidate.id}`),
-			);
-			const fallbackCandidates = allowedFallbackCandidates.filter(candidate =>
-				profileAvailableKeys.has(`${candidate.provider}\u0000${candidate.id}`),
-			);
 			// Candidate order is not a quality signal: catalogs sort retired models
 			// ahead of current ones whenever their IDs carry older date suffixes, so
 			// an unconfigured install would otherwise start on a model its provider
@@ -4428,7 +4492,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			// first — the same table `findInitialModel` consults — and only then fall
 			// back to catalog order.
 			for (const candidate of orderByProviderDefaultFirst(
-				fallbackCandidates,
+				allowedFallbackCandidates,
 				modelRegistry.automaticProviderOrder(credentialSessionId),
 			)) {
 				if (await hasModelApiKey(candidate)) {
@@ -4860,6 +4924,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				}
 			}
 		}
+		// Mandatory names follow the plugin tools that survived registration.
+		// A colliding user tool keeps the normalized name and must stay selectable.
+		pluginMcpToolNames.splice(0, pluginMcpToolNames.length, ...survivingPluginMcpToolNames(customTools));
 		const mandatoryMCPToolNameSet = new Set(pluginMcpToolNames);
 		const selectableExplicitMCPToolNames = explicitlyRequestedMCPToolNames.filter(
 			name => !mandatoryMCPToolNameSet.has(name),
@@ -5350,6 +5417,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 									profileAuthority,
 									cwd: reloadCwd,
 									disabledExtensions: settings.get("disabledExtensions"),
+									allowExternalUserSkillSymlinks: resolveGlobalUserSkillLinkTrust({
+										trustUserSkills: settings.getGlobal("skills.trustUserSkills"),
+										enablePiUser: settings.getGlobal("skills.enablePiUser"),
+									}),
 								});
 								return { skills: withEmbeddedDefaultGjcSkills(reloaded.skills), warnings: reloaded.warnings };
 							}
@@ -5416,7 +5487,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			forkContextSeed: options.forkContextSeed,
 			providerSessionState: options.providerSessionState,
 		});
-		session.setActiveModelProfile(startupActiveModelProfile);
+		// Defer profile activation until explicit model pin validation occurs (#5919).
+		if (!options.deferModelProfileActivation) {
+			session.setActiveModelProfile(startupActiveModelProfile);
+		}
 		if (retainedRecoveryBindingsAfterLateRestore) session.markStartupRecoveryBindingsRequired();
 		if (recoveredSessionDefault)
 			session.installRecoveredDefaultFallbackChain(
@@ -5679,14 +5753,14 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 						const previousNames = ownedMcpManagerToolNames;
 						const nextToolNames = nextTools.map(tool => tool.name);
 						const previousSet = new Set(previousNames);
-						const nextPluginToolNames = nextTools
-							.filter(tool => tool.mcpServerName && pluginServerNames.has(tool.mcpServerName))
-							.map(tool => tool.name);
+						const nextPluginToolNames = survivingPluginMcpToolNames(nextTools);
 						const nextConventionalToolNames = nextTools
 							.filter(tool => tool.mcpServerName && conventionalServerNames.has(tool.mcpServerName))
 							.map(tool => tool.name);
 						const nextMandatoryMcpToolNames = [
-							...pluginMcpToolNames.filter(name => !previousSet.has(name)),
+							...retainPluginMcpMandatoryNames(nextTools, pluginMcpToolNames).filter(
+								name => !previousSet.has(name),
+							),
 							...nextPluginToolNames,
 						];
 						const nextConventionalMcpToolNames = [
@@ -5799,9 +5873,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 						const previousNames = inheritedMcpManagerToolNames;
 						const nextNames = snapshot.map(tool => tool.name);
 						const classifiedTools = classifyInheritedMcpToolNames(manager, snapshot);
+						const mandatoryPluginToolNames = survivingPluginMcpToolNames(snapshot);
 						try {
 							await session.replaceNamedCustomTools(previousNames, snapshot, {
-								mandatoryMCPToolNames: classifiedTools.pluginMcpToolNames,
+								mandatoryMCPToolNames: mandatoryPluginToolNames,
 								activateNewTools: false,
 							});
 						} catch (error) {
@@ -5809,7 +5884,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 							throw error;
 						}
 						inheritedMcpManagerToolNames = nextNames;
-						pluginMcpToolNames.splice(0, pluginMcpToolNames.length, ...classifiedTools.pluginMcpToolNames);
+						pluginMcpToolNames.splice(0, pluginMcpToolNames.length, ...mandatoryPluginToolNames);
 						conventionalMcpToolNames.splice(
 							0,
 							conventionalMcpToolNames.length,
@@ -5985,6 +6060,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			gjcRuntimeSnapshot: gjcRuntimeStore,
 		};
 	} catch (error) {
+		// Capture pending owner work before asynchronous startup teardown can yield.
+		const startupPythonCleanup = disposeKernelSessionsByOwner(evalKernelOwnerId);
+		void startupPythonCleanup.catch(() => {});
 		let cleanupDiagnostic: unknown;
 		let ownedMcpCleanupFailed = false;
 		let ownedMcpCleanupError: unknown;
@@ -6022,6 +6100,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					await session.awaitDisposeCompletion();
 				}
 			});
+			await attemptCleanup(() => startupPythonCleanup);
 		} else {
 			if (hasRegistered)
 				await attemptCleanup(() => {
@@ -6046,18 +6125,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					ownedMcpCleanupFailed = true;
 					ownedMcpCleanupError = cleanupError;
 				});
-			const evalCleanup = Promise.all([import("../eval/py/executor"), import("../eval/js/context-manager")]);
-			let evalCleanupModules: Awaited<typeof evalCleanup> | undefined;
-			try {
-				evalCleanupModules = await evalCleanup;
-			} catch (cleanupError) {
-				recordCleanupFailure(cleanupError);
-			}
-			if (evalCleanupModules) {
-				const [kernelExecutor, contextManager] = evalCleanupModules;
-				await attemptCleanup(() => kernelExecutor.disposeKernelSessionsByOwner(evalKernelOwnerId));
-				await attemptCleanup(() => contextManager.disposeVmContextsByOwner(evalKernelOwnerId));
-			}
+			await attemptCleanup(() => startupPythonCleanup);
+			await attemptCleanup(() => disposeVmContextsByOwner(evalKernelOwnerId));
 			await attemptCleanup(closeOwnedSettings);
 		}
 		if (processCwdClaimed)

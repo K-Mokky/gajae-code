@@ -49,6 +49,7 @@ import {
 	waitForChildSpawn,
 } from "../src/sdk/broker/lifecycle";
 import { LifecycleLedger } from "../src/sdk/broker/lifecycle-ledger";
+import * as processIncarnation from "../src/sdk/broker/process-incarnation";
 import { resolveSdkInternalSpawnCommand, resolveSdkInternalSpawnCommandForTest } from "../src/sdk/broker/runtime";
 import { readBrokerStartupFailureMarker, writeBrokerStartupFailureMarker } from "../src/sdk/broker/startup-failure";
 import { BROKER_RUNTIME_ABORT_CAPABILITY_FIELD } from "../src/sdk/host/control/runtime-gate";
@@ -1987,9 +1988,13 @@ describe("SDK broker identity and discovery", () => {
 				"Timed out waiting for detached SDK broker discovery.",
 			);
 			const brokerPid = await gotPid;
-			// The spawned detached broker must have been terminated + reaped, not orphaned.
+			// The spawned detached broker must have been terminated, not orphaned. The
+			// trampoline reparents it away from this process, so once killed it may stay
+			// an unreaped zombie of whichever subreaper adopted it; `kill(pid, 0)` still
+			// reports such a zombie as present. Process-identity observation classifies
+			// it as absent, which is the same authority the production reap path uses.
 			expect(typeof brokerPid).toBe("number");
-			expect(brokerDiscovery.isPidAlive(brokerPid!)).toBe(false);
+			expect(processIncarnation.observeProcessIncarnation(brokerPid!).status).toBe("absent");
 			// No owner handle leaked for the failed agent dir.
 			expect(brokerOwnerForTest(dir)).toBeUndefined();
 		} finally {
@@ -2064,7 +2069,10 @@ describe("SDK broker identity and discovery", () => {
 			},
 		});
 
-		await reapSpawnedBrokerForTest(child as unknown as ChildProcess, { gracefulMs: 1, killVerifyMs: 1 });
+		await reapSpawnedBrokerForTest(child as unknown as ChildProcess, undefined, undefined, {
+			gracefulMs: 1,
+			killVerifyMs: 1,
+		});
 
 		expect(signals).toEqual([]);
 	});
@@ -2094,7 +2102,7 @@ describe("SDK broker identity and discovery", () => {
 				return true;
 			},
 		});
-		const owner = registerBrokerOwnerForTest(dir, child as unknown as ChildProcess, {
+		const owner = registerBrokerOwnerForTest(dir, child as unknown as ChildProcess, undefined, undefined, {
 			gracefulMs: 1,
 			killVerifyMs: 1,
 		});
@@ -2164,6 +2172,47 @@ describe("SDK broker identity and discovery", () => {
 		await owner?.stop();
 		expect(brokerOwnerForTest(dir)).toBeUndefined();
 		await fs.rm(dir, { recursive: true, force: true });
+	});
+	it("adopts a reusable discovery published by a competing broker before reaping the losing spawn", async () => {
+		const dir = await temp();
+		const winner = new Broker({ agentDir: dir });
+		try {
+			const winnerDiscovery = await winner.start();
+			let hiddenReads = 0;
+			let forceAbsentObservation = false;
+			const readOriginal = brokerDiscovery.readBrokerDiscovery;
+			const observeOriginal = processIncarnation.observeProcessIncarnation;
+			const readSpy = vi.spyOn(brokerDiscovery, "readBrokerDiscovery").mockImplementation(async (agentDir, ttl) => {
+				if (agentDir === dir && hiddenReads < 2) {
+					hiddenReads += 1;
+					if (hiddenReads === 2) forceAbsentObservation = true;
+					return null;
+				}
+				if (agentDir === dir) forceAbsentObservation = false;
+				return readOriginal(agentDir, ttl);
+			});
+			const observationSpy = vi.spyOn(processIncarnation, "observeProcessIncarnation").mockImplementation(pid => {
+				if (forceAbsentObservation && pid !== winnerDiscovery.pid) {
+					forceAbsentObservation = false;
+					return { status: "absent" };
+				}
+				return observeOriginal(pid);
+			});
+			try {
+				await expect(ensureBroker({ agentDir: dir })).resolves.toMatchObject({
+					pid: winnerDiscovery.pid,
+					ownerId: winnerDiscovery.ownerId,
+				});
+				expect(hiddenReads).toBe(2);
+			} finally {
+				observationSpy.mockRestore();
+				readSpy.mockRestore();
+			}
+		} finally {
+			await brokerOwnerForTest(dir)?.stop();
+			await winner.stop();
+			await fs.rm(dir, { recursive: true, force: true });
+		}
 	});
 	it("leaves exactly one live detached broker after concurrent process startup", async () => {
 		const dir = await temp();
@@ -3381,7 +3430,8 @@ describe("SDK broker identity and discovery", () => {
 		await broker.start();
 		const transitionSpy = vi.spyOn(broker.ledger, "transition").mockImplementation(async (...args) => {
 			const result = await transition(...args);
-			if (!canonicalInjected && JSON.stringify(args[2]?.response).includes("artifacts were removed")) {
+			// #6339 reworded the durable artifact-completion response to "artifacts are removed".
+			if (!canonicalInjected && JSON.stringify(args[2]?.response).includes("artifacts are removed")) {
 				canonicalInjected = true;
 				await fs.mkdir(artifactsDir);
 				await fs.writeFile(path.join(artifactsDir, ".reappeared"), "reappeared");
@@ -3975,7 +4025,8 @@ describe("SDK broker identity and discovery", () => {
 			const transcriptParent = path.dirname(sessionPath);
 			const renamedTranscriptParent = `${transcriptParent}.renamed`;
 			await fs.rename(transcriptParent, renamedTranscriptParent);
-			await fs.mkdir(transcriptParent);
+			// The replacement must still pass managed-scope security (#6339) so replay reaches receipt validation.
+			await fs.mkdir(transcriptParent, { mode: 0o700 });
 			const replacedParentReplay = await broker.handleRequest(
 				"session.delete",
 				{ sessionId, sessionPath, cwd },

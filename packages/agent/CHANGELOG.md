@@ -2,6 +2,33 @@
 
 ## [Unreleased]
 
+## [0.18.10] - 2026-10-12
+
+## [0.18.9] - 2026-10-11
+
+### Added
+
+- Add `AgentPromptOptions.contextOverflowManaged` so session owners can classify and recover context overflow at their session boundary while keeping successful empty stops terminal in the agent loop.
+
+## [0.18.8] - 2026-10-08
+
+### Fixed
+
+- Promote zero-token empty provider responses to explicit errors, including responses without typed transport metadata.
+- Preserve clean-attempt fallback for typed capacity overloads after earlier committed tool work, while blocking replay of observable output.
+
+- Preserve managed fallback retries when a provider stages an empty assistant text placeholder before reporting a statusless overload, while retaining non-empty terminal error content.
+
+## [0.18.7] - 2026-10-04
+
+## [0.18.6] - 2026-10-03
+
+### Fixed
+
+- A run that fails with the generic `Agent run failed.` now logs its underlying cause (error name, message, `cause` chain, and a short stack) as a `warn` entry in the local gjc log, with credentials redacted. The transcript and SDK clients still receive only the generic message; previously the cause was discarded entirely, so these failures could not be diagnosed.
+
+## [0.18.5] - 2026-09-30
+
 ## [0.18.4] - 2026-09-30
 
 ## [0.18.3] - 2026-09-30

@@ -15,12 +15,18 @@ const LOCKED_EXCLUSIONS: Readonly<Record<string, string>> = {
 		"internal marketplace lifecycle refresh for the session skill catalog; not an independent SDK ingress operation",
 	"agent_session:getTerminalTurnEpoch":
 		"internal terminal-abort bus seam (epoch only), threaded via terminalAbortSeams; not a user-facing SDK control seam",
+	"agent_session:getTerminalRunOwnerForEvent":
+		"internal Agent-claimed event ownership proof, read only through the terminalAbortSeams bus capability; not a public SDK operation",
+	"agent_session:getRunOwnerDomain":
+		"internal run-resource ledger domain lookup for exact consuming-run ownership; not a public SDK operation",
 	"agent_session:cancelPendingPreflightForTerminalAbort":
 		"internal terminal-abort bus seam, threaded via terminalAbortSeams; not a user-facing SDK control seam",
 	"agent_session:abortPromptAndWaitWithTerminal":
 		"internal terminal-abort fencing seam, threaded via terminalAbortSeams; not a user-facing SDK control seam",
 	"agent_session:pendingToolExecutions":
 		"internal read-only run-resource-ledger view, threaded via terminalAbortSeams so the prompt deadline can find a tool-call boundary; not a user-facing SDK control seam",
+	"agent_session:markProfileRoleOverrideManual":
+		"internal profile role-layer ownership tracking after explicit user assignments; not a user-facing SDK control seam",
 	"slash_command:routing":
 		"visual/local-only autorouting settings toggle and smart-routing panel entry, not a user-facing SDK control seam",
 	"slash_command:mcp":
@@ -62,6 +68,8 @@ const LOCKED_EXCLUSIONS: Readonly<Record<string, string>> = {
 		"local transcript-discovery metadata command; no SDK operation counterpart or runtime/retention authority",
 	"slash_command:unstar":
 		"local transcript-discovery metadata command; no SDK operation counterpart or runtime/retention authority",
+	"agent_session:getSubagentLifecycleStatuses":
+		"internal read-only subagent status projection consumed through session.progress (Q32), not a separate SDK seam",
 	"agent_session:constructor": "internal accessor/plumbing, not a user-facing control seam",
 	"agent_session:getSessionAgentDir":
 		"internal session-scoped agent-directory accessor, not a user-facing SDK control seam",
@@ -73,6 +81,26 @@ const LOCKED_EXCLUSIONS: Readonly<Record<string, string>> = {
 		"internal terminal-abort steering snapshot cleanup, not a user-facing SDK control seam",
 	"agent_session:getConfiguredModelChainState":
 		"internal model-profile transaction snapshot, not a user-facing SDK control seam",
+	"agent_session:setUnavailableModelProfile":
+		"internal session-scoped startup-profile recovery marker, not a user-facing SDK control seam",
+	"agent_session:getUnavailableModelProfile":
+		"internal session-scoped startup-profile recovery status for UI rendering, not a public SDK operation",
+	"agent_session:getConfigurationPaths":
+		"internal config hot-reload path identity projection, not a user-facing SDK control seam",
+	"agent_session:validateConfiguration":
+		"internal read-only config hot-reload preflight, not an independent SDK operation",
+	"agent_session:reloadConfiguration":
+		"internal transactional config hot-reload publication, not a user-facing SDK control seam",
+	"agent_session:getProfileInstalledOverrideState":
+		"internal model-profile activation rollback snapshot, not a user-facing SDK control seam",
+	"agent_session:restoreProfileInstalledOverrideState":
+		"internal model-profile activation rollback restoration, not a user-facing SDK control seam",
+	"agent_session:prepareModelSelectionForProfileActivation":
+		"internal staged model-selection preparation for profile activation, not a user-facing SDK control seam",
+	"agent_session:commitPreparedProfileModelSelection":
+		"internal model-selection commit for profile activation, not a user-facing SDK control seam",
+	"agent_session:finishPreparedProfileModelSelection":
+		"internal post-commit model-selection refresh for profile activation, not a user-facing SDK control seam",
 	"agent_session:getDefaultFallbackRuntimeState":
 		"internal model-profile transaction snapshot, not a user-facing SDK control seam",
 	"agent_session:restoreDefaultFallbackRuntimeState":
@@ -205,6 +233,10 @@ const LOCKED_EXCLUSIONS: Readonly<Record<string, string>> = {
 	"agent_session:getContextUsageObservabilityForTests": "test-only observability, not a user-facing control seam",
 	"agent_session:getAutoCompactionThresholdTokens":
 		"internal compaction-threshold accessor feeding the /context breakdown; exposed through context.get, not an independent SDK operation",
+	"agent_session:resolvePromptSkillInvocation":
+		"internal prompt-dispatch classifier shared with interactive title seeding, not a user-facing control seam",
+	"agent_session:isLocallyHandledSlashCommand":
+		"internal slash-command classifier that keeps command text out of title seeding, not a user-facing control seam",
 	"agent_session:purgeQueuedCustomMessages": "internal accessor/plumbing, not a user-facing control seam",
 	"agent_session:clearQueue": "internal accessor/plumbing, not a user-facing control seam",
 	"agent_session:popLastQueuedMessage": "internal accessor/plumbing, not a user-facing control seam",
@@ -217,6 +249,12 @@ const LOCKED_EXCLUSIONS: Readonly<Record<string, string>> = {
 		"internal owner-recovery staged restore builder after durable claims/fencing, never a user-facing SDK operation",
 	"agent_session:setActiveModelProfile": "internal accessor/plumbing, not a user-facing control seam",
 	"agent_session:getActiveModelProfile": "internal accessor/plumbing, not a user-facing control seam",
+	"agent_session:getUserModelSelectionRevision":
+		"internal session-scoped model selection revision tracking behind the reviewed model.set seam, not an independent public SDK operation",
+	"agent_session:getUserCanonicalVariantSelection":
+		"internal session-scoped model variant selection state behind the reviewed model.set seam, not an independent public SDK operation",
+	"agent_session:markUserModelSelection":
+		"internal session-scoped model selection revision marker behind the reviewed model.set seam, not an independent public SDK operation",
 	"agent_session:clearSessionOnlyModelProfileState":
 		"internal session-scoped profile lifecycle plumbing behind the reviewed model.set seam, not an independent public SDK operation",
 	"agent_session:noteProfileInstalledOverrides":
@@ -385,6 +423,7 @@ const SEAM_TO_SDK: Readonly<Record<string, string>> = {
 	"slash_command:session": "session.list",
 	"slash_command:jobs": "runtime.jobs.list",
 	"slash_command:context": "context.get",
+	"slash_command:progress": "session.progress",
 	"slash_command:usage": "usage.get",
 	"slash_command:tools": "tools.list",
 	"slash_command:login": "auth.login",

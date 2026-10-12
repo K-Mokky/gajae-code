@@ -226,6 +226,11 @@ const BEHAVIORAL_OWNER_TESTS: Readonly<Record<string, readonly string[]>> = {
 		"packages/coding-agent/test/agent-session-promotion-identity.test.ts",
 		"packages/coding-agent/test/agent-session-terminal-abort-chain.test.ts",
 	],
+	// Session-manager owns the in-memory session lifecycle, whose integration
+	// contract is not basename-matched and needs explicit behavioral-owner coverage.
+	"packages/coding-agent/src/session/session-manager.ts": [
+		"packages/coding-agent/test/session/session-memory-integration.test.ts",
+	],
 	// The managed-scope owner-only self-heal budget/latency contract is verified by
 	// a dedicated suite that exercises the bounded walk, targeted repair, and
 	// deferred tail directly (prepare only runs the walk behind a Linux-only
@@ -653,6 +658,7 @@ export function isWindowsSessionPathRegressionPath(changedPath: string): boolean
 		changedPath === "packages/coding-agent/test/sdk-session-index-fsync.windows.test.ts" ||
 		changedPath === "packages/coding-agent/test/sdk-lifecycle-ready-then-exit.test.ts" ||
 		changedPath === "packages/coding-agent/test/sdk-session-index-lock-contention.test.ts" ||
+		changedPath === "packages/coding-agent/test/file-lock-signed-identity.test.ts" ||
 		changedPath === "packages/coding-agent/src/sdk/broker/process-incarnation.ts" ||
 		changedPath === "packages/coding-agent/src/config/file-lock.ts" ||
 		// The session-state lock and empty-delete receipt GC consume the native
@@ -1568,6 +1574,8 @@ function isInstallPath(changedPath: string): boolean {
 }
 
 function isCodingAgentRuntimePath(changedPath: string): boolean {
+	// Changelogs don't constitute runtime changes requiring native build or validation
+	if (isDocOrChangelogPath(changedPath)) return false;
 	return changedPath.startsWith("packages/coding-agent/") || changedPath.startsWith("packages/agent/") || changedPath.startsWith("packages/ai/");
 }
 

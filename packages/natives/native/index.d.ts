@@ -112,6 +112,22 @@ export declare class MacAppearanceObserver {
   stop(): void
 }
 
+/**
+ * Exclusive read-only lease over one already published broker document.
+ *
+ * The lease exposes no descriptor, no path, no write method and no publication
+ * authority: it can only copy bounded bytes, re-prove the retained descriptor
+ * and name edges, and close. `close` is idempotent and never throws; every use
+ * after close reports `unsafe_discovery`.
+ */
+export declare class NativeDiagnosticSnapshot {
+  get ok(): boolean
+  get reason(): string | null
+  read(): NativeDiagnosticSnapshotRead
+  revalidate(): NativeDiagnosticSnapshotStatus
+  close(): void
+}
+
 /** Retained no-follow authority for the SDK publication namespace. */
 export declare class NativeRetainedBrokerPublication {
   /**
@@ -614,8 +630,7 @@ export declare class TtyWriter {
    * Enqueue terminal output; never blocks. Returns the total bytes now
    * pending (including this chunk).
    *
-   * Reads the JS string as UTF-16 and transcodes it with `xutf` straight into
-   * the shared back buffer.
+   * Reads the JS string as UTF-8 directly into the shared back buffer.
    */
   write(data: string): number
   /** Bytes accepted but not yet written to the terminal. */
@@ -671,7 +686,7 @@ export declare function __piNativesPublishOutcomeV1(): void
  * `packages/natives/native/index.js` (which derives the name from
  * `package.json#version`).
  */
-export declare function __piNativesV0_18_4(): void
+export declare function __piNativesV0_18_10(): void
 
 /**
  * Apply conservative pre-execution rewrites to a bash command.
@@ -989,6 +1004,14 @@ export interface DependentIdleDeliveryResult {
  */
 export declare function detectMacOSAppearance(): MacOSAppearance | null
 
+/**
+ * Open a read-only lease over the fixed broker publication under `agentDir`.
+ *
+ * The caller supplies only the agent directory: the publication name, the
+ * ancestor policy and the read budget are fixed by this adapter.
+ */
+export declare function diagnosticSnapshotOpen(agentDir: string, budgetMs: number): NativeDiagnosticSnapshot
+
 /** One jsdiff change object: a run of added, removed, or common tokens. */
 export interface DiffChange {
   /** Joined token text for this run (lines keep their `
@@ -1077,6 +1100,12 @@ export interface DiffStreamResult {
  * post-pass dedupes whitespace across change boundaries.
  */
 export declare function diffWords(oldText: string, newText: string): Array<DiffChange>
+
+/**
+ * Returns whether the directory's child names are case-sensitive when the
+ * platform can query that property.
+ */
+export declare function directoryCaseSensitive(path: string): boolean | null
 
 export interface DoctorJournalCreateResult {
   authority?: DoctorJournalAuthority
@@ -2078,6 +2107,19 @@ export type NativeCanonicalDirectoryIdentity =
 			code: "not_found" | "not_directory" | "not_utf8" | "network_unsupported" | "identity_unavailable" | "io_error";
 	  }
 
+/** Bytes copied out of one read-only broker publication observation. */
+export interface NativeDiagnosticSnapshotRead {
+  ok: boolean
+  reason?: string
+  bytes?: Uint8Array
+}
+
+/** Outcome of a read-only publication revalidation. */
+export interface NativeDiagnosticSnapshotStatus {
+  ok: boolean
+  reason?: string
+}
+
 export interface NativeDirectoryParentIdentity {
   dev: bigint
   ino: bigint
@@ -2876,6 +2918,12 @@ export declare function sliceWithWidth(line: string, startCol: number, length: n
 export declare function snapshotDirectoryTree(path: string): NativeDirectoryTreeResult
 
 /**
+ * Capture native root metadata only after proving a directory has no entries.
+ * Enumeration stops at the first non-dot child; no child is opened or read.
+ */
+export declare function snapshotEmptyDirectory(path: string): NativeDirectoryTreeResult
+
+/**
  * Unified-diff hunks with jsdiff
  * `structuredPatch(_, _, oldText, newText, _, _, { context }).hunks`
  * semantics. `context` defaults to 4 like jsdiff.
@@ -2978,6 +3026,12 @@ export interface WindowsJobMemoryProbeResult {
   call?: string
   code?: string
 }
+
+/**
+ * Fold UTF-16 code units with Windows' ordinal case mapping, without Unicode
+ * expansions.
+ */
+export declare function windowsOrdinalCaseFold(value: string): string
 
 /** Profiling results returned to JavaScript. */
 export interface WorkProfile {

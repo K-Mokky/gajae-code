@@ -10,7 +10,6 @@ import {
 	type Context,
 	classifyContextOverflow,
 	classifyFallbackTrigger,
-	EMPTY_RESPONSE_PROVIDER_CODE,
 	EventStream,
 	isProviderSafetyStopAuthenticated,
 	isZodSchema,
@@ -728,7 +727,7 @@ function managedContextOverflow(message: AssistantMessage, config: AgentLoopConf
 	const transportFailure = managedTransportFailure(message);
 	// Managed empty-stop responses may be repaired by the managed shell below; only
 	// typed/error overflows are discardable before that normalization boundary.
-	if (config.fallbackManaged && message.stopReason !== "error") return false;
+	if ((config.fallbackManaged || config.contextOverflowManaged) && message.stopReason !== "error") return false;
 	return classifyContextOverflow(message, transportFailure, config.model.contextWindow);
 }
 
@@ -770,12 +769,41 @@ function managedTransportFailure(failure: unknown) {
 	return facts && typeof facts === "object" ? transportFailureFacts(facts) : undefined;
 }
 
+function managedAssistantMessageHasContent(failure: unknown): boolean {
+	const content = managedProperty(failure, "content");
+	if (content === undefined) return false;
+	try {
+		if (!Array.isArray(content)) return true;
+		return content.some(block => {
+			if (!block || typeof block !== "object") return true;
+			const type = managedProperty(block, "type");
+			if (type === "text") {
+				const text = managedProperty(block, "text");
+				return typeof text !== "string" || text.length > 0;
+			}
+			if (type === "thinking") {
+				const thinking = managedProperty(block, "thinking");
+				const signature = managedProperty(block, "thinkingSignature");
+				return (
+					typeof thinking !== "string" ||
+					(thinking.length === 0 && signature !== undefined && typeof signature !== "string") ||
+					thinking.length > 0 ||
+					(typeof signature === "string" && signature.length > 0)
+				);
+			}
+			return true;
+		});
+	} catch {
+		return true;
+	}
+}
 // AI owns provider-originated authority. The agent loop owns authority for
 // the rebuilt message objects it creates; this second WeakSet is deliberately
 // module-private so a public AI consumer cannot transfer authority to an
 // arbitrary destination. A destination is marked only while this managed
 // runtime is rebuilding a source that AI authenticated.
 const managedProviderSafetyStops = new WeakSet<object>();
+const managedLocalEmptyResponses = new WeakSet<object>();
 
 function isManagedProviderSafetyStopAuthenticated(value: unknown): boolean {
 	return (
@@ -784,21 +812,28 @@ function isManagedProviderSafetyStopAuthenticated(value: unknown): boolean {
 	);
 }
 
-function managedRetryableFailure(failure: unknown): boolean {
+function managedRetryableFailure(failure: unknown, transaction?: ManagedAttemptTransaction): boolean {
+	const hasObservableOutput =
+		transaction?.hasObservableAssistantOutput(failure) ?? managedAssistantMessageHasContent(failure);
+	if (
+		managedProperty(failure, "stopReason") === "error" &&
+		managedProperty(failure, "errorKind") === "local_empty_response"
+	) {
+		return !hasObservableOutput;
+	}
 	const facts = managedTransportFailure(failure);
 	if (!facts) return false;
-	// OpenAI's typed statusless capacity-overload code (issue #5018) never
-	// becomes managed transaction authority. Before the code survived as
-	// transport facts this failure produced none, so the staged attempt was
-	// always committed; the shared Responses parser and Codex events now carry
-	// it, and this check preserves that committed-failure behavior instead of
-	// discarding the transaction. It reads only typed facts, never error text.
+	// Statusless typed capacity overloads are retryable only when the managed
+	// transaction and its terminal failure contain no observable assistant
+	// output. Empty provider-start text placeholders do not block retry, while
+	// terminal-only content remains committed. Admission reads typed facts, not
+	// provider error prose.
 	if (
 		facts.status === undefined &&
 		facts.providerCode === SERVER_OVERLOADED_PROVIDER_CODE &&
 		(facts.openaiErrorCode === undefined || facts.openaiErrorCode === SERVER_OVERLOADED_PROVIDER_CODE)
 	) {
-		return false;
+		return !hasObservableOutput;
 	}
 	// A typed provider safety stop is terminal evidence ahead of any transport
 	// class, but only with adapter-minted provenance: unauthenticated labels
@@ -825,21 +860,42 @@ function managedRetryableFailure(failure: unknown): boolean {
 	);
 }
 
-function promoteTypedEmptyResponseStop(message: AssistantMessage): void {
+function promoteEmptyResponseStop(
+	message: AssistantMessage,
+	providerMessage: unknown,
+	transaction?: ManagedAttemptTransaction,
+): void {
+	const providerContent = managedProperty(providerMessage, "content");
+	const providerErrorMessage = managedProperty(providerMessage, "errorMessage");
+	let providerContentIsEmpty = false;
+	try {
+		providerContentIsEmpty = Array.isArray(providerContent) && providerContent.length === 0;
+	} catch {
+		return;
+	}
 	if (
+		managedProperty(providerMessage, "stopReason") !== "stop" ||
+		!providerContentIsEmpty ||
+		(typeof providerErrorMessage === "string" && providerErrorMessage !== "") ||
+		managedProperty(providerMessage, "errorKind") !== undefined ||
+		managedProperty(providerMessage, "errorStatus") !== undefined ||
+		transaction?.hasObservableAssistantOutput(providerMessage) ||
 		message.stopReason !== "stop" ||
 		message.content.length !== 0 ||
 		message.usage.input !== 0 ||
 		message.usage.output !== 0 ||
 		message.usage.cacheRead !== 0 ||
 		message.usage.cacheWrite !== 0 ||
-		message.usage.totalTokens !== 0 ||
-		managedTransportFailure(message)?.providerCode?.toLowerCase() !== EMPTY_RESPONSE_PROVIDER_CODE
+		message.usage.totalTokens !== 0
 	) {
 		return;
 	}
 	message.stopReason = "error";
 	message.errorMessage = "Provider returned an empty response with zero token usage";
+	// Preserve the runtime-owned retry classification for untyped provider
+	// payloads without inventing provider transport facts.
+	message.errorKind = "local_empty_response";
+	managedLocalEmptyResponses.add(message);
 }
 /**
  * Terminal safety-stop authority is provenance-bound, not data-bound: a
@@ -867,6 +923,7 @@ function sanitizeProviderSafetyStopProvenance(
 	const errorKindRead = managedPropertyRead(message, "errorKind");
 	if (
 		errorKindRead.ok &&
+		errorKindRead.value !== "local_empty_response" &&
 		(errorKindRead.value !== "provider_safety_stop" || isManagedProviderSafetyStopAuthenticated(message))
 	) {
 		return message;
@@ -2138,7 +2195,11 @@ function managedAssistantShell(
 	const errorKind =
 		stopReason === "error" && managedProperty(source, "errorKind") === "provider_safety_stop"
 			? ("provider_safety_stop" as const)
-			: undefined;
+			: stopReason === "error" &&
+					((typeof value === "object" && value !== null && managedLocalEmptyResponses.has(value)) ||
+						(typeof source === "object" && source !== null && managedLocalEmptyResponses.has(source)))
+				? ("local_empty_response" as const)
+				: undefined;
 	const safeMetadata: Record<string, unknown> = {};
 	if (isManagedPlainRecord(detailed.snapshot)) {
 		for (const key of Object.keys(detailed.snapshot)) {
@@ -2185,6 +2246,7 @@ function managedAssistantShell(
 		revokeProviderSafetyStop(value);
 		if (typeof value === "object" && value !== null) managedProviderSafetyStops.delete(value);
 	}
+	if (errorKind === "local_empty_response") managedLocalEmptyResponses.add(rebuilt);
 	return rebuilt;
 }
 
@@ -2374,7 +2436,9 @@ function managedAssistantContent(value: unknown): AssistantMessage["content"][nu
 	}
 	if (type === "thinking") {
 		const thinking = managedProperty(value, "thinking");
-		return typeof thinking === "string" ? { type, thinking } : undefined;
+		const thinkingSignature = managedProperty(value, "thinkingSignature");
+		if (typeof thinking !== "string") return undefined;
+		return { type, thinking, ...(typeof thinkingSignature === "string" ? { thinkingSignature } : {}) };
 	}
 	if (type === "redactedThinking") {
 		const data = managedProperty(value, "data");
@@ -2673,6 +2737,7 @@ function isSupersededStreamingDelta(item: ManagedAttemptBatchItem): boolean {
 
 class ManagedAttemptTransaction {
 	#batch: ManagedAttemptBatchItem[] = [];
+	#hasObservableAssistantOutput = false;
 	#stagedEventCount = 0;
 	#stagedBytes = 0;
 	/** Caps for this transaction, read once from the operator env knobs. */
@@ -2698,7 +2763,7 @@ class ManagedAttemptTransaction {
 	push(event: AgentEvent): void {
 		if (this.#committed) {
 			if (event.type === "message_end" || event.type === "turn_end") {
-				this.#batch.push({ type: "event", event });
+				this.#retain({ type: "event", event });
 				return;
 			}
 			this.stream.push(event);
@@ -2801,7 +2866,7 @@ class ManagedAttemptTransaction {
 		}
 		// Each frame's exact accounted size is retained so compaction can debit
 		// exactly what it reclaims instead of re-measuring the whole batch.
-		this.#batch.push({
+		this.#retain({
 			type: "assistant_event",
 			message: partial,
 			event: snapshotEvent,
@@ -2811,6 +2876,54 @@ class ManagedAttemptTransaction {
 		this.#stagedBytes += retainedBytes;
 	}
 
+	hasObservableAssistantOutput(terminalMessage?: unknown): boolean {
+		return this.#hasObservableAssistantOutput || managedAssistantMessageHasContent(terminalMessage);
+	}
+
+	#retain(item: ManagedAttemptBatchItem): void {
+		this.#hasObservableAssistantOutput ||= this.#itemHasObservableAssistantOutput(item);
+		this.#batch.push(item);
+	}
+
+	#itemHasObservableAssistantOutput(item: ManagedAttemptBatchItem): boolean {
+		if (item.type === "assistant_event") {
+			if (managedAssistantMessageHasContent(item.message)) return true;
+			const event = item.event;
+			if (
+				event.type === "text_delta" ||
+				event.type === "thinking_delta" ||
+				event.type === "reasoning_summary_delta" ||
+				event.type === "text_end" ||
+				event.type === "thinking_end" ||
+				event.type === "reasoning_summary_end"
+			) {
+				if (event.type === "text_end" || event.type === "thinking_end" || event.type === "reasoning_summary_end")
+					return event.content.length > 0;
+				return event.delta.length > 0;
+			}
+			return event.type === "toolcall_start" || event.type === "toolcall_delta" || event.type === "toolcall_end";
+		}
+		const event = item.event;
+		if ("message" in event && managedAssistantMessageHasContent(event.message)) return true;
+		if ("error" in event && managedAssistantMessageHasContent(event.error)) return true;
+		if (event.type === "message_update") {
+			const update = event.assistantMessageEvent;
+			if (
+				update.type === "text_delta" ||
+				update.type === "thinking_delta" ||
+				update.type === "reasoning_summary_delta"
+			)
+				return update.delta.length > 0;
+			if (update.type === "text_end" || update.type === "thinking_end" || update.type === "reasoning_summary_end")
+				return update.content.length > 0;
+			return update.type === "toolcall_start" || update.type === "toolcall_delta" || update.type === "toolcall_end";
+		}
+		return (
+			event.type === "tool_execution_start" ||
+			event.type === "tool_execution_update" ||
+			event.type === "tool_execution_end"
+		);
+	}
 	flush(): void {
 		if (this.#discarded) return;
 		for (const item of this.#batch) {
@@ -3097,7 +3210,7 @@ class ManagedAttemptTransaction {
 				this.push(detached);
 				return;
 			}
-			this.#batch.push({ type: "event", event: detached, bytes: detachedBytes });
+			this.#retain({ type: "event", event: detached, bytes: detachedBytes });
 			this.#stagedEventCount++;
 			this.#stagedBytes += detachedBytes;
 			return;
@@ -3191,7 +3304,7 @@ class ManagedAttemptTransaction {
 		}
 		// Retain each frame's accounted size so compaction can debit exactly what
 		// it reclaims instead of re-measuring the whole batch.
-		this.#batch.push({ type: "event", event: snapshot, bytes });
+		this.#retain({ type: "event", event: snapshot, bytes });
 		this.#stagedEventCount += 1;
 
 		this.#stagedBytes += bytes;
@@ -3913,6 +4026,7 @@ async function runLoopBody(
 					recoveryAttempt && !wasEscapedNonAsciiRecoveryAttempt
 						? undefined
 						: { value: getLogicalTurnToolChoice() },
+					attemptTransaction,
 				);
 				const detection = detectHarmonyLeakInAssistantMessage(message);
 				if (detection && shouldMitigateHarmonyLeak(config.model, detection)) {
@@ -3936,7 +4050,7 @@ async function runLoopBody(
 						stream.end(newMessages);
 						return;
 					}
-					if (config.fallbackManaged && transaction && managedRetryableFailure(err)) {
+					if (config.fallbackManaged && transaction && managedRetryableFailure(err, transaction)) {
 						transaction.discard();
 						currentContext.messages.splice(contextMessageCount);
 						newMessages.splice(newMessageCount);
@@ -4208,7 +4322,11 @@ async function runLoopBody(
 					: "Provider returned an empty response with anomalously low token usage (possible context overflow via proxy)";
 			}
 
-			if (config.fallbackManaged && message.stopReason === "error" && managedRetryableFailure(message)) {
+			if (
+				config.fallbackManaged &&
+				message.stopReason === "error" &&
+				managedRetryableFailure(message, transaction)
+			) {
 				transaction?.discard();
 				currentContext.messages.splice(contextMessageCount);
 				newMessages.splice(newMessageCount);
@@ -4541,6 +4659,7 @@ async function streamAssistantResponse(
 	},
 	provisionalToolTransaction?: ManagedAttemptTransaction,
 	toolChoiceOverride?: { value: ToolChoice | undefined },
+	managedAttemptTransaction?: ManagedAttemptTransaction,
 ): Promise<AssistantMessage> {
 	const managedDegradedFieldDiagnostics = new Set<string>();
 	// Apply context transform if configured (AgentMessage[] → AgentMessage[])
@@ -4983,7 +5102,7 @@ async function streamAssistantResponse(
 							const finalMessage = config.fallbackManaged
 								? managedAssistantShell(finished, config.model, managedDegradedFieldDiagnostics, true)
 								: finished;
-							promoteTypedEmptyResponseStop(finalMessage);
+							promoteEmptyResponseStop(finalMessage, finished, managedAttemptTransaction);
 							if (promptPrefix) finalMessage.promptPrefix = promptPrefix;
 							if (addedPartial) {
 								context.messages[context.messages.length - 1] = finalMessage;
@@ -4997,6 +5116,13 @@ async function streamAssistantResponse(
 							await finishChat(finalMessage);
 							return finalMessage;
 						}
+						default: {
+							const unexpectedEventType = (event as unknown as { type?: unknown }).type;
+							if (config.fallbackManaged && typeof unexpectedEventType !== "string") {
+								throw new ManagedAttemptSnapshotError("event.unknownType");
+							}
+							break;
+						}
 					}
 				}
 			} finally {
@@ -5008,6 +5134,7 @@ async function streamAssistantResponse(
 			const trailing = config.fallbackManaged
 				? managedAssistantShell(finished, config.model, managedDegradedFieldDiagnostics, true)
 				: finished;
+			promoteEmptyResponseStop(trailing, finished, managedAttemptTransaction);
 			if (promptPrefix) trailing.promptPrefix = promptPrefix;
 			await finishChat(trailing);
 			return trailing;

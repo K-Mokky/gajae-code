@@ -296,8 +296,15 @@ export const SDK_LIFECYCLE_ROUTER_PROTOCOL_VERSION = 1;
  * so generation-191 owners cannot reap hosts with queued or promoted work.
  * Generation 193 gates streamed content on negotiated observer capabilities,
  * so existing owners are replaced before exposing the new observer path.
+ * Generation 201 binds queued cancellation and terminal deadlines to the exact
+ * consuming run, so pre-fix owners cannot serve the new generic lifecycle path.
+ * Generation 202 joins queued-removal terminal publication before ordinary
+ * abort acknowledgement, replacing owners that still acknowledge cancellation
+ * before its terminal record is durable.
+ * Generation 203 replaces owners that still treat a project `.gjc` file as an
+ * explicit deadline-autosave opt-in for a primary checkout.
  */
-export const DAEMON_GENERATION = 200;
+export const DAEMON_GENERATION = 203;
 
 /**
  * Serving-compatibility boundary for daemon lifecycle requests. Epoch 7

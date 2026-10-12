@@ -257,6 +257,7 @@ describe("dev-ci canonical-plan workflow contract", () => {
 		expect(windowsJob).toContain("bun test ./packages/coding-agent/test/session/managed-lock-lease.windows.test.ts");
 		expect(windowsJob).toContain("bun test ./packages/coding-agent/test/sdk-session-index-fsync.windows.test.ts");
 		expect(windowsJob).toContain("bun test ./packages/coding-agent/test/sdk-session-index-lock-contention.test.ts");
+		expect(windowsJob).toContain("bun test ./packages/coding-agent/test/file-lock-signed-identity.test.ts");
 		expect(windowsJob).toContain("bun test ./packages/coding-agent/test/session-state-lock.test.ts");
 		expect(windowsJob).toContain("bun test ./packages/natives/test/windows-runtime-install.windows.test.ts");
 		// The required predicate must textually match the job gate so the aggregate
@@ -1146,6 +1147,7 @@ describe("planTargetedTasks PR-mode targeting", () => {
 		"packages/coding-agent/test/other/index.test.ts",
 		"packages/coding-agent/test/sdk-client.test.ts",
 		"packages/coding-agent/test/tools/bash-master-owner-session-id.test.ts",
+		"packages/coding-agent/test/session/session-memory-integration.test.ts",
 	];
 
 	function targeted(paths: readonly string[]) {
@@ -1326,6 +1328,7 @@ test("tab-worker graph changes always include install-methods and are Darwin rel
 			"packages/coding-agent/test/sdk-session-directory.windows.test.ts",
 			"packages/coding-agent/test/sdk-session-index-fsync.windows.test.ts",
 			"packages/coding-agent/test/sdk-session-index-lock-contention.test.ts",
+			"packages/coding-agent/test/file-lock-signed-identity.test.ts",
 			"packages/coding-agent/src/sdk/broker/process-incarnation.ts",
 			"packages/coding-agent/src/config/file-lock.ts",
 			// Session-state lock / empty-delete receipt GC bind the native identity
@@ -1391,6 +1394,18 @@ test("tab-worker graph changes always include install-methods and are Darwin rel
 		expect(keys).toContain("check:@gajae-code/coding-agent");
 		expect(keys).toContain("cli-smoke");
 		expect(keys.filter(key => key === "native-linux-x64" || key === "native-build")).toEqual(["native-linux-x64"]);
+	});
+
+	test("a deleted test in a non-runtime package does not schedule CLI smoke or native build", () => {
+		const tasks = planTargetedTasks(
+			["packages/example/test/deleted.test.ts"],
+			[...targetingPackages, ...packages],
+			testFiles,
+		);
+		const keys = tasks.map(task => task.key);
+		expect(keys).toEqual(["check:@gajae-code/example"]);
+		expect(keys).not.toContain("cli-smoke");
+		expect(keys.filter(key => key === "native-linux-x64" || key === "native-build")).toEqual([]);
 	});
 
 	test("the live RLM e2e test gets native artifacts for skipped import-time setup", () => {
@@ -1480,6 +1495,32 @@ test("tab-worker graph changes always include install-methods and are Darwin rel
 			task => task.key,
 		);
 		expect(keys).toContain("test:packages/coding-agent/test/managed-scope-self-heal-budget.test.ts");
+	});
+	test("session-manager changes select session-memory integration exactly once without broad shards", () => {
+		const testKey = "test:packages/coding-agent/test/session/session-memory-integration.test.ts";
+		const tasks = targeted(["packages/coding-agent/src/session/session-manager.ts"]);
+		const keys = tasks.map(task => task.key);
+		expect(keys.filter(key => key === testKey)).toHaveLength(1);
+		expect(tasks.find(task => task.key === testKey)?.command).toEqual([
+			"bun",
+			"test",
+			"packages/coding-agent/test/session/session-memory-integration.test.ts",
+		]);
+		expect(keys).not.toContain("test:@gajae-code/coding-agent");
+		expect(keys.filter(key => key.startsWith("test:@gajae-code/coding-agent:shard-"))).toEqual([]);
+	});
+	test("unrelated session sources do not select the session-memory integration test", () => {
+		const keys = targeted(["packages/coding-agent/src/session/session-storage.ts"]).map(task => task.key);
+		expect(keys).not.toContain("test:packages/coding-agent/test/session/session-memory-integration.test.ts");
+	});
+	test("duplicate session-manager changes still select the integration test once", () => {
+		const keys = targeted([
+			"packages/coding-agent/src/session/session-manager.ts",
+			"packages/coding-agent/src/session/session-manager.ts",
+		]).map(task => task.key);
+		expect(
+			keys.filter(key => key === "test:packages/coding-agent/test/session/session-memory-integration.test.ts"),
+		).toHaveLength(1);
 	});
 	const extensibilityOwnerTests = [
 		"packages/coding-agent/test/function-hooks.test.ts",

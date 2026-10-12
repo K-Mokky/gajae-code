@@ -40,8 +40,12 @@ export interface LoadContext {
 	repoRoot: string | null;
 	/** Whether discovery must remain isolated to the supplied home boundary. */
 	isolatedHome?: boolean;
+	/** Bypass lexical filesystem caches for this discovery operation. */
+	bypassCache?: boolean;
 	/** Owning session settings for provider policy decisions. */
 	settings?: Settings;
+	/** User-owned permission to follow skill links outside a user scan root. */
+	allowExternalUserSkillSymlinks?: boolean;
 }
 
 /**
@@ -112,6 +116,8 @@ export interface LoadOptions {
 	includeDisabledProviders?: boolean;
 	/** Explicit disabled extension IDs to apply instead of settings. */
 	disabledExtensions?: string[];
+	/** Bypass lexical filesystem caches for this discovery operation. */
+	bypassCache?: boolean;
 	/** Session settings whose provider policy applies to this load. */
 	settings?: Settings;
 	/** Internal: prevent explicit-home loads from consulting process-global policy. */

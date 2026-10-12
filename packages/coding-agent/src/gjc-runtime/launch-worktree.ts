@@ -2,6 +2,7 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { canonicalEnvKey, projectEnvSnapshot } from "@gajae-code/utils/env-file";
 import { shortenPath } from "../tools/render-utils";
 
 export type GjcLaunchWorktreeMode =
@@ -175,6 +176,8 @@ function sanitizePathToken(value: string): string {
  * beside the first.
  */
 const WORKTREE_BUCKET_ENV = "GJC_WORKTREE_DIR";
+/** Captured when this module loads, before a later `chdir` or dotenv delete. */
+const startupWorktreeBucketSnapshot = projectEnvSnapshot();
 /**
  * Expands to the repository directory name.
  *
@@ -205,8 +208,28 @@ export function resolveWorktreeBucketForPath(
 	const template = expandHomePrefix(configured || DEFAULT_WORKTREE_BUCKET, home, pathApi);
 	return pathApi.resolve(
 		pathApi.dirname(repoRoot),
-		template.replaceAll(REPO_NAME_PLACEHOLDER, pathApi.basename(repoRoot)),
+		// Function replacer so a `$` in the repository directory name is kept verbatim.
+		template.replaceAll(REPO_NAME_PLACEHOLDER, () => pathApi.basename(repoRoot)),
 	);
+}
+
+/**
+ * Operator override only. Bun has already copied the project dotenv into the
+ * environment, so a value that matches `projectEnvSnapshot` — a static hit or
+ * a dynamic declaration — must not select the bucket. An operator value the
+ * project does not declare is kept.
+ */
+function trustedWorktreeBucketEnv(env: NodeJS.ProcessEnv): string | undefined {
+	const raw = env[WORKTREE_BUCKET_ENV];
+	if (!raw) return undefined;
+	const snapshot = startupWorktreeBucketSnapshot;
+	const key = canonicalEnvKey(WORKTREE_BUCKET_ENV);
+	const declared = snapshot.values[key];
+	const trimmed = raw.trim();
+	if (declared !== undefined && (snapshot.dynamic.has(key) || declared === raw || declared === trimmed)) {
+		return undefined;
+	}
+	return trimmed.length > 0 ? trimmed : undefined;
 }
 
 /**
@@ -215,14 +238,40 @@ export function resolveWorktreeBucketForPath(
  * A relative override resolves against the repository's parent directory. The default
  * `{repo}/.worktrees` template places managed worktrees inside the repository, while
  * `{repo}.worktrees` adopts an existing sibling bucket. An absolute override is used verbatim.
+ * A project dotenv value is ignored; an operator value the project does not declare is kept.
  */
 function resolveWorktreeBucket(repoRoot: string): string {
-	return resolveWorktreeBucketForPath(repoRoot, process.env[WORKTREE_BUCKET_ENV], os.homedir(), path);
+	return resolveWorktreeBucketForPath(repoRoot, trustedWorktreeBucketEnv(process.env), os.homedir(), path);
+}
+
+function throwIfBucketRealpathEscapesRepository(repoRoot: string, bucketPath: string): void {
+	let realBucket: string;
+	try {
+		realBucket = fs.realpathSync(bucketPath);
+	} catch (error) {
+		// A missing bucket is created later. A dangling link is classified by inspectBucketDir.
+		if (fileSystemErrorCode(error) === "ENOENT") return;
+		throw error;
+	}
+	const relativeReal = path.relative(fs.realpathSync(repoRoot), realBucket);
+	if (relativeReal.startsWith(`..${path.sep}`) || relativeReal === ".." || path.isAbsolute(relativeReal)) {
+		throw new Error(
+			[
+				"worktree_bucket_escapes_repository",
+				"The GJC launch worktree bucket resolves outside the repository.",
+				`Path: ${formatBucketPath(bucketPath)}`,
+				"Safe remediation: replace the path with a real directory inside the repository, or set GJC_WORKTREE_DIR to a directory outside the repository. GJC did not create a worktree.",
+			].join("\n"),
+		);
+	}
 }
 
 function ensureRepositoryBucketIgnored(repoRoot: string, bucketPath: string): void {
 	const relativeBucket = path.relative(repoRoot, bucketPath);
+	// Lexical paths outside the repo are the operator override and stay allowed.
 	if (relativeBucket.startsWith(`..${path.sep}`) || relativeBucket === ".." || path.isAbsolute(relativeBucket)) return;
+	// git check-ignore accepts a gitignored symlink without looking at its target.
+	throwIfBucketRealpathEscapesRepository(repoRoot, bucketPath);
 	const ignoreProbe = path.join(relativeBucket, ".gjc-worktree-probe");
 	for (const candidate of [relativeBucket, ignoreProbe]) {
 		const result = Bun.spawnSync(["git", "check-ignore", "--quiet", "--", candidate], {
@@ -453,12 +502,51 @@ function isWorktreeDirty(worktreePath: string): boolean {
 	return runGit(worktreePath, ["status", "--porcelain"]).length > 0;
 }
 
+/** Porcelain status is clean when the only unique state is commits on this detached HEAD. */
+function isCommitAncestor(cwd: string, ancestor: string, descendant: string): boolean {
+	const result = Bun.spawnSync(["git", "merge-base", "--is-ancestor", ancestor, descendant], {
+		cwd,
+		stdout: "ignore",
+		stderr: "pipe",
+	});
+	if (result.exitCode === 0) return true;
+	if (result.exitCode === 1) return false;
+	const stderr = sanitizeWorktreeDiagnostic(result.stderr.toString().trim());
+	throw new Error(stderr || "git merge-base --is-ancestor failed");
+}
+
+function formatWorktreeDiverged(worktreePath: string, existingHead: string, baseRef: string): string {
+	return [
+		`worktree_diverged:${worktreePath}`,
+		`GJC refused to move detached launch worktree ${existingHead} onto ${baseRef} because that commit is not an ancestor of the source HEAD.`,
+		`Path: ${worktreePath}`,
+		"Checking out the source HEAD would drop that commit from this worktree. Safe remediation: create a branch at HEAD so the commit stays reachable (git branch <name>), then retarget or remove the worktree yourself if a later launch should reuse this path. GJC did not change HEAD.",
+	].join("\n");
+}
+
+function reuseDetachedLaunchHead(plan: GjcLaunchWorktreePlan, existingHead: string, dirty: boolean): void {
+	if (dirty) throw new Error(`worktree_dirty:${plan.worktreePath}`);
+	if (!isCommitAncestor(plan.worktreePath, existingHead, plan.baseRef)) {
+		throw new Error(formatWorktreeDiverged(plan.worktreePath, existingHead, plan.baseRef));
+	}
+	runGit(plan.worktreePath, ["checkout", "--detach", plan.baseRef]);
+}
+
 function resolveOptionalWorktreeName(args: string[], index: number): { name: string | null; nextIndex: number } {
 	const next = args[index + 1];
 	if (!next) return { name: null, nextIndex: index };
-	if (next === "--") return { name: null, nextIndex: index };
-	if (next.startsWith("-")) return { name: null, nextIndex: index };
-	return { name: next.trim() || null, nextIndex: index + 1 };
+	if (next === "--" || next.startsWith("-")) return { name: null, nextIndex: index };
+	// A bare --worktree is the detached selector. Only consume the following
+	// positional token as a branch name when it is a valid ref; otherwise it is
+	// the launch prompt and must remain in the forwarded arguments.
+	const trimmed = next.trim();
+	if (!trimmed || /\s/.test(trimmed)) return { name: null, nextIndex: index };
+	const valid =
+		Bun.spawnSync(["git", "check-ref-format", "--branch", trimmed], {
+			stdout: "ignore",
+			stderr: "ignore",
+		}).exitCode === 0;
+	return valid ? { name: trimmed, nextIndex: index + 1 } : { name: null, nextIndex: index };
 }
 
 export function parseLaunchWorktreeMode(args: string[]): ParsedLaunchWorktreeMode {
@@ -771,8 +859,7 @@ function ensureLaunchWorktreeSync(
 				throw new Error(formatWorktreeTargetMismatch(plan, existingAtPath));
 			}
 			if (existingAtPath.head !== plan.baseRef) {
-				if (dirty) throw new Error(`worktree_dirty:${plan.worktreePath}`);
-				runGit(plan.worktreePath, ["checkout", "--detach", plan.baseRef]);
+				reuseDetachedLaunchHead(plan, existingAtPath.head, dirty);
 				dirty = false;
 			}
 		} else if (existingAtPath.branchRef !== expectedBranchRef) {
@@ -867,8 +954,7 @@ export async function ensureLaunchWorktreeCancellable(
 				throw new Error(formatWorktreeTargetMismatch(plan, existingAtPath));
 			}
 			if (existingAtPath.head !== plan.baseRef) {
-				if (dirty) throw new Error(`worktree_dirty:${plan.worktreePath}`);
-				runGit(plan.worktreePath, ["checkout", "--detach", plan.baseRef]);
+				reuseDetachedLaunchHead(plan, existingAtPath.head, dirty);
 				dirty = false;
 			}
 		} else if (existingAtPath.branchRef !== expectedBranchRef) {
