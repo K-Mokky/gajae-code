@@ -9,6 +9,7 @@ import Sdk from "../src/commands/sdk";
 import { readBrokerExitRecord, readBrokerStartupExitRecord } from "../src/sdk/broker/broker-exit";
 import type { BrokerDiscovery } from "../src/sdk/broker/discovery";
 import * as brokerDiscovery from "../src/sdk/broker/discovery";
+import { brokerProcessIncarnation } from "../src/sdk/broker/discovery";
 import {
 	acquireSpawnLockForTest,
 	BROKER_DISCOVERY_BUDGET,
@@ -504,6 +505,8 @@ it("the parent budget composes stale retirement, child-fence contention, and sta
 it("spends the parent discovery budget one composition leg at a time", async () => {
 	const dir = await temp();
 	const clock = virtualBudgetClock();
+	const testProcessIncarnation = brokerProcessIncarnation(process.pid);
+	if (!testProcessIncarnation) throw new Error("test process incarnation unavailable");
 	// An incumbent of the wrong generation that never retires: a pid this process
 	// cannot match by incarnation keeps retirement on its polling path and out of
 	// process.kill entirely, and the unroutable url refuses its shutdown request.
@@ -513,7 +516,7 @@ it("spends the parent discovery budget one composition leg at a time", async () 
 		packageGeneration: "pr5604-incompatible-generation",
 		ownerId: "pr5604-virtual-clock-owner",
 		pid: process.pid,
-		incarnation: "pr5604-virtual-clock-incarnation",
+		incarnation: testProcessIncarnation,
 		host: "127.0.0.1",
 		port: 1,
 		url: "ws://127.0.0.1:1",
@@ -521,6 +524,7 @@ it("spends the parent discovery budget one composition leg at a time", async () 
 		startedAt: clock.timing.now(),
 		heartbeatAt: clock.timing.now(),
 	};
+	// Mock observeProcessIncarnation to always return absent so the process "dies" after retirement budget expires
 	const readSpy = spyOn(brokerDiscovery, "readBrokerDiscovery").mockImplementation(() => Promise.resolve(unretirable));
 	setEnsureBrokerTimingForTest(clock.timing);
 	try {
@@ -529,8 +533,8 @@ it("spends the parent discovery budget one composition leg at a time", async () 
 			{ agentDir: dir },
 			budgetStart + BROKER_DISCOVERY_BUDGET.discoveryMs,
 		);
-		// Leg one gives up on an incumbent that never goes away, and spends exactly
-		// its own leg doing so -- never the caller's whole budget.
+		// Leg one gives up on an incumbent that never goes away (discovery always shows the same owner),
+		// and spends exactly its own leg doing so -- never the caller's whole budget.
 		expect(reconciled).toBeUndefined();
 		expect(clock.elapsedMs()).toBe(BROKER_DISCOVERY_BUDGET.staleRetirementMs);
 		// What survives retirement is still a full child-fence wait plus one
