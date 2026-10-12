@@ -51,21 +51,26 @@ function openToolIssueDb(dbPath: string): Database {
 	if (existing) return existing;
 	fs.mkdirSync(path.dirname(dbPath), { recursive: true, mode: 0o700 });
 	const db = new Database(dbPath);
-	db.run(`
-		PRAGMA journal_mode=WAL;
-		PRAGMA busy_timeout=5000;
-		CREATE TABLE IF NOT EXISTS tool_issues (
-			id          INTEGER PRIMARY KEY AUTOINCREMENT,
-			created_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-			tool        TEXT    NOT NULL,
-			report      TEXT    NOT NULL,
-			model       TEXT,
-			gjc_version TEXT    NOT NULL,
-			session_id  TEXT
-		);
-		CREATE INDEX IF NOT EXISTS idx_tool_issues_tool_created ON tool_issues(tool, created_at);
-	`);
-	fs.chmodSync(dbPath, 0o600);
+	try {
+		db.run(`
+			PRAGMA busy_timeout=5000;
+			PRAGMA journal_mode=WAL;
+			CREATE TABLE IF NOT EXISTS tool_issues (
+				id          INTEGER PRIMARY KEY AUTOINCREMENT,
+				created_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+				tool        TEXT    NOT NULL,
+				report      TEXT    NOT NULL,
+				model       TEXT,
+				gjc_version TEXT    NOT NULL,
+				session_id  TEXT
+			);
+			CREATE INDEX IF NOT EXISTS idx_tool_issues_tool_created ON tool_issues(tool, created_at);
+		`);
+		fs.chmodSync(dbPath, 0o600);
+	} catch (error) {
+		db.close();
+		throw error;
+	}
 	dbHandles.set(dbPath, db);
 	return db;
 }

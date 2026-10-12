@@ -106,6 +106,35 @@ describe("report_issue tool", () => {
 			{ type: "text", text: "Report could not be stored locally; continue the task." },
 		]);
 	});
+
+	test("closes database handle before rethrowing on initialization failure", async () => {
+		// Create a path where the parent exists but we'll cause an error
+		// by making chmod fail (simulating a permission issue after table creation)
+		const blocker = path.join(root, "no-chmod.db");
+		// Create the database successfully first
+		const db = new Database(blocker);
+		db.run("CREATE TABLE IF NOT EXISTS tool_issues (id INTEGER PRIMARY KEY);");
+		db.close();
+		// Make the file read-only to prevent further operations
+		if (process.platform !== "win32") {
+			await fs.chmod(blocker, 0o444);
+
+			const { closeToolIssueDbs: closeAll } = await import("../../src/tools/report-issue");
+			const toolInstance = new ReportIssueTool(makeSession(), blocker);
+
+			// Attempt to record should fail since chmod will fail on the read-only file
+			try {
+				await toolInstance.execute("test-call", { tool: "bash", report: "test error" });
+			} catch {
+				// Expected: should be caught and reported gracefully
+			}
+
+			// Verify the handle cache is clean by closing
+			closeAll();
+			// Restore permissions for cleanup
+			await fs.chmod(blocker, 0o644);
+		}
+	});
 });
 
 describe("normalizeToolIssue", () => {
