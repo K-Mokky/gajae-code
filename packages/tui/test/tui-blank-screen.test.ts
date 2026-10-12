@@ -3,11 +3,13 @@ import { type Component, TUI } from "@gajae-code/tui";
 import { VirtualTerminal } from "./virtual-terminal";
 
 class LinesComponent implements Component {
-	constructor(private lines: string[]) {}
+	constructor(public lines: string[]) {}
 
-	render(width: number) {
+	render(_width: number): string[] {
 		return this.lines;
 	}
+
+	invalidate(): void {}
 }
 
 /**
@@ -56,6 +58,34 @@ describe("TUI frame state consistency (issue #6501)", () => {
 			expect(viewport[0]).toBe("line-0");
 			expect(viewport[1]).toBe("line-1");
 			expect(viewport[2]).toBe("line-2");
+		} finally {
+			tui.stop();
+		}
+	});
+
+	it("clears stale pre-stop content on the first frame after restart", async () => {
+		const term = new VirtualTerminal(40, 8);
+		const tui = new TUI(term);
+		const component = new LinesComponent(["line-0", "line-1", "line-2"]);
+
+		tui.addChild(component);
+
+		try {
+			tui.start();
+			await term.waitForRender();
+			expect(term.getViewport()[2]?.trimEnd()).toBe("line-2");
+
+			// stop() leaves the old frame on screen; the restarted TUI must not paint over it blindly.
+			tui.stop();
+			await Bun.sleep(10);
+			component.lines = ["only"];
+
+			tui.start();
+			await term.waitForRender();
+
+			const viewport = term.getViewport().map(line => line.trimEnd());
+			expect(viewport[0]).toBe("only");
+			expect(viewport.slice(1).every(line => line === "")).toBe(true);
 		} finally {
 			tui.stop();
 		}
