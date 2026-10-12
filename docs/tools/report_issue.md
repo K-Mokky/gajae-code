@@ -46,7 +46,7 @@ gjc read '~/.gjc/tool-issues.db:tool_issues?order=created_at:desc&limit=50'
 gjc read '~/.gjc/tool-issues.db?q=SELECT tool, count(*) AS n FROM tool_issues GROUP BY tool ORDER BY n DESC'
 
 # XDG installation
-gjc read '$XDG_DATA_HOME/gjc/tool-issues.db:tool_issues?order=created_at:desc&limit=50'
+gjc read "$XDG_DATA_HOME/gjc/tool-issues.db:tool_issues?order=created_at:desc&limit=50"
 ```
 
 Delete the file to clear all reports.

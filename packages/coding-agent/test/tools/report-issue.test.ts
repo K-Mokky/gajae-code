@@ -122,7 +122,7 @@ describe("report_issue tool", () => {
 
 		// Perform an operation that creates the database and sidecars
 		const result = await tool.execute("call-1", { tool: "test", report: "test report" });
-		expect(result.details.recorded).toBe(true);
+		expect(result.details).toEqual({ recorded: true, tool: "test" });
 
 		// Verify the database file has 0o600 permissions
 		const dbStat = await fs.stat(newDbPath);
@@ -130,17 +130,13 @@ describe("report_issue tool", () => {
 
 		// Verify WAL sidecar exists and has 0o600 permissions
 		const walPath = `${newDbPath}-wal`;
-		if (await Bun.file(walPath).exists()) {
-			const walStat = await fs.stat(walPath);
-			expect(walStat.mode & 0o777).toBe(0o600);
-		}
+		const walStat = await fs.stat(walPath);
+		expect(walStat.mode & 0o777).toBe(0o600);
 
 		// Verify SHM sidecar exists and has 0o600 permissions
 		const shmPath = `${newDbPath}-shm`;
-		if (await Bun.file(shmPath).exists()) {
-			const shmStat = await fs.stat(shmPath);
-			expect(shmStat.mode & 0o777).toBe(0o600);
-		}
+		const shmStat = await fs.stat(shmPath);
+		expect(shmStat.mode & 0o777).toBe(0o600);
 
 		// Verify that closeToolIssueDbs can be called without crashing
 		// This ensures handles were properly managed
