@@ -23,6 +23,8 @@ const OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token";
 const STS_TOKEN_URL = "https://sts.googleapis.com/v1/token";
 const METADATA_TOKEN_URL = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token";
 const METADATA_PROJECT_ID_URL = "http://metadata.google.internal/computeMetadata/v1/project/project-id";
+const METADATA_SERVICE_ACCOUNT_EMAIL_URL =
+	"http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email";
 const CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform";
 const JWT_BEARER_GRANT = "urn:ietf:params:oauth:grant-type:jwt-bearer";
 const TOKEN_EXCHANGE_GRANT = "urn:ietf:params:oauth:grant-type:token-exchange";
@@ -135,6 +137,66 @@ async function readJsonFile<T>(filePath: string): Promise<T | undefined> {
 	}
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isNonEmptyString(value: unknown): value is string {
+	return typeof value === "string" && value.trim().length > 0;
+}
+
+function isSubjectTokenFormat(value: unknown): value is SubjectTokenFormat {
+	if (!isRecord(value)) return false;
+	if (value.type !== undefined && value.type !== "text" && value.type !== "json") return false;
+	if (value.subject_token_field_name !== undefined && !isNonEmptyString(value.subject_token_field_name)) return false;
+	return value.type !== "json" || isNonEmptyString(value.subject_token_field_name);
+}
+
+function isCredentialSource(value: unknown): value is CredentialSource {
+	if (!isRecord(value)) return false;
+	if ("file" in value) {
+		return isNonEmptyString(value.file) && (value.format === undefined || isSubjectTokenFormat(value.format));
+	}
+	if ("url" in value) {
+		if (!isNonEmptyString(value.url) || (value.format !== undefined && !isSubjectTokenFormat(value.format)))
+			return false;
+		if (value.headers === undefined) return true;
+		return isRecord(value.headers) && Object.values(value.headers).every(header => typeof header === "string");
+	}
+	if ("executable" in value) {
+		const executable = value.executable;
+		if (!isRecord(executable) || !isNonEmptyString(executable.command)) return false;
+		if (executable.timeout_millis !== undefined && typeof executable.timeout_millis !== "number") {
+			return false;
+		}
+		return executable.output_file === undefined || typeof executable.output_file === "string";
+	}
+	return false;
+}
+
+/** Validate the credential fields required by the ADC resolvers supported here. */
+function isSupportedAdcFileCredentials(value: unknown): value is AdcFileCredentials {
+	if (!isRecord(value)) return false;
+	switch (value.type) {
+		case "service_account":
+			return isNonEmptyString(value.client_email) && isNonEmptyString(value.private_key);
+		case "authorized_user":
+			return (
+				isNonEmptyString(value.client_id) &&
+				isNonEmptyString(value.client_secret) &&
+				isNonEmptyString(value.refresh_token)
+			);
+		case "external_account":
+			return (
+				isNonEmptyString(value.audience) &&
+				isNonEmptyString(value.subject_token_type) &&
+				isCredentialSource(value.credential_source)
+			);
+		default:
+			return false;
+	}
+}
+
 /** Test seam: the ADC credentials file path as resolved from trusted env. */
 export function resolveAdcCredentialsPathForTest(): string | undefined {
 	return $credentialEnv("GOOGLE_APPLICATION_CREDENTIALS");
@@ -149,15 +211,25 @@ async function loadAdcCredentials(): Promise<{ source: string; creds: AdcFileCre
 	// `stream.ts` already resolves the same variable through `$credentialEnv`.
 	const gacPath = $credentialEnv("GOOGLE_APPLICATION_CREDENTIALS");
 	if (gacPath) {
-		const creds = await readJsonFile<AdcFileCredentials>(gacPath);
+		const value = await readJsonFile<unknown>(gacPath);
+		const creds = isSupportedAdcFileCredentials(value) ? value : undefined;
 		if (!creds) {
-			throw new Error(`GOOGLE_APPLICATION_CREDENTIALS points to a missing file: ${gacPath}`);
+			if (
+				isRecord(value) &&
+				typeof value.type === "string" &&
+				value.type !== "service_account" &&
+				value.type !== "authorized_user" &&
+				value.type !== "external_account"
+			) {
+				throw new Error(`Unsupported Google credential type "${value.type}"`);
+			}
+			throw new Error(`GOOGLE_APPLICATION_CREDENTIALS does not contain supported credentials: ${gacPath}`);
 		}
 		return { source: `gac:${gacPath}`, creds };
 	}
 	const userPath = userAdcPath();
-	const creds = await readJsonFile<AdcFileCredentials>(userPath);
-	if (creds) return { source: `user:${userPath}`, creds };
+	const value = await readJsonFile<unknown>(userPath);
+	if (isSupportedAdcFileCredentials(value)) return { source: `user:${userPath}`, creds: value };
 	return undefined;
 }
 
@@ -250,16 +322,29 @@ async function fetchMetadataToken(
 async function hasMetadataServer(fetchImpl: FetchImpl): Promise<boolean> {
 	const timeout = AbortSignal.timeout(1000);
 	try {
-		const response = await fetchImpl(METADATA_PROJECT_ID_URL, {
+		const projectResponse = await fetchImpl(METADATA_PROJECT_ID_URL, {
+			method: "GET",
+			headers: { "Metadata-Flavor": "Google" },
+			redirect: "error",
+			signal: timeout,
+		});
+		if (
+			!projectResponse.ok ||
+			projectResponse.headers.get("Metadata-Flavor")?.toLowerCase() !== "google" ||
+			!(await projectResponse.text()).trim()
+		) {
+			return false;
+		}
+		const identityResponse = await fetchImpl(METADATA_SERVICE_ACCOUNT_EMAIL_URL, {
 			method: "GET",
 			headers: { "Metadata-Flavor": "Google" },
 			redirect: "error",
 			signal: timeout,
 		});
 		return (
-			response.ok &&
-			response.headers.get("Metadata-Flavor")?.toLowerCase() === "google" &&
-			Boolean((await response.text()).trim())
+			identityResponse.ok &&
+			identityResponse.headers.get("Metadata-Flavor")?.toLowerCase() === "google" &&
+			Boolean((await identityResponse.text()).trim())
 		);
 	} catch {
 		return false;

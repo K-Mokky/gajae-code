@@ -156,6 +156,7 @@ describe("provider slash command", () => {
 			authStorage: {
 				exportSnapshot: () => ({ credentials: [] }),
 				hasAuth: () => false,
+				hasRuntimeApiKey: () => false,
 				hasSessionCredentialUnavailable: () => false,
 				getSelectedApiKeyCredentialRowId: () => undefined,
 			},
@@ -163,6 +164,9 @@ describe("provider slash command", () => {
 			getAvailable: () => [],
 			getConfiguredProviderIds: () => [],
 			getAuthStorageOwner: () => ({}),
+			getProviderConfigApiKeySources: () => [],
+			getProviderRuntimeApiKeyEnvName: () => undefined,
+			hasRuntimeProviderApiKey: () => false,
 		};
 		const statuses: string[] = [];
 		let editorText = "status";
@@ -223,6 +227,11 @@ describe("provider slash command", () => {
 			expect(beforeDispatch).not.toContain("shadowed: OAuth");
 			expect(beforeDispatch).not.toContain("kagi-account-one-secret");
 			expect(beforeDispatch).not.toContain("kagi-account-two-secret");
+			authStorage.setRuntimePreferredCredentialSelector("kagi", { kind: "account", value: "kagi-account-two" });
+			const preferredStatus = await status();
+			expect(preferredStatus).toContain("kagi: OAuth (account kagi-account-two)");
+			expect(preferredStatus).not.toContain("shadowed: OAuth");
+			authStorage.removeRuntimePreferredCredentialSelector("kagi");
 			authStorage.setRuntimeCredentialSelector("kagi", { kind: "account", value: "kagi-account-two" });
 			const pinnedStatus = await status();
 			expect(pinnedStatus).toContain("kagi: OAuth (account kagi-account-two)");
@@ -242,7 +251,7 @@ describe("provider slash command", () => {
 			authStorage.removeRuntimeCredentialSelector("kagi");
 			await authStorage.markUsageLimitReached("kagi", sessionId, { retryAfterMs: 60_000, rowId });
 			const blockedStatus = await status();
-			expect(blockedStatus).toContain("kagi: OAuth (account selection pending)");
+			expect(blockedStatus).toContain("kagi: OAuth (account kagi-account-one)");
 			expect(blockedStatus).not.toContain(`kagi: OAuth (account ${selected.credential.accountId})`);
 
 			await authStorage.set("openai-codex", {
@@ -284,7 +293,7 @@ describe("provider slash command", () => {
 		}
 	});
 
-	it("reports the fallback after a stored command key is known unusable", async () => {
+	it("keeps retryable stored command keys visible over environment fallbacks", async () => {
 		tempAgentDir = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-provider-slash-"));
 		setAgentDir(tempAgentDir);
 		const originalOpenAiKey = Bun.env.OPENAI_API_KEY;
@@ -313,7 +322,8 @@ describe("provider slash command", () => {
 			expect(beforeResolution).not.toContain("empty-command-key-secret");
 			await authStorage.getApiKey("openai", sessionId);
 			const afterResolution = await status();
-			expect(afterResolution).toContain("openai: API key (env OPENAI_API_KEY)");
+			expect(afterResolution).toContain("openai: API key (stored credential; retry pending)");
+			expect(afterResolution).not.toContain("openai: API key (env OPENAI_API_KEY)");
 			expect(afterResolution).not.toContain("openai-fallback-secret-test-value");
 			expect(afterResolution).not.toContain("empty-command-key-secret");
 
@@ -353,7 +363,9 @@ describe("provider slash command", () => {
 		const originalConfigKey = Bun.env[TEST_PROVIDER_KEY_ENV];
 		Bun.env[TEST_PROVIDER_KEY_ENV] = "config-override-secret-test-value";
 		try {
-			const authStorage = await AuthStorage.create(path.join(tempAgentDir, "auth.db"));
+			const authStorage = await AuthStorage.create(path.join(tempAgentDir, "auth.db"), {
+				configValueResolver: async () => undefined,
+			});
 			authStorages.push(authStorage);
 			await Bun.write(
 				path.join(tempAgentDir, "models.yml"),
@@ -411,6 +423,23 @@ describe("provider slash command", () => {
 			expect(output).not.toContain("selected credential unavailable");
 			expect(output).not.toContain("runtime-override-secret-test-value");
 			expect(output).not.toContain("config-override-secret-test-value");
+
+			await authStorage.set("status-config-override", {
+				type: "api_key",
+				key: "!empty-config-command-key",
+			});
+			expect(await registry.getApiKeyForProvider("status-config-override", sessionId)).toBe(
+				"config-override-secret-test-value",
+			);
+			outputs.length = 0;
+			await command?.handle?.({ name: "provider", args: "status", text: "/provider status" }, {
+				session: { modelRegistry: registry, credentialSessionId: sessionId },
+				output: (text: string) => outputs.push(text),
+			} as unknown as SlashCommandRuntime);
+			const retryPendingOutput = outputs.join("\n");
+			expect(retryPendingOutput).toContain("status-config-override: API key (stored credential; retry pending)");
+			expect(retryPendingOutput).not.toContain("selected credential unavailable");
+			expect(retryPendingOutput).not.toContain("config-override-secret-test-value");
 		} finally {
 			if (originalConfigKey === undefined) delete Bun.env[TEST_PROVIDER_KEY_ENV];
 			else Bun.env[TEST_PROVIDER_KEY_ENV] = originalConfigKey;
@@ -452,6 +481,15 @@ describe("provider slash command", () => {
 			modelRegistries.push(registry);
 			await registry.refresh("offline");
 			const sessionId = "unavailable-credential-status-session";
+			await authStorage.set("openai", [
+				{ type: "api_key", key: "stored-api-key-fallback-secret" },
+				{
+					type: "oauth",
+					access: "stored-oauth-fallback-secret",
+					refresh: "stored-oauth-refresh-secret",
+					expires: Date.now() + 60 * 60_000,
+				},
+			]);
 			authStorage.markSessionCredentialUnavailable(sessionId, "openai", {
 				kind: "id",
 				value: "missing-openai-row",
@@ -460,6 +498,7 @@ describe("provider slash command", () => {
 				kind: "id",
 				value: "missing-custom-row",
 			});
+			await expect(authStorage.getApiKey("openai", sessionId)).rejects.toThrow("Selected credential for openai");
 			const outputs: string[] = [];
 			const command = BUILTIN_SLASH_COMMANDS_INTERNAL.find(entry => entry.name === "provider");
 			await command?.handle?.({ name: "provider", args: "status", text: "/provider status" }, {
@@ -470,6 +509,8 @@ describe("provider slash command", () => {
 			const output = outputs.join("\n");
 			expect(output).toContain("openai: selected credential unavailable");
 			expect(output).not.toContain("openai: API key (env OPENAI_API_KEY)");
+			expect(output).not.toContain("stored-api-key-fallback-secret");
+			expect(output).not.toContain("stored-oauth-fallback-secret");
 			expect(output).toContain("status-unavailable-empty: selected credential unavailable");
 			expect(output).not.toContain("openai-unavailable-pin-fallback-secret");
 		} finally {
@@ -499,15 +540,20 @@ describe("provider slash command", () => {
 			output: (text: string) => outputs.push(text),
 		} as unknown as SlashCommandRuntime);
 
-		const statusLine = outputs
-			.join("\n")
-			.split("\n")
-			.find(line => line.startsWith("status-sanitized-account:"));
-		if (!statusLine) throw new Error("expected the OAuth account status line");
-		const accountLabel = statusLine.slice("status-sanitized-account: OAuth (account ".length, -1);
-		expect(accountLabel).toContain("😀");
-		expect(accountLabel).not.toContain("\t");
-		expect(visibleWidth(accountLabel)).toBeLessThanOrEqual(120);
+		const lines = outputs.join("\n").split("\n");
+		const statusLineIndex = lines.findIndex(line => line.startsWith("status-sanitized-account:"));
+		if (statusLineIndex === -1) throw new Error("expected the OAuth account status line");
+		const nextProviderLineIndex = lines.findIndex(
+			(line, index) => index > statusLineIndex && /^[\w.-]+: /u.test(line),
+		);
+		const statusLines = lines.slice(
+			statusLineIndex,
+			nextProviderLineIndex === -1 ? undefined : nextProviderLineIndex,
+		);
+		const statusRow = statusLines.join("\n");
+		expect(statusRow).toContain("😀");
+		expect(statusRow).not.toContain("\t");
+		expect(statusLines.every(line => visibleWidth(line) <= 120)).toBe(true);
 		expect(outputs.join("\n")).not.toContain("sanitized-account-secret");
 	});
 
@@ -748,17 +794,92 @@ describe("provider slash command", () => {
 			);
 			expect(runtimeLines[runtimeLineIndex + 1]).toContain("shadowed: API key (env GJC_PROVIDER_STATUS_STATIC_KEY)");
 			expect(output).toContain("status-precedence: API key (env GJC_PROVIDER_STATUS_TOP_LEVEL_KEY)");
+			expect(output).toContain("shadowed: API key (env GJC_PROVIDER_STATUS_COMPAT_KEY)");
 			expect(await registry.getApiKeyForProvider("status-precedence")).toBe("top-level-config-secret-test-value");
 			expect(output).not.toContain("static-config-secret-test-value");
 			expect(output).not.toContain("runtime-provider-secret-test-value");
 			expect(output).not.toContain("top-level-config-secret-test-value");
 			expect(output).not.toContain("compat-config-secret-test-value");
+
+			delete Bun.env.GJC_PROVIDER_STATUS_STATIC_KEY;
+			outputs.length = 0;
+			await command?.handle?.({ name: "provider", args: "status", text: "/provider status" }, {
+				session: { modelRegistry: registry },
+				output: (text: string) => outputs.push(text),
+			} as unknown as SlashCommandRuntime);
+			const withoutStaticKey = outputs.join("\n");
+			expect(withoutStaticKey).toContain("status-runtime-source: API key (env GJC_PROVIDER_STATUS_RUNTIME_KEY)");
+			expect(withoutStaticKey).not.toContain("API key (env GJC_PROVIDER_STATUS_STATIC_KEY)");
+
+			const storedKey = "stored-config-precedence-secret";
+			await authStorage.set("status-precedence", { type: "api_key", key: storedKey });
+			const storedRow = authStorage
+				.exportSnapshot()
+				.credentials.find(entry => entry.provider === "status-precedence" && entry.credential.type === "api_key");
+			if (storedRow?.credential.type !== "api_key") throw new Error("expected a stored API-key row");
+			const storedOutputs: string[] = [];
+			await command?.handle?.({ name: "provider", args: "status", text: "/provider status" }, {
+				session: { modelRegistry: registry },
+				output: (text: string) => storedOutputs.push(text),
+			} as unknown as SlashCommandRuntime);
+			const storedStatus = storedOutputs.join("\n");
+			expect(await registry.getApiKeyForProvider("status-precedence")).toBe(storedKey);
+			expect(storedStatus).toContain(`status-precedence: API key (stored credential id:${storedRow.id})`);
+			expect(storedStatus).toContain("shadowed: API key (env GJC_PROVIDER_STATUS_TOP_LEVEL_KEY)");
+			expect(storedStatus).not.toContain(storedKey);
 		} finally {
 			for (const name of envNames) {
 				const original = originalEnv.get(name);
 				if (original === undefined) delete Bun.env[name];
 				else Bun.env[name] = original;
 			}
+		}
+	});
+
+	it("wraps assembled shadowed credential lines to terminal width", async () => {
+		tempAgentDir = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-provider-slash-"));
+		setAgentDir(tempAgentDir);
+		const originalOpenAiKey = Bun.env.OPENAI_API_KEY;
+		delete Bun.env.OPENAI_API_KEY;
+		try {
+			const authStorage = await AuthStorage.create(path.join(tempAgentDir, "auth.db"));
+			authStorages.push(authStorage);
+			await authStorage.set("openai", [
+				{
+					type: "oauth",
+					access: "wide-account-one-secret",
+					refresh: "wide-account-one-refresh-secret",
+					expires: Date.now() + 60 * 60_000,
+					accountId: `account-${"A".repeat(58)}`,
+				},
+				{
+					type: "oauth",
+					access: "wide-account-two-secret",
+					refresh: "wide-account-two-refresh-secret",
+					expires: Date.now() + 60 * 60_000,
+					accountId: `account-${"B".repeat(58)}`,
+				},
+			]);
+			authStorage.setRuntimeApiKey("openai", "active-wide-secret");
+			const registry = new ModelRegistry(authStorage, path.join(tempAgentDir, "models.yml"));
+			modelRegistries.push(registry);
+			const outputs: string[] = [];
+			const command = BUILTIN_SLASH_COMMANDS_INTERNAL.find(entry => entry.name === "provider");
+			await command?.handle?.({ name: "provider", args: "status", text: "/provider status" }, {
+				session: { modelRegistry: registry },
+				output: (text: string) => outputs.push(text),
+			} as unknown as SlashCommandRuntime);
+
+			const output = outputs.join("\n");
+			expect(output).toContain("openai: API key (runtime override)");
+			expect(output).toContain("shadowed:");
+			expect(output.split("\n").every(line => visibleWidth(line) <= 120)).toBe(true);
+			expect(output).not.toContain("active-wide-secret");
+			expect(output).not.toContain("wide-account-one-secret");
+			expect(output).not.toContain("wide-account-two-secret");
+		} finally {
+			if (originalOpenAiKey === undefined) delete Bun.env.OPENAI_API_KEY;
+			else Bun.env.OPENAI_API_KEY = originalOpenAiKey;
 		}
 	});
 
@@ -814,6 +935,14 @@ describe("provider slash command", () => {
 			expect(output).toContain("status-runtime-env-injection: API key (env GJC_PROVIDER_STATUS_KEY injected-row)");
 			expect(output.split("\n").some(line => line.startsWith("injected-row"))).toBe(false);
 			expect(output).not.toContain("environment-name-injection-secret");
+
+			delete Bun.env[envName];
+			outputs.length = 0;
+			await command?.handle?.({ name: "provider", args: "status", text: "/provider status" }, {
+				session: { modelRegistry: registry },
+				output: (text: string) => outputs.push(text),
+			} as unknown as SlashCommandRuntime);
+			expect(outputs.join("\n")).not.toContain("status-runtime-env-injection:");
 		} finally {
 			if (originalEnvValue === undefined) delete Bun.env[envName];
 			else Bun.env[envName] = originalEnvValue;
@@ -832,9 +961,21 @@ describe("provider slash command", () => {
 		] as const;
 		const originalEnv = new Map(envNames.map(name => [name, Bun.env[name]]));
 		const metadataProjectUrl = "http://metadata.google.internal/computeMetadata/v1/project/project-id";
+		const metadataServiceAccountUrl =
+			"http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email";
+		const requestedUrls: string[] = [];
 		const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation((async (input: Parameters<typeof fetch>[0]) => {
-			if (String(input) !== metadataProjectUrl) throw new Error(`unexpected status fetch: ${input}`);
-			return new Response("status-project", { headers: { "Metadata-Flavor": "Google" } });
+			const url = String(input);
+			requestedUrls.push(url);
+			if (url === metadataProjectUrl) {
+				return new Response("status-project", { headers: { "Metadata-Flavor": "Google" } });
+			}
+			if (url === metadataServiceAccountUrl) {
+				return new Response("status@project.iam.gserviceaccount.com", {
+					headers: { "Metadata-Flavor": "Google" },
+				});
+			}
+			throw new Error(`unexpected status fetch: ${input}`);
 		}) as unknown as typeof fetch);
 		try {
 			Bun.env.HOME = tempAgentDir;
@@ -854,7 +995,10 @@ describe("provider slash command", () => {
 			} as unknown as SlashCommandRuntime);
 
 			expect(outputs.join("\n")).toContain("google-vertex: Google ADC (metadata server)");
-			expect(fetchSpy).toHaveBeenCalledTimes(1);
+			expect(requestedUrls).toContain(metadataServiceAccountUrl);
+			expect(requestedUrls).not.toContain(
+				"http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token",
+			);
 		} finally {
 			fetchSpy.mockRestore();
 			for (const name of envNames) {

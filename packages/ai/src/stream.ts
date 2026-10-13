@@ -275,42 +275,48 @@ export function getEnvApiKeyEnvNames(provider: string): string[] {
 	});
 }
 
-/** Describe the source selected by the provider environment resolver without exposing its value. */
-export function getEnvApiKeyCredentialSource(provider: string): EnvApiKeyCredentialSource | undefined {
-	const apiKey = getEnvApiKey(provider);
-	if (apiKey === undefined) return undefined;
-	const envName = getEnvApiKeyEnvNames(provider).find(name => $credentialEnv(name) === apiKey);
-	if (envName) return { kind: "environment", name: envName };
-	if (apiKey !== "<authenticated>") return { kind: "unknown" };
+/** Describe the selected source without exposing credential values or unvalidated ADC files. */
+export async function getEnvApiKeyCredentialSource(
+	provider: string,
+	options?: { fetch?: FetchImpl },
+): Promise<EnvApiKeyCredentialSource | undefined> {
+	return (await getEnvApiKeyCredentialSources(provider, options))[0];
+}
+
+/** Enumerate usable credential candidates in provider dispatch precedence without exposing credentials. */
+export async function getEnvApiKeyCredentialSources(
+	provider: string,
+	options?: { fetch?: FetchImpl },
+): Promise<EnvApiKeyCredentialSource[]> {
+	const sources: EnvApiKeyCredentialSource[] = getEnvApiKeyEnvNames(provider).map(
+		(name): EnvApiKeyCredentialSource => ({ kind: "environment", name }),
+	);
+
 	if (provider === "google-vertex") {
-		return {
-			kind: "google-adc",
-			source: $credentialEnv("GOOGLE_APPLICATION_CREDENTIALS") ? "explicit-file" : "default-file",
-		};
+		if (($env.GOOGLE_CLOUD_PROJECT || $env.GCLOUD_PROJECT) && $env.GOOGLE_CLOUD_LOCATION) {
+			const source = await getVertexCredentialSource({ fetch: options?.fetch });
+			if (source) sources.push({ kind: "google-adc", source });
+		}
+	} else if (provider === "amazon-bedrock" && getEnvApiKey(provider) !== undefined) {
+		if (readAwsStaticEnvironmentCredentials()) {
+			sources.push({ kind: "aws", source: "environment-credentials" });
+		}
+		if (hasResolvableAwsProfileSource()) sources.push({ kind: "aws", source: "profile" });
 	}
-	if (provider === "amazon-bedrock") {
-		const bearerToken = $credentialEnv("AWS_BEARER_TOKEN_BEDROCK");
-		if (bearerToken && isValidBedrockBearerToken(bearerToken)) return { kind: "aws", source: "bearer-token" };
-		if (readAwsStaticEnvironmentCredentials()) return { kind: "aws", source: "environment-credentials" };
-		if (hasResolvableAwsProfileSource()) return { kind: "aws", source: "profile" };
-	}
-	return { kind: "unknown" };
+
+	return sources;
 }
 
 /** Resolve Vertex ADC provenance, including metadata-server credentials, without acquiring a token. */
 export async function getGoogleVertexCredentialSource(options?: {
 	fetch?: FetchImpl;
 }): Promise<EnvApiKeyCredentialSource | undefined> {
-	const configuredSource = getEnvApiKeyCredentialSource("google-vertex");
-	if (configuredSource && configuredSource.kind !== "google-adc") return configuredSource;
-	if (!($env.GOOGLE_CLOUD_PROJECT || $env.GCLOUD_PROJECT) || !$env.GOOGLE_CLOUD_LOCATION) return undefined;
-	const source = await getVertexCredentialSource({ fetch: options?.fetch });
-	return source ? { kind: "google-adc", source } : undefined;
+	return (await getEnvApiKeyCredentialSources("google-vertex", options))[0];
 }
 
 /** Name of the environment variable whose value is selected by `getEnvApiKey`, when identifiable. */
-export function getEnvApiKeyEnvName(provider: string): string | undefined {
-	const source = getEnvApiKeyCredentialSource(provider);
+export async function getEnvApiKeyEnvName(provider: string): Promise<string | undefined> {
+	const source = await getEnvApiKeyCredentialSource(provider);
 	return source?.kind === "environment" ? source.name : undefined;
 }
 

@@ -6065,8 +6065,10 @@ export class ModelRegistry {
 		return [...this.#configuredProviderIds];
 	}
 
-	/** Environment variable name for a provider API key configured in models.yml. */
-	getProviderConfigApiKeyEnvName(provider: string): string | undefined {
+	/** Configured API-key sources in models.yml precedence order, excluding absent environment values. */
+	getProviderConfigApiKeySources(
+		provider: string,
+	): Array<{ kind: "environment"; name: string } | { kind: "models-yml" }> {
 		const normalizedProvider = resolveOAuthStorageProvider(provider);
 		const configuredProviders = this.#acceptedConfigValue?.providers;
 		const configured =
@@ -6074,19 +6076,24 @@ export class ModelRegistry {
 			Object.entries(configuredProviders ?? {}).find(
 				([configuredProvider]) => resolveOAuthStorageProvider(configuredProvider) === normalizedProvider,
 			)?.[1];
-		if (configured?.apiKeyEnv) return configured.apiKeyEnv;
-		if (configured?.apiKey && Bun.env[configured.apiKey]) return configured.apiKey;
-		if (configured?.openaiCompat?.apiKeyEnv) {
-			return configured.openaiCompat.apiKeyEnv;
-		}
-		if (configured?.openaiCompat?.apiKey && Bun.env[configured.openaiCompat.apiKey]) {
-			return configured.openaiCompat.apiKey;
-		}
-		return (
-			this.#customProviderApiKeyEnvNames.get(provider) ??
-			[...this.#customProviderApiKeyEnvNames].find(
-				([configuredProvider]) => resolveOAuthStorageProvider(configuredProvider) === normalizedProvider,
-			)?.[1]
+		const sources: Array<{ kind: "environment"; name: string } | { kind: "models-yml" }> = [];
+		const addSource = (apiKey: string | undefined, apiKeyEnv: string | undefined): void => {
+			if (apiKey) {
+				if (Bun.env[apiKey]) sources.push({ kind: "environment", name: apiKey });
+				else sources.push({ kind: "models-yml" });
+				return;
+			}
+			if (apiKeyEnv && $rotatingCredentialEnv(apiKeyEnv)) {
+				sources.push({ kind: "environment", name: apiKeyEnv });
+			}
+		};
+		addSource(configured?.apiKey, configured?.apiKeyEnv);
+		addSource(configured?.openaiCompat?.apiKey, configured?.openaiCompat?.apiKeyEnv);
+		return sources.filter(
+			(source, index) =>
+				(source.kind === "environment"
+					? sources.findIndex(candidate => candidate.kind === "environment" && candidate.name === source.name)
+					: sources.findIndex(candidate => candidate.kind === "models-yml")) === index,
 		);
 	}
 

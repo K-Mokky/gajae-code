@@ -2419,6 +2419,15 @@ export class AuthStorage {
 		}
 	}
 
+	/** Return the usable OAuth row selected by a soft preferred-credential selector. */
+	getPreferredOAuthCredentialRowId(provider: string): number | undefined {
+		const preferredSelector = this.#getPreferredCredentialSelector(provider);
+		if (!preferredSelector) return undefined;
+		const selected = this.#findCredentialBySelector(provider, preferredSelector);
+		if (selected?.credential.type !== "oauth" || !this.isCredentialAvailable(provider, selected.id)) return undefined;
+		return selected.id;
+	}
+
 	/** Return the stored API-key row pinned by a credential selector without resolving values. */
 	getSelectedApiKeyCredentialRowId(
 		provider: string,
