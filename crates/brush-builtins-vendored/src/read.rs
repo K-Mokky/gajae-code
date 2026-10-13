@@ -772,7 +772,25 @@ where
 					}
 				}
 
-				// Check for delimiter.
+				// Classify multibyte input before checking for delimiter.
+				// If we have pending multibyte input, resolve it first.
+				if count.len > 0 {
+					line.push(byte);
+					raw_backslashes.push(false);
+
+					// Check character limit (based on output length).
+					match count.push(byte, config.char_limit) {
+						Limit::NotReached => continue,  // Byte was consumed as part of multibyte character.
+						Limit::Reached => return Ok(ReadResult::Line(reader.source.decode_line(line))),
+						Limit::Passed(past) => {
+							return Ok(ReadResult::Line(
+								reader.line_before_trailing_bytes(line, raw_backslashes, past),
+							));
+						},
+					}
+				}
+
+				// Check for delimiter (only if not part of pending multibyte input).
 				if config.delimiter == Some(byte) {
 					return Ok(ReadResult::Line(reader.source.decode_line(line)));
 				}
@@ -1762,6 +1780,42 @@ mod tests {
 		let _ = thread.join();
 		assert_eq!(outcome, Ok(true), "read must time out, not block or take the drained byte");
 		assert!(b.held_input().expect("a pipe holds input").is_empty());
+		Ok(())
+	}
+
+	/// Regression: malformed UTF-8 lead byte followed by delimiter should not
+	/// consume the delimiter. When `0xC3\n` is read with `-n 1` and default
+	/// delimiter (newline), the 0x0A is used to classify the 0xC3 as invalid,
+	/// but should not be consumed as the delimiter terminator.
+	#[test]
+	#[expect(clippy::panic_in_result_fn)]
+	fn test_read_n_preserves_delimiter_after_malformed_utf8() -> anyhow::Result<()> {
+		use std::io::Write;
+
+		let (reader, mut writer) = std::io::pipe()?;
+		let input = OpenFile::from(reader);
+
+		// Write: malformed UTF-8 lead byte 0xC3, then newline, then 'X'
+		writer.write_all(&[0xc3, b'\n', b'X', b'\n'])?;
+		drop(writer);
+
+		let limited = ReadCommand {
+			raw_mode: true,
+			return_after_n_chars: Some(1),
+			..test_command()
+		};
+
+		// First read: -n 1 should read one character (the invalid UTF-8)
+		let first = limited.read_line(input.try_clone()?, Vec::<u8>::new(), None, || false)?;
+		assert!(matches!(first, ReadResult::Line(ref text) if text == "\u{FFFD}"));
+
+		// Second read: should get the line with just the newline (empty after delimiter)
+		let second = test_command().read_line(input.try_clone()?, Vec::<u8>::new(), None, || false)?;
+		assert!(matches!(second, ReadResult::Line(ref text) if text == ""));
+
+		// Third read: should get 'X'
+		let third = test_command().read_line(input, Vec::<u8>::new(), None, || false)?;
+		assert!(matches!(third, ReadResult::Line(ref text) if text == "X"));
 		Ok(())
 	}
 
