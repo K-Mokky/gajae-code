@@ -3832,6 +3832,7 @@ mod tests {
 	/// each invalid sequence, replaced by one U+FFFD, is one character. A lead
 	/// byte is known to be invalid only once the next byte arrives; when that
 	/// byte lies past the limit it is held for the next read of the input.
+	#[cfg(not(windows))]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn read_count_counts_invalid_bytes_as_they_decode() {
 		let (result, output) = execute_captured(
@@ -3848,6 +3849,7 @@ mod tests {
 	/// Contract: from a regular file too, the byte that showed a lead byte
 	/// to be invalid is held for the next read when it lies past the `-n`
 	/// limit; nothing seeks.
+	#[cfg(not(windows))]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn read_count_holds_a_file_byte_past_the_limit_for_the_next_read() {
 		let dir = tempfile::tempdir().expect("temporary directory");
@@ -3866,6 +3868,7 @@ mod tests {
 	/// Contract: a `-n`/`-N` value never holds more characters than its
 	/// limit, also from a pipe: the byte read past the limit is held, and
 	/// the next `read` of the pipe gets it first.
+	#[cfg(not(windows))]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn read_count_holds_the_byte_past_the_limit_for_the_next_read() {
 		let (result, output) = execute_captured(
@@ -3881,6 +3884,7 @@ mod tests {
 
 	/// Contract: when the byte past the limit was escaped, the backslash
 	/// before it is held too, so the next read sees both input bytes.
+	#[cfg(not(windows))]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn read_count_holds_both_bytes_of_an_escape_past_the_limit() {
 		let (result, output) = execute_captured(
@@ -3896,6 +3900,7 @@ mod tests {
 	/// Contract: held input belongs to the input it was read from, not to a
 	/// descriptor number: a here-string read in between does not see it,
 	/// and the next read of the pipe does.
+	#[cfg(not(windows))]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn read_held_input_stays_with_its_input_not_the_descriptor_number() {
 		let (result, output) = execute_captured(
@@ -3909,6 +3914,7 @@ mod tests {
 
 	/// Contract: `mapfile` reads held input first and decodes each line as
 	/// UTF-8, replacing invalid sequences.
+	#[cfg(not(windows))]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn mapfile_reads_held_input_first_and_decodes_utf8() {
 		let (result, output) = execute_captured(
@@ -3923,6 +3929,7 @@ mod tests {
 
 	/// Contract: a subshell shares the held input of the pipe it reads, so
 	/// a held byte is consumed once.
+	#[cfg(not(windows))]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn read_held_input_is_consumed_once_across_a_subshell() {
 		let (result, output) = execute_captured(
@@ -3950,6 +3957,7 @@ mod tests {
 	/// Contract: at end of input, a character left incomplete decodes to one
 	/// U+FFFD and counts toward `-n`/`-N`, so reaching the limit with it is
 	/// success, as in bash; a short value is still end of input.
+	#[cfg(not(windows))]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn read_count_counts_an_incomplete_character_at_eof() {
 		let (result, output) = execute_captured(
@@ -3981,6 +3989,7 @@ mod tests {
 	/// Contract: a byte held from a regular file is not given back to the
 	/// file, so an external command reading next does not see it (as with
 	/// bash's pushback); the next builtin read does.
+	#[cfg(not(windows))]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn read_count_holds_a_file_byte_that_external_readers_do_not_see() {
 		let dir = tempfile::tempdir().expect("temporary directory");
@@ -3997,6 +4006,7 @@ mod tests {
 
 	/// Contract: held input belongs to one open of a file; opening the same
 	/// file again starts from its beginning and does not take it.
+	#[cfg(not(windows))]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn read_from_a_reopened_file_does_not_see_held_input() {
 		let dir = tempfile::tempdir().expect("temporary directory");

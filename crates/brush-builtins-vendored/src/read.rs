@@ -533,7 +533,7 @@ struct LineReaderConfig {
 
 /// Characters read toward a `-n`/`-N` limit, using the same active encoding as
 /// the line decoder. UTF-8 malformed sequences become one replacement
-/// character; ACP DBCS lead/trail pairs count as one character.
+/// character; valid ACP multibyte sequences count as one character.
 struct CharCount {
 	chars:   usize,
 	pending: [u8; 4],
@@ -624,16 +624,9 @@ impl CharCount {
 	fn process_acp(&mut self, eof: bool, limit: Option<usize>) -> Limit {
 		let mut index = 0;
 		while index < self.len {
-			let char_len = if self.state.is_acp_lead_byte(self.pending[index]) {
-				if index + 1 < self.len {
-					2
-				} else if eof {
-					1
-				} else {
-					break;
-				}
-			} else {
-				1
+			let Some(char_len) = self.state.acp_character_len(&self.pending[index..self.len], eof)
+			else {
+				break;
 			};
 			index += char_len;
 			self.chars += 1;
@@ -1225,6 +1218,85 @@ mod tests {
 			assert!(matches!(
 				test_command().read_line(input, Vec::<u8>::new(), None, || false)?,
 				ReadResult::Line(ref text) if text == "X"
+			));
+		}
+		Ok(())
+	}
+
+	#[cfg(windows)]
+	#[test]
+	#[expect(clippy::panic_in_result_fn)]
+	fn read_n_and_read_cap_count_gb18030_four_byte_characters() -> anyhow::Result<()> {
+		for no_delimiter in [false, true] {
+			let contents = vec![0xff, b'\n', 0x90, 0x30, 0x81, 0x30, b'X', b'\n'];
+			let stream = CursorStream(std::sync::Arc::new(std::sync::Mutex::new(
+				std::io::Cursor::new(contents),
+			)));
+			let input = OpenFile::Stream(Box::new(stream), HeldInput::default());
+			input
+				.held_input()
+				.expect("stream holds decoder state")
+				.set_output_decoder_state(OutputDecoderState::with_fallback_codepage(54936));
+
+			let first = test_command().read_line(input.try_clone()?, Vec::<u8>::new(), None, || false)?;
+			assert!(matches!(first, ReadResult::Line(_)));
+			assert!(input
+				.held_input()
+				.expect("stream holds decoder state")
+				.output_decoder_state()
+				.uses_acp());
+
+			let limited = ReadCommand {
+				raw_mode: true,
+				return_after_n_chars: (!no_delimiter).then_some(1),
+				return_after_n_chars_no_delimiter: no_delimiter.then_some(1),
+				..test_command()
+			};
+			assert!(matches!(
+				limited.read_line(input.try_clone()?, Vec::<u8>::new(), None, || false)?,
+				ReadResult::Line(ref text) if text == "𐀀"
+			));
+
+			assert!(matches!(
+				test_command().read_line(input, Vec::<u8>::new(), None, || false)?,
+				ReadResult::Line(ref text) if text == "X"
+			));
+		}
+		Ok(())
+	}
+
+	#[cfg(windows)]
+	#[test]
+	#[expect(clippy::panic_in_result_fn)]
+	fn read_n_and_read_cap_leave_invalid_cp932_trail_for_the_next_read() -> anyhow::Result<()> {
+		for no_delimiter in [false, true] {
+			let contents = vec![0xff, b'\n', 0x81, 0x20, b'X', b'\n'];
+			let stream = CursorStream(std::sync::Arc::new(std::sync::Mutex::new(
+				std::io::Cursor::new(contents),
+			)));
+			let input = OpenFile::Stream(Box::new(stream), HeldInput::default());
+			input
+				.held_input()
+				.expect("stream holds decoder state")
+				.set_output_decoder_state(OutputDecoderState::with_fallback_codepage(932));
+
+			let first = test_command().read_line(input.try_clone()?, Vec::<u8>::new(), None, || false)?;
+			assert!(matches!(first, ReadResult::Line(_)));
+
+			let limited = ReadCommand {
+				raw_mode: true,
+				return_after_n_chars: (!no_delimiter).then_some(1),
+				return_after_n_chars_no_delimiter: no_delimiter.then_some(1),
+				..test_command()
+			};
+			assert!(matches!(
+				limited.read_line(input.try_clone()?, Vec::<u8>::new(), None, || false)?,
+				ReadResult::Line(ref text) if text == "\u{FFFD}"
+			));
+
+			assert!(matches!(
+				test_command().read_line(input, Vec::<u8>::new(), None, || false)?,
+				ReadResult::Line(ref text) if text == " X"
 			));
 		}
 		Ok(())
