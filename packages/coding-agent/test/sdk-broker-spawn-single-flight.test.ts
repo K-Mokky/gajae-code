@@ -23,6 +23,7 @@ import {
 	setEnsureBrokerTimingForTest,
 	withBrokerStartupLock,
 } from "../src/sdk/broker/ensure";
+import { processIncarnation } from "../src/sdk/broker/process-incarnation";
 import { BrokerStartupError } from "../src/sdk/broker/startup-failure";
 
 const cli = path.resolve(import.meta.dir, "../src/cli.ts");
@@ -506,16 +507,18 @@ it("the parent budget composes stale retirement, child-fence contention, and sta
 it("spends the parent discovery budget one composition leg at a time", async () => {
 	const dir = await temp();
 	const clock = virtualBudgetClock();
-	// An incumbent of the wrong generation that never retires: a pid this process
-	// cannot match by incarnation keeps retirement on its polling path and out of
-	// process.kill entirely, and the unroutable url refuses its shutdown request.
+	// An incumbent of the wrong generation that never retires: using this process's
+	// actual PID and incarnation prevents signaling it, while the unroutable URL
+	// refuses its shutdown request and leaves the deadline on the polling path.
+	const currentIncarnation = processIncarnation(process.pid);
+	expect(currentIncarnation).toBeDefined();
 	const unretirable: BrokerDiscovery = {
 		version: 1,
 		protocolVersion: 3,
 		packageGeneration: "pr5604-incompatible-generation",
 		ownerId: "pr5604-virtual-clock-owner",
 		pid: process.pid,
-		incarnation: "pr5604-virtual-clock-incarnation",
+		incarnation: currentIncarnation as string,
 		host: "127.0.0.1",
 		port: 1,
 		url: "ws://127.0.0.1:1",
@@ -527,13 +530,11 @@ it("spends the parent discovery budget one composition leg at a time", async () 
 	setEnsureBrokerTimingForTest(clock.timing);
 	try {
 		const budgetStart = clock.timing.now();
-		const reconciled = await reconcileBrokerGenerationForStartup(
-			{ agentDir: dir },
-			budgetStart + BROKER_DISCOVERY_BUDGET.discoveryMs,
-		);
+		await expect(
+			reconcileBrokerGenerationForStartup({ agentDir: dir }, budgetStart + BROKER_DISCOVERY_BUDGET.discoveryMs),
+		).rejects.toThrow(`SDK broker ${process.pid} did not exit after authenticated shutdown.`);
 		// Leg one gives up on an incumbent that never goes away, and spends exactly
 		// its own leg doing so -- never the caller's whole budget.
-		expect(reconciled).toBeUndefined();
 		expect(clock.elapsedMs()).toBe(BROKER_DISCOVERY_BUDGET.staleRetirementMs);
 		// What survives retirement is still a full child-fence wait plus one
 		// publication attempt; that remainder is what the wall-clock case stages.
