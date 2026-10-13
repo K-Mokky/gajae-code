@@ -6971,6 +6971,42 @@ describe("ModelRegistry", () => {
 			expect(registry.getProviderBaseUrl("local")).toBeUndefined();
 		});
 
+		test("applies provider and model override idle timeouts to models.yml openaiCompat endpoints", async () => {
+			writeRawModelsConfig({
+				providers: {
+					"local-proxy": {
+						openaiCompat: {
+							baseUrl: "http://127.0.0.1:1234",
+							apiKey: "LOCAL_TEST_KEY",
+						},
+						streamIdleTimeoutMs: 300_000,
+						modelOverrides: { "model-with-override": { streamIdleTimeoutMs: 450_000 } },
+					},
+				},
+			});
+			using _hook = hookFetch((input, init) => {
+				expect(String(input)).toBe("http://127.0.0.1:1234/v1/models");
+				expect((init?.headers as Record<string, string>).Authorization).toBe("Bearer LOCAL_TEST_KEY");
+				return new Response(JSON.stringify({ data: [{ id: "local-model" }, { id: "model-with-override" }] }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			});
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			await registry.refresh();
+
+			expect(registry.find("local-proxy", "local-model")).toMatchObject({
+				api: "openai-completions",
+				baseUrl: "http://127.0.0.1:1234/v1",
+				streamIdleTimeoutMs: 300_000,
+			});
+			expect(registry.find("local-proxy", "model-with-override")).toMatchObject({
+				api: "openai-completions",
+				streamIdleTimeoutMs: 450_000,
+			});
+		});
+
 		test("parses providers.local.openaiCompat and discovers OpenAI-compatible models", async () => {
 			writeRawModelsJson({
 				local: {

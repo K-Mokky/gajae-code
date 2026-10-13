@@ -551,6 +551,7 @@ function validateProviderConfiguration(
 	mode: ProviderValidationMode,
 ): void {
 	const hasProviderApi = !!config.api;
+	const configuredApi = config.api ?? (config.openaiCompat ? "openai-completions" : undefined);
 	const models = config.models;
 	if (
 		config.transport === "pi-native" &&
@@ -648,6 +649,7 @@ function validateProviderConfiguration(
 			models.find(model => model.id === modelId)?.api ??
 			config.api ??
 			getKnownProviderModelApi(providerName, modelId);
+		const effectiveTimeoutApi = effectiveApi ?? (config.openaiCompat ? "openai-completions" : undefined);
 		if (override.compat?.supportsResponsesSessionAffinity !== undefined) {
 			assertResponsesSessionAffinitySupported(
 				providerName,
@@ -657,11 +659,11 @@ function validateProviderConfiguration(
 			);
 		}
 		if (override.streamIdleTimeoutMs !== undefined) {
-			if (effectiveApi) {
+			if (effectiveTimeoutApi) {
 				assertRequestTransformSupportedForModelApi(
 					providerName,
 					modelId,
-					effectiveApi,
+					effectiveTimeoutApi,
 					'modelOverrides "streamIdleTimeoutMs"',
 				);
 			} else {
@@ -694,8 +696,8 @@ function validateProviderConfiguration(
 		}
 	}
 	if (config.streamIdleTimeoutMs !== undefined) {
-		if (config.api) {
-			if (!isRequestTransformApi(config.api)) {
+		if (configuredApi) {
+			if (!isRequestTransformApi(configuredApi)) {
 				throw new Error(
 					`Provider ${providerName}: "streamIdleTimeoutMs" is only supported with openai-completions or openai-responses APIs.`,
 				);
@@ -3891,7 +3893,7 @@ export class ModelRegistry {
 				providerConfig.streamIdleTimeoutMs !== undefined
 			) {
 				const disableStrictCompat = providerConfig.disableStrictTools ? { disableStrictTools: true } : undefined;
-				overrides.set(providerName, {
+				const providerOverride: ProviderOverride = {
 					api: providerConfig.api as Api | undefined,
 					baseUrl: providerConfig.baseUrl,
 					headers: providerConfig.headers,
@@ -3903,7 +3905,12 @@ export class ModelRegistry {
 					cacheRetention: providerConfig.cacheRetention,
 					streamIdleTimeoutMs: providerConfig.streamIdleTimeoutMs,
 					isOAuth,
-				});
+				};
+				const existingOverride = overrides.get(providerName);
+				overrides.set(
+					providerName,
+					existingOverride ? this.#mergeProviderOverride(existingOverride, providerOverride) : providerOverride,
+				);
 			}
 
 			if (authMode === "none") {
