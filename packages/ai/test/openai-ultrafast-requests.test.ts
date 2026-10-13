@@ -295,4 +295,20 @@ describe("ultrafast request serialization for bundled models", () => {
 				ultrafastResult.usage.cost.cacheWrite,
 		);
 	});
+
+	it("omits ultrafast for the Fast-only bundled Codex gpt-5.6-sol model", async () => {
+		const catalogModel = getBundledModel("openai-codex", "gpt-5.6-sol") as Model<"openai-codex-responses">;
+		expect(catalogModel.compat?.supportsUltrafastTier).not.toBe(true);
+		const model = { ...catalogModel, preferWebsockets: false };
+		const bodies = captureRequests(completedResponseEvents());
+
+		const result = await streamOpenAICodexResponses(model, testContext, {
+			apiKey: codexTestToken(),
+			serviceTier: "ultrafast",
+		}).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(bodies[0]?.service_tier).toBeUndefined();
+		expect(result.serviceTier).toBeUndefined();
+	});
 });

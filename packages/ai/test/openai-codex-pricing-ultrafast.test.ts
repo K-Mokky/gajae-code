@@ -5,15 +5,14 @@ import { modelSupportsUltrafastTier } from "../src/types";
 // gpt-5.6-sol is Fast-only and excluded from ultrafast support.
 
 describe("Codex gpt-5.6-sol ultrafast exclusion", () => {
-	test("Codex gpt-5.6-sol does not support ultrafast", async () => {
+	test("Codex gpt-5.6-sol is present and does not support ultrafast", () => {
 		const codexModels = getBundledModels("openai-codex");
 		if (codexModels.length === 0) {
 			throw new Error("openai-codex provider not found in models.json");
 		}
 		const codexGpt56 = codexModels.find(m => m.id === "gpt-5.6-sol");
 		if (!codexGpt56) {
-			// gpt-5.6-sol may not be in Codex, but if it is, it should not support ultrafast
-			return;
+			throw new Error("openai-codex/gpt-5.6-sol model not found in models.json");
 		}
 		const supportsUltrafast = modelSupportsUltrafastTier(codexGpt56);
 		expect(supportsUltrafast).toBe(false);
