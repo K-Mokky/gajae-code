@@ -31,6 +31,7 @@ import {
 import { initTheme } from "@gajae-code/coding-agent/modes/theme/theme";
 import { CURRENT_SESSION_VERSION, SessionManager } from "@gajae-code/coding-agent/session/session-manager";
 import { AskTool } from "@gajae-code/coding-agent/tools/ask";
+import { formatRalplanUltragoalApprovalQuestion } from "@gajae-code/coding-agent/tools/ultragoal-ask-guard";
 import { migrateAndPersistLegacyState } from "../../src/gjc-runtime/state-migrations";
 import {
 	assertExecutionApprovalTranscriptBoundary,
@@ -434,12 +435,23 @@ async function askAndPersistExecutionApproval(
 ): Promise<void> {
 	const label = "Approve execution via ultragoal";
 	const toolCallId = `provider-${questionId}`;
+	let question = "Approve this published specification for execution?";
+	if (stage === "ralplan") {
+		const presentation = await captureExecutionApprovalPresentation(cwd, manager.getSessionId(), "ralplan");
+		const canonicalQuestion = formatRalplanUltragoalApprovalQuestion(presentation);
+		if (!canonicalQuestion) throw new Error("expected canonical Ralplan approval question");
+		question = canonicalQuestion;
+	}
 	const args = {
 		questions: [
 			{
 				id: questionId,
-				question: "Approve this published specification for execution?",
-				options: [{ label }, { label: "Keep planning" }],
+				question,
+				options:
+					stage === "ralplan"
+						? [{ label: "Refine further" }, { label }, { label: "Stop here" }]
+						: [{ label }, { label: "Keep planning" }],
+				...(stage === "ralplan" ? { recommended: 1, multi: false } : {}),
 				workflowGate:
 					stage === "ralplan"
 						? { stage: "ralplan" as const, kind: "approval" as const }
