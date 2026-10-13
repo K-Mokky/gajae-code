@@ -2385,10 +2385,13 @@ export class AcpAgent implements Agent {
 	 * conflict guards, and a tail can start another (the failure diagnostic awaits the final text),
 	 * so this drains until none is left rather than sampling once.
 	 */
-	async #drainPromptPublicationTails(id: string, reservation: FirstPromptRetryReservation): Promise<void> {
+	async #drainPromptPublicationTails(id: string, reservation?: FirstPromptRetryReservation): Promise<void> {
 		for (;;) {
 			const record = this.#sessions.get(id);
-			if (record?.pendingFirstPromptRetry !== reservation || record.cancelRequested || reservation.settlement)
+			if (
+				reservation &&
+				(record?.pendingFirstPromptRetry !== reservation || record.cancelRequested || reservation.settlement)
+			)
 				return;
 			const tails = [
 				this.#finalTextTails.get(id),
@@ -2398,7 +2401,9 @@ export class AcpAgent implements Agent {
 			if (tails.length === 0) return;
 			// A publication failure is the tail's own business; it is logged where it happens and
 			// must not decide the retry.
-			await Promise.race([Promise.allSettled(tails), reservation.woken]);
+			const settled = Promise.allSettled(tails);
+			if (reservation) await Promise.race([settled, reservation.woken]);
+			else await settled;
 		}
 	}
 
