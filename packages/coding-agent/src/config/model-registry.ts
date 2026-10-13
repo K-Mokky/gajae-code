@@ -518,6 +518,7 @@ interface ProviderValidationModel {
 	maxTokens?: number;
 	compat?: Model<Api>["compat"];
 	requestTransform?: ModelRequestTransform;
+	streamIdleTimeoutMs?: number;
 }
 
 interface ProviderValidationConfig {
@@ -533,6 +534,7 @@ interface ProviderValidationConfig {
 	requestTransform?: ModelRequestTransform;
 	disableStrictTools?: boolean;
 	cacheRetention?: CacheRetention;
+	streamIdleTimeoutMs?: number;
 	openaiCompat?: { baseUrl: string; apiKey?: string; apiKeyEnv?: string };
 	modelOverrides?: Record<string, unknown>;
 	models: ProviderValidationModel[];
@@ -562,12 +564,13 @@ function validateProviderConfiguration(
 				!config.disableStrictTools &&
 				!config.requestTransform &&
 				!config.cacheRetention &&
+				config.streamIdleTimeoutMs === undefined &&
 				!config.openaiCompat &&
 				!hasModelOverrides &&
 				!config.discovery
 			) {
 				throw new Error(
-					`Provider ${providerName}: must specify "baseUrl", "headers", "apiKey", "compat", "requestTransform", "cacheRetention", "disableStrictTools", "modelOverrides", "discovery", "openaiCompat", or "models"`,
+					`Provider ${providerName}: must specify "baseUrl", "headers", "apiKey", "compat", "requestTransform", "cacheRetention", "streamIdleTimeoutMs", "disableStrictTools", "modelOverrides", "discovery", "openaiCompat", or "models"`,
 				);
 			}
 		}
@@ -640,6 +643,21 @@ function validateProviderConfiguration(
 				`modelOverrides ${modelId} "compat.supportsResponsesSessionAffinity"`,
 			);
 		}
+		if (override.streamIdleTimeoutMs !== undefined) {
+			if (effectiveApi) {
+				assertRequestTransformSupportedForModelApi(
+					providerName,
+					modelId,
+					effectiveApi,
+					'modelOverrides "streamIdleTimeoutMs"',
+				);
+			} else {
+				assertRequestTransformSupportedForKnownProvider(
+					providerName,
+					`modelOverrides ${modelId} "streamIdleTimeoutMs"`,
+				);
+			}
+		}
 		if (!override.requestTransform) continue;
 		if (effectiveApi) {
 			assertRequestTransformSupportedForModelApi(
@@ -662,6 +680,17 @@ function validateProviderConfiguration(
 			assertRequestTransformSupportedForKnownProvider(providerName, '"requestTransform"');
 		}
 	}
+	if (config.streamIdleTimeoutMs !== undefined) {
+		if (config.api) {
+			if (!isRequestTransformApi(config.api)) {
+				throw new Error(
+					`Provider ${providerName}: "streamIdleTimeoutMs" is only supported with openai-completions or openai-responses APIs.`,
+				);
+			}
+		} else if (models.length === 0) {
+			assertRequestTransformSupportedForKnownProvider(providerName, '"streamIdleTimeoutMs"');
+		}
+	}
 
 	for (const modelDef of models) {
 		if (!hasProviderApi && !modelDef.api) {
@@ -675,6 +704,22 @@ function validateProviderConfiguration(
 			throw new Error(`Provider ${providerName}: model missing "id"`);
 		}
 		const effectiveApi = modelDef.api ?? config.api;
+		if (config.streamIdleTimeoutMs !== undefined && effectiveApi) {
+			assertRequestTransformSupportedForModelApi(
+				providerName,
+				modelDef.id,
+				effectiveApi,
+				'provider "streamIdleTimeoutMs"',
+			);
+		}
+		if (modelDef.streamIdleTimeoutMs !== undefined && effectiveApi) {
+			assertRequestTransformSupportedForModelApi(
+				providerName,
+				modelDef.id,
+				effectiveApi,
+				'model "streamIdleTimeoutMs"',
+			);
+		}
 		const modelCompat = modelDef.compat;
 		if (modelCompat && "supportsResponsesSessionAffinity" in modelCompat) {
 			assertResponsesSessionAffinitySupported(
@@ -727,6 +772,7 @@ function validateModelsConfig(config: ModelsConfig): void {
 				requestTransform: providerConfig.requestTransform,
 				disableStrictTools: providerConfig.disableStrictTools,
 				cacheRetention: providerConfig.cacheRetention,
+				streamIdleTimeoutMs: providerConfig.streamIdleTimeoutMs,
 				openaiCompat: providerConfig.openaiCompat,
 				modelOverrides: providerConfig.modelOverrides,
 				models: (providerConfig.models ?? []) as ProviderValidationModel[],
@@ -797,6 +843,7 @@ interface ProviderOverride {
 	transport?: Model<Api>["transport"];
 	requestTransform?: ModelRequestTransform;
 	cacheRetention?: CacheRetention;
+	streamIdleTimeoutMs?: number;
 	isOAuth?: boolean;
 }
 
@@ -807,6 +854,7 @@ function hasMatchingRegistryTransport(left: Model<Api>, right: Model<Api> | Prov
 		left.transport === right.transport &&
 		isDeepStrictEqual(left.requestTransform, right.requestTransform) &&
 		left.cacheRetention === right.cacheRetention &&
+		left.streamIdleTimeoutMs === right.streamIdleTimeoutMs &&
 		left.isOAuth === right.isOAuth
 	);
 }
@@ -830,6 +878,7 @@ function registryModelMetadataWithoutApiSpecificFields(model: Model<Api>): Parti
 		contextWindow: model.contextWindow,
 		maxTokens: model.maxTokens,
 	};
+	if (model.streamIdleTimeoutMs !== undefined) metadata.streamIdleTimeoutMs = model.streamIdleTimeoutMs;
 	if (model.longContextPricing !== undefined) metadata.longContextPricing = model.longContextPricing;
 	if (model.premiumMultiplier !== undefined) metadata.premiumMultiplier = model.premiumMultiplier;
 	if (model.priority !== undefined) metadata.priority = model.priority;
@@ -993,10 +1042,12 @@ export function mergeDiscoveredModel<TApi extends Api>(
 	existing: Model<Api> | undefined,
 	providerOverride?: Pick<
 		ProviderOverride,
-		"baseUrl" | "headers" | "transport" | "requestTransform" | "cacheRetention"
+		"baseUrl" | "headers" | "transport" | "requestTransform" | "cacheRetention" | "streamIdleTimeoutMs"
 	>,
 ): Model<TApi> {
 	if (existing) {
+		const streamIdleTimeoutMs =
+			model.streamIdleTimeoutMs ?? existing.streamIdleTimeoutMs ?? providerOverride?.streamIdleTimeoutMs;
 		return {
 			...model,
 			baseUrl: providerOverride?.baseUrl ?? model.baseUrl ?? existing.baseUrl,
@@ -1006,15 +1057,18 @@ export function mergeDiscoveredModel<TApi extends Api>(
 				providerOverride?.requestTransform,
 			),
 			cacheRetention: model.cacheRetention ?? existing.cacheRetention ?? providerOverride?.cacheRetention,
+			...(streamIdleTimeoutMs !== undefined ? { streamIdleTimeoutMs } : {}),
 		};
 	}
 	if (providerOverride) {
+		const streamIdleTimeoutMs = model.streamIdleTimeoutMs ?? providerOverride.streamIdleTimeoutMs;
 		return {
 			...model,
 			baseUrl: providerOverride.baseUrl ?? model.baseUrl,
 			headers: mergeCaseInsensitiveHeaders(model.headers, providerOverride.headers),
 			...(providerOverride.transport !== undefined ? { transport: providerOverride.transport } : {}),
 			requestTransform: mergeRequestTransform(model.requestTransform, providerOverride.requestTransform),
+			...(streamIdleTimeoutMs !== undefined ? { streamIdleTimeoutMs } : {}),
 		};
 	}
 	return model;
@@ -1330,6 +1384,7 @@ function applyModelOverride(model: Model<Api>, override: ModelOverride): Model<A
 	if (override.input !== undefined) result.input = override.input as ("text" | "image")[];
 	if (override.output !== undefined) result.output = override.output as ("text" | "image")[];
 	if (override.cacheRetention !== undefined) result.cacheRetention = override.cacheRetention;
+	if (override.streamIdleTimeoutMs !== undefined) result.streamIdleTimeoutMs = override.streamIdleTimeoutMs;
 	const contextWindowOverride = toPositiveNumberOrUndefined(override.contextWindow);
 	if (contextWindowOverride !== undefined) {
 		result.contextWindow = contextWindowOverride;
@@ -1419,6 +1474,7 @@ interface CustomModelDefinitionLike {
 	wireModelId?: string;
 	requestTransform?: ModelRequestTransform;
 	cacheRetention?: CacheRetention;
+	streamIdleTimeoutMs?: number;
 }
 
 interface CustomModelBuildOptions {
@@ -1446,6 +1502,7 @@ type CustomModelOverlay = {
 	wireModelId?: string;
 	requestTransform?: ModelRequestTransform;
 	cacheRetention?: CacheRetention;
+	streamIdleTimeoutMs?: number;
 	transport?: Model<Api>["transport"];
 	isOAuth?: boolean;
 };
@@ -1560,9 +1617,11 @@ function buildCustomModelOverlay(
 	providerCacheRetention: CacheRetention | undefined,
 	providerTransport: Model<Api>["transport"] | undefined,
 	modelDef: CustomModelDefinitionLike,
+	providerStreamIdleTimeoutMs?: number,
 ): CustomModelOverlay | undefined {
 	const api = modelDef.api ?? providerApi;
 	if (!api) return undefined;
+	const streamIdleTimeoutMs = modelDef.streamIdleTimeoutMs ?? providerStreamIdleTimeoutMs;
 	return {
 		id: modelDef.id,
 		provider: providerName,
@@ -1587,6 +1646,7 @@ function buildCustomModelOverlay(
 		contextPromotionTarget: modelDef.contextPromotionTarget,
 		premiumMultiplier: modelDef.premiumMultiplier,
 		cacheRetention: modelDef.cacheRetention ?? providerCacheRetention,
+		...(streamIdleTimeoutMs !== undefined ? { streamIdleTimeoutMs } : {}),
 		transport: providerTransport,
 		isOAuth: resolveCustomModelIsOAuth(api, providerAuth),
 	};
@@ -1723,6 +1783,9 @@ function finalizeCustomModel(model: CustomModelOverlay, options: CustomModelBuil
 		wireModelId: resolvedModel.wireModelId,
 		requestTransform: resolvedModel.requestTransform,
 		cacheRetention: resolvedModel.cacheRetention ?? reference?.cacheRetention,
+		...(resolvedModel.streamIdleTimeoutMs !== undefined
+			? { streamIdleTimeoutMs: resolvedModel.streamIdleTimeoutMs }
+			: {}),
 		transport: resolvedModel.transport,
 		premiumMultiplier: resolvedModel.premiumMultiplier,
 		isOAuth: resolvedModel.isOAuth,
@@ -3404,6 +3467,7 @@ export class ModelRegistry {
 			if (existingIndex !== undefined) {
 				const existingModel = merged[existingIndex];
 				const referenceModel = resolveCustomModelReference(customModel.id);
+				const streamIdleTimeoutMs = customModel.streamIdleTimeoutMs ?? existingModel.streamIdleTimeoutMs;
 				merged[existingIndex] = enrichModelThinking({
 					...existingModel,
 					id: customModel.id,
@@ -3429,6 +3493,7 @@ export class ModelRegistry {
 					wireModelId: customModel.wireModelId,
 					requestTransform: customModel.requestTransform,
 					premiumMultiplier: customModel.premiumMultiplier ?? existingModel.premiumMultiplier,
+					...(streamIdleTimeoutMs !== undefined ? { streamIdleTimeoutMs } : {}),
 				} as Model<Api>);
 			} else {
 				merged.push(finalizeCustomModel(customModel, { useDefaults: true }));
@@ -3807,7 +3872,8 @@ export class ModelRegistry {
 				providerConfig.disableStrictTools ||
 				providerConfig.requestTransform ||
 				providerConfig.transport ||
-				providerConfig.cacheRetention
+				providerConfig.cacheRetention ||
+				providerConfig.streamIdleTimeoutMs !== undefined
 			) {
 				const disableStrictCompat = providerConfig.disableStrictTools ? { disableStrictTools: true } : undefined;
 				overrides.set(providerName, {
@@ -3820,6 +3886,7 @@ export class ModelRegistry {
 					transport: providerConfig.transport,
 					requestTransform: providerConfig.requestTransform,
 					cacheRetention: providerConfig.cacheRetention,
+					streamIdleTimeoutMs: providerConfig.streamIdleTimeoutMs,
 					isOAuth,
 				});
 			}
@@ -5695,6 +5762,7 @@ export class ModelRegistry {
 			transport: override.transport ?? baseOverride?.transport,
 			requestTransform: mergeRequestTransform(baseOverride?.requestTransform, override.requestTransform),
 			cacheRetention: override.cacheRetention ?? baseOverride?.cacheRetention,
+			streamIdleTimeoutMs: override.streamIdleTimeoutMs ?? baseOverride?.streamIdleTimeoutMs,
 			isOAuth: override.isOAuth ?? baseOverride?.isOAuth,
 		};
 	}
@@ -5710,6 +5778,7 @@ export class ModelRegistry {
 			| "transport"
 			| "requestTransform"
 			| "cacheRetention"
+			| "streamIdleTimeoutMs"
 		>,
 	): T {
 		const overrideHeaders = (
@@ -5744,6 +5813,7 @@ export class ModelRegistry {
 			delete overrideHeaders[GENERATED_AUTH_HEADER];
 		}
 		const headers = mergeAuthHeader(overrideHeaders, canInject, canInject ? override.apiKey : undefined);
+		const streamIdleTimeoutMs = entry.streamIdleTimeoutMs ?? override.streamIdleTimeoutMs;
 		const result = {
 			...entry,
 			compat: mergeProviderCompat(entry.compat, override.compat),
@@ -5757,6 +5827,7 @@ export class ModelRegistry {
 				override.requestTransform,
 			),
 			cacheRetention: entry.cacheRetention ?? override.cacheRetention,
+			...(streamIdleTimeoutMs !== undefined ? { streamIdleTimeoutMs } : {}),
 		};
 		if (!canInject && explicitAuthKey !== undefined) {
 			delete (result.headers as Record<string, string> & { [GENERATED_AUTH_HEADER]?: string })[
@@ -6044,6 +6115,7 @@ export class ModelRegistry {
 					providerConfig.cacheRetention,
 					providerConfig.transport,
 					modelDef as CustomModelDefinitionLike,
+					providerConfig.streamIdleTimeoutMs,
 				);
 				if (!model) continue;
 				models.push(model);

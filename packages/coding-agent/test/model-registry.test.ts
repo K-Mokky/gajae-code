@@ -695,6 +695,31 @@ describe("ModelRegistry", () => {
 			expect(openaiModel?.cacheRetention).toBe("long");
 		});
 
+		test("inherits provider streamIdleTimeoutMs and honors per-model overrides", () => {
+			writeRawModelsJson({
+				openai: {
+					streamIdleTimeoutMs: 240_000,
+					modelOverrides: {
+						"gpt-5-mini": { streamIdleTimeoutMs: 450_000 },
+					},
+				},
+				proxy: {
+					baseUrl: "https://proxy.example.com/v1",
+					apiKey: "TEST_KEY",
+					api: "openai-responses",
+					streamIdleTimeoutMs: 300_000,
+					models: [{ id: "claude-opus-5-5" }, { id: "deepseek-v4.1-flash", streamIdleTimeoutMs: 450_000 }],
+				},
+			});
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+
+			expect(registry.find("openai", "gpt-5")).toMatchObject({ streamIdleTimeoutMs: 240_000 });
+			expect(registry.find("openai", "gpt-5-mini")).toMatchObject({ streamIdleTimeoutMs: 450_000 });
+			expect(registry.find("proxy", "claude-opus-5-5")).toMatchObject({ streamIdleTimeoutMs: 300_000 });
+			expect(registry.find("proxy", "deepseek-v4.1-flash")).toMatchObject({ streamIdleTimeoutMs: 450_000 });
+		});
+
 		test("propagates declared image output capability for custom models", () => {
 			writeRawModelsJson({
 				layofflabs: {
@@ -6560,6 +6585,21 @@ describe("ModelRegistry", () => {
 		const registry = new ModelRegistry(authStorage, modelsJsonPath);
 		expect(String(registry.getError()?.message)).toContain(
 			'"requestTransform" is only supported with openai-completions or openai-responses APIs',
+		);
+	});
+
+	test("rejects provider stream idle timeouts on non-OpenAI-compatible built-ins", () => {
+		writeRawModelsConfig({
+			providers: {
+				anthropic: {
+					streamIdleTimeoutMs: 300_000,
+				},
+			},
+		});
+
+		const registry = new ModelRegistry(authStorage, modelsJsonPath);
+		expect(String(registry.getError()?.message)).toContain(
+			'"streamIdleTimeoutMs" is only supported with openai-completions or openai-responses APIs',
 		);
 	});
 

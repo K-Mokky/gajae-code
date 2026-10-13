@@ -398,7 +398,9 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses"> = (
 			const premiumRequestsTotal = copilotPremiumRequests;
 			const providerSessionState = getOpenAIResponsesProviderSessionState(model, options?.providerSessionState);
 			let { params } = buildParams(model, context, options, providerSessionState, cacheRetention, baseUrl);
-			const idleTimeoutMs = options?.streamIdleTimeoutMs ?? getOpenAIStreamIdleTimeoutMs(model.provider, model.id);
+			const idleTimeoutMs =
+				options?.streamIdleTimeoutMs ??
+				getOpenAIStreamIdleTimeoutMs(model.provider, model.id, model.streamIdleTimeoutMs);
 			const replacementPayload = await options?.onPayload?.(
 				params,
 				undefined,
@@ -660,7 +662,12 @@ function createClient(
 	);
 	// Bound HTTP request timeout to the first-event window so a stalled-before-headers
 	// fetch cannot wait the SDK's 10-minute default before the transport watchdog arms.
-	const sdkTimeoutMs = resolveOpenAISdkRequestTimeoutMs(model.provider, streamFirstEventTimeoutOverride, model.id);
+	const sdkTimeoutMs = resolveOpenAISdkRequestTimeoutMs(
+		model.provider,
+		streamFirstEventTimeoutOverride,
+		model.id,
+		model.streamIdleTimeoutMs,
+	);
 	return {
 		client: new OpenAI({
 			apiKey,

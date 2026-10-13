@@ -748,6 +748,10 @@
 										"short",
 										"long"
 									]
+								},
+								"streamIdleTimeoutMs": {
+									"type": "integer",
+									"minimum": 0
 								}
 							},
 							"required": [
@@ -1139,6 +1143,10 @@
 										"short",
 										"long"
 									]
+								},
+								"streamIdleTimeoutMs": {
+									"type": "integer",
+									"minimum": 0
 								}
 							},
 							"additionalProperties": false
@@ -1158,6 +1166,10 @@
 							"short",
 							"long"
 						]
+					},
+					"streamIdleTimeoutMs": {
+						"type": "integer",
+						"minimum": 0
 					},
 					"openaiCompat": {
 						"type": "object",
