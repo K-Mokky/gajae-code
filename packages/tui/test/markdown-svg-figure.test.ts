@@ -199,6 +199,23 @@ describe("Markdown asynchronous SVG figures", () => {
 		}
 	});
 
+	it("disposes dynamic figures when streamed Markdown is cleared", () => {
+		const figures: DeferredFigure[] = [];
+		const markdown = new Markdown("```svg\n<svg/>\n```", 0, 0, figureTheme(figures));
+		markdown.setStreaming(true);
+		try {
+			markdown.render(80);
+			const figure = figures[0];
+			if (!figure) throw new Error("Expected the SVG resolver to create a figure");
+
+			markdown.setText("", { streaming: true });
+			markdown.render(80);
+			expect(figure.disposed).toBe(true);
+		} finally {
+			markdown.dispose();
+		}
+	});
+
 	it("disables the SVG fast path when its resolver becomes unavailable", () => {
 		const figures: DeferredFigure[] = [];
 		const theme = figureTheme(figures);

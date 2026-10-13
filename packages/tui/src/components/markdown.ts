@@ -776,6 +776,9 @@ export class Markdown implements Component {
 		// Don't render anything if there's no actual text
 		if (!this.#text || this.#text.trim() === "") {
 			this.#currentParse = undefined;
+			this.#mayHaveDynamicSvgFigures = false;
+			this.#svgFenceDetectionPending = false;
+			this.#disposeDynamicFiguresFrom(0);
 			const result: string[] = [];
 			// Update per-instance cache
 			this.#cachedText = this.#text;
