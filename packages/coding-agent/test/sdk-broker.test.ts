@@ -1820,6 +1820,42 @@ describe("SDK broker identity and discovery", () => {
 			await fs.rm(dir, { recursive: true, force: true });
 		}
 	});
+	it("reclaims a broker lock whose live PID has a different incarnation", async () => {
+		const dir = await temp();
+		const lock = path.join(dir, "sdk", "broker.lock");
+		const { brokerLockHostIdentity } = await import("../src/sdk/broker/lock-host-identity");
+		const hostIdentity = await brokerLockHostIdentity(dir);
+		const currentIncarnation = processIncarnation.processIncarnation(process.pid);
+		if (!currentIncarnation) throw new Error("Current process incarnation is unavailable");
+		const staleIncarnation = currentIncarnation.replace(/\d+$/u, currentIncarnation.endsWith(":0") ? "1" : "0");
+		await fs.mkdir(lock, { recursive: true, mode: 0o700 });
+		await fs.writeFile(
+			path.join(lock, "owner.json"),
+			JSON.stringify({
+				version: 1,
+				ownerId: "reused-pid-owner",
+				pid: process.pid,
+				incarnation: staleIncarnation,
+				ownerHostId: hostIdentity.ownerHostId,
+				acquiredAt: Date.now(),
+			}),
+			{ mode: 0o600 },
+		);
+		const broker = new Broker({ agentDir: dir });
+		try {
+			const discovery = await broker.start();
+			expect(discovery.pid).toBe(process.pid);
+			expect(discovery.ownerId).not.toBe("reused-pid-owner");
+			expect(JSON.parse(await fs.readFile(path.join(lock, "owner.json"), "utf8"))).toMatchObject({
+				ownerId: discovery.ownerId,
+				pid: process.pid,
+				incarnation: discovery.incarnation,
+			});
+		} finally {
+			await broker.stop();
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	}, 5_000);
 	it("refuses concurrent launches when a live lock owner has not published discovery", async () => {
 		const dir = await temp();
 		const lock = path.join(dir, "sdk", "broker.lock");
@@ -1843,6 +1879,99 @@ describe("SDK broker identity and discovery", () => {
 			expect(JSON.parse(await fs.readFile(path.join(lock, "owner.json"), "utf8"))).toMatchObject({
 				ownerId: "live-unpublished-owner",
 				pid: process.pid,
+			});
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	}, 5_000);
+	it("keeps a broker lock when its live owner's PID and incarnation match", async () => {
+		const dir = await temp();
+		const lock = path.join(dir, "sdk", "broker.lock");
+		const { brokerLockHostIdentity } = await import("../src/sdk/broker/lock-host-identity");
+		const hostIdentity = await brokerLockHostIdentity(dir);
+		const incarnation = processIncarnation.processIncarnation(process.pid);
+		if (!incarnation) throw new Error("Current process incarnation is unavailable");
+		await fs.mkdir(lock, { recursive: true, mode: 0o700 });
+		await fs.writeFile(
+			path.join(lock, "owner.json"),
+			JSON.stringify({
+				version: 1,
+				ownerId: "matching-live-owner",
+				pid: process.pid,
+				incarnation,
+				ownerHostId: hostIdentity.ownerHostId,
+				acquiredAt: Date.now(),
+			}),
+			{ mode: 0o600 },
+		);
+		const broker = new Broker({ agentDir: dir });
+		try {
+			await expect(broker.start()).rejects.toThrow(`Broker lock is held by a live owner (pid ${process.pid})`);
+			expect(JSON.parse(await fs.readFile(path.join(lock, "owner.json"), "utf8"))).toMatchObject({
+				ownerId: "matching-live-owner",
+				pid: process.pid,
+				incarnation,
+			});
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	}, 5_000);
+	it("keeps a broker lock when its owner is on a foreign host with mismatched incarnation", async () => {
+		const dir = await temp();
+		const lock = path.join(dir, "sdk", "broker.lock");
+		const currentIncarnation = processIncarnation.processIncarnation(process.pid);
+		if (!currentIncarnation) throw new Error("Current process incarnation is unavailable");
+		const staleIncarnation = currentIncarnation.replace(/\d+$/u, currentIncarnation.endsWith(":0") ? "1" : "0");
+		await fs.mkdir(lock, { recursive: true, mode: 0o700 });
+		await fs.writeFile(
+			path.join(lock, "owner.json"),
+			JSON.stringify({
+				version: 1,
+				ownerId: "foreign-host-owner",
+				pid: process.pid,
+				incarnation: staleIncarnation,
+				ownerHostId: "some-foreign-host",
+				acquiredAt: Date.now(),
+			}),
+			{ mode: 0o600 },
+		);
+		const broker = new Broker({ agentDir: dir });
+		try {
+			await expect(broker.start()).rejects.toThrow(`Broker lock is held by a live owner (pid ${process.pid})`);
+			// Lock should NOT have been reclaimed despite incarnation mismatch
+			expect(JSON.parse(await fs.readFile(path.join(lock, "owner.json"), "utf8"))).toMatchObject({
+				ownerId: "foreign-host-owner",
+				ownerHostId: "some-foreign-host",
+			});
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	}, 5_000);
+	it("keeps a broker lock when its owner is legacy (host-unqualified) with mismatched incarnation", async () => {
+		const dir = await temp();
+		const lock = path.join(dir, "sdk", "broker.lock");
+		const currentIncarnation = processIncarnation.processIncarnation(process.pid);
+		if (!currentIncarnation) throw new Error("Current process incarnation is unavailable");
+		const staleIncarnation = currentIncarnation.replace(/\d+$/u, currentIncarnation.endsWith(":0") ? "1" : "0");
+		await fs.mkdir(lock, { recursive: true, mode: 0o700 });
+		await fs.writeFile(
+			path.join(lock, "owner.json"),
+			JSON.stringify({
+				version: 1,
+				ownerId: "legacy-unqualified-owner",
+				pid: process.pid,
+				incarnation: staleIncarnation,
+				acquiredAt: Date.now(),
+				// NO ownerHostId field - legacy record
+			}),
+			{ mode: 0o600 },
+		);
+		const broker = new Broker({ agentDir: dir });
+		try {
+			await expect(broker.start()).rejects.toThrow(`Broker lock is held by a live owner (pid ${process.pid})`);
+			// Lock should NOT have been reclaimed despite incarnation mismatch
+			expect(JSON.parse(await fs.readFile(path.join(lock, "owner.json"), "utf8"))).toMatchObject({
+				ownerId: "legacy-unqualified-owner",
 			});
 		} finally {
 			await fs.rm(dir, { recursive: true, force: true });

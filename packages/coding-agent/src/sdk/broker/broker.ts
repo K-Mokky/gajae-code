@@ -1173,17 +1173,30 @@ type BrokerLockSnapshot = {
 	ownerId?: string;
 	pid: number;
 	incarnation?: string;
+	ownerHostId?: string;
 	identity: string;
 	lockIdentity: string;
 };
 
 function isBrokerLockOwnerAlive(
-	snapshot: Pick<BrokerLockSnapshot, "pid" | "incarnation">,
+	snapshot: Pick<BrokerLockSnapshot, "pid" | "incarnation" | "ownerHostId">,
 	pidAlive: (pid: number) => boolean = isPidAlive,
 	readProcessIncarnation: (pid: number) => string | undefined = brokerProcessIncarnation,
+	currentHostId?: string,
 ): boolean {
 	if (snapshot.pid <= 0 || !pidAlive(snapshot.pid)) return false;
-	// A reused PID is not the owner. Missing incarnation evidence remains fail-closed.
+	// Only use PID/incarnation checks when the recorded host equals the current host.
+	// Foreign or host-unqualified (legacy) owners are treated conservatively: no mismatch-based reclaim.
+	if (currentHostId && snapshot.ownerHostId && snapshot.ownerHostId !== currentHostId) {
+		// Foreign host: incarnation mismatch does not prove death.
+		return true;
+	}
+	if (currentHostId && !snapshot.ownerHostId) {
+		// Legacy (host-unqualified) owner: incarnation mismatch does not prove death.
+		// Fail closed and don't reclaim based on mismatch alone.
+		return true;
+	}
+	// Same-host owner (or unqualified when currentHostId is undefined): use PID/incarnation checks.
 	if (!snapshot.incarnation) return true;
 	const incarnation = readProcessIncarnation(snapshot.pid);
 	return !incarnation || incarnation === snapshot.incarnation;
@@ -3702,7 +3715,12 @@ export class Broker {
 	}
 	async #lockSnapshot(raw: string, lockIdentity: string): Promise<BrokerLockSnapshot> {
 		try {
-			const lock = JSON.parse(raw) as { ownerId?: unknown; pid?: unknown; incarnation?: unknown };
+			const lock = JSON.parse(raw) as {
+				ownerId?: unknown;
+				pid?: unknown;
+				incarnation?: unknown;
+				ownerHostId?: unknown;
+			};
 			if (
 				typeof lock.ownerId === "string" &&
 				lock.ownerId.length > 0 &&
@@ -3714,6 +3732,7 @@ export class Broker {
 					ownerId: lock.ownerId,
 					pid: lock.pid,
 					incarnation: isProcessIncarnation(lock.incarnation) ? lock.incarnation : undefined,
+					ownerHostId: typeof lock.ownerHostId === "string" ? lock.ownerHostId : undefined,
 					identity: `owner:${lock.ownerId}`,
 					lockIdentity,
 				};
@@ -3771,6 +3790,7 @@ export class Broker {
 	}
 	async #createLockInsideGuard(): Promise<void> {
 		const rootDigest = await canonicalServiceRootDigest(this.settings.agentDir);
+		const hostIdentity = await brokerLockHostIdentity(this.settings.agentDir);
 		await fs.mkdir(this.#lock, { mode: 0o700 });
 		try {
 			const incarnation = brokerProcessIncarnation(process.pid);
@@ -3783,6 +3803,7 @@ export class Broker {
 					pid: process.pid,
 					acquiredAt: Date.now(),
 					incarnation,
+					ownerHostId: hostIdentity.ownerHostId,
 					rootDigest,
 				}),
 				{ flag: "wx", mode: 0o600 },
@@ -3819,11 +3840,12 @@ export class Broker {
 	async #reclaimStaleLock(snapshot: BrokerLockSnapshot): Promise<boolean> {
 		return await this.#withLockReclaimGuard(async () => {
 			const current = await this.#readLock();
+			const hostIdentity = await brokerLockHostIdentity(this.settings.agentDir);
 			if (
 				!current ||
 				current.identity !== snapshot.identity ||
 				current.lockIdentity !== snapshot.lockIdentity ||
-				isBrokerLockOwnerAlive(current)
+				isBrokerLockOwnerAlive(current, isPidAlive, brokerProcessIncarnation, hostIdentity.ownerHostId)
 			)
 				return false;
 			await brokerLockReclaimHooksForTest.get(this)?.beforeQuarantine?.();
@@ -3950,7 +3972,8 @@ export class Broker {
 			}
 			const snapshot = await this.#readLock();
 			if (!snapshot) continue;
-			if (isBrokerLockOwnerAlive(snapshot)) {
+			const hostIdentity = await brokerLockHostIdentity(this.settings.agentDir);
+			if (isBrokerLockOwnerAlive(snapshot, isPidAlive, brokerProcessIncarnation, hostIdentity.ownerHostId)) {
 				const starting = await this.#waitForBrokerDiscovery();
 				if (starting) {
 					logger.info(
@@ -3961,7 +3984,11 @@ export class Broker {
 					return starting;
 				}
 				const current = await this.#readLock();
-				if (current && current.identity === snapshot.identity && isBrokerLockOwnerAlive(current)) {
+				if (
+					current &&
+					current.identity === snapshot.identity &&
+					isBrokerLockOwnerAlive(current, isPidAlive, brokerProcessIncarnation, hostIdentity.ownerHostId)
+				) {
 					logger.warn(
 						`sdk broker: lock contention, refusing to start because ${this.#lock} is held by live pid ${current.pid} that published no discovery record`,
 					);
