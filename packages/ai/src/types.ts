@@ -1228,7 +1228,7 @@ export interface OpenAICompat extends ToolChoiceCompat {
 	 */
 	supportsServiceTier?: boolean;
 	/**
-	 * Whether the model explicitly supports the ultrafast service tier (6x premium tier).
+	 * Whether the model explicitly supports the ultrafast service tier.
 	 * Only models that set this flag will send ultrafast tier to the API.
 	 * Models: gpt-6-astra and gpt-6.1-sol.
 	 */

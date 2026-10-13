@@ -251,7 +251,7 @@ describe("ultrafast request serialization for bundled models", () => {
 		}
 	});
 
-	it("sends ultrafast for a Codex catalog model explicitly opted into the tier", async () => {
+	it("sends ultrafast and applies Codex included-usage multipliers", async () => {
 		const catalogModel = getBundledModel("openai-codex", "gpt-6-astra") as Model<"openai-codex-responses">;
 		expect(catalogModel.compat?.supportsUltrafastTier).toBe(true);
 		const model = { ...catalogModel, preferWebsockets: false };
@@ -259,6 +259,12 @@ describe("ultrafast request serialization for bundled models", () => {
 		const standardResult = await streamOpenAICodexResponses(model, testContext, {
 			apiKey: codexTestToken(),
 			serviceTier: "default",
+		}).result();
+
+		const priorityBodies = captureRequests(completedResponseEvents());
+		const priorityResult = await streamOpenAICodexResponses(model, testContext, {
+			apiKey: codexTestToken(),
+			serviceTier: "priority",
 		}).result();
 
 		const ultrafastBodies = captureRequests(completedResponseEvents());
@@ -269,15 +275,19 @@ describe("ultrafast request serialization for bundled models", () => {
 		}).result();
 
 		expect(standardResult.stopReason).toBe("stop");
+		expect(priorityResult.stopReason).toBe("stop");
 		expect(ultrafastResult.stopReason).toBe("stop");
 		expect(standardBodies[0]?.service_tier).toBeUndefined();
+		expect(priorityBodies[0]?.service_tier).toBe("priority");
 		expect(ultrafastBodies[0]?.service_tier).toBe("ultrafast");
+		expect(priorityResult.serviceTier).toBe("priority");
 		expect(ultrafastResult.serviceTier).toBe("ultrafast");
-		expect(ultrafastResult.usage.cost.input).toBeCloseTo(standardResult.usage.cost.input * 6, 12);
-		expect(ultrafastResult.usage.cost.output).toBeCloseTo(standardResult.usage.cost.output * 6, 12);
-		expect(ultrafastResult.usage.cost.cacheRead).toBeCloseTo(standardResult.usage.cost.cacheRead * 6, 12);
-		expect(ultrafastResult.usage.cost.cacheWrite).toBeCloseTo(standardResult.usage.cost.cacheWrite * 6, 12);
-		expect(ultrafastResult.usage.cost.total).toBeCloseTo(standardResult.usage.cost.total * 6, 12);
+		expect(priorityResult.usage.cost.total).toBeCloseTo(standardResult.usage.cost.total * 2.5, 12);
+		expect(ultrafastResult.usage.cost.input).toBeCloseTo(standardResult.usage.cost.input * 8, 12);
+		expect(ultrafastResult.usage.cost.output).toBeCloseTo(standardResult.usage.cost.output * 8, 12);
+		expect(ultrafastResult.usage.cost.cacheRead).toBeCloseTo(standardResult.usage.cost.cacheRead * 8, 12);
+		expect(ultrafastResult.usage.cost.cacheWrite).toBeCloseTo(standardResult.usage.cost.cacheWrite * 8, 12);
+		expect(ultrafastResult.usage.cost.total).toBeCloseTo(standardResult.usage.cost.total * 8, 12);
 		expect(ultrafastResult.usage.cost.total).toBe(
 			ultrafastResult.usage.cost.input +
 				ultrafastResult.usage.cost.output +
