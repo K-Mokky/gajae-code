@@ -468,8 +468,9 @@ function assertRequestTransformSupportedForModelApi(
 }
 
 function getKnownProviderModelApi(providerName: string, modelId: string): Api | undefined {
-	return getBundledModels(providerName as Parameters<typeof getBundledModels>[0]).find(model => model.id === modelId)
-		?.api as Api | undefined;
+	return getBundledModels(providerName as Parameters<typeof getBundledModels>[0]).find(
+		model => model.id.toLowerCase() === modelId.toLowerCase(),
+	)?.api as Api | undefined;
 }
 
 function isCanonicalOpenAIAffinityBaseUrl(baseUrl: string | undefined): boolean {

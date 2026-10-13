@@ -6620,6 +6620,20 @@ describe("ModelRegistry", () => {
 		expect(registry.find("proxy", "Model-X")).toMatchObject({ streamIdleTimeoutMs: 300_000 });
 	});
 
+	test("validates mixed-case stream idle modelOverrides for bundled models", () => {
+		writeRawModelsConfig({
+			providers: {
+				"github-copilot": {
+					modelOverrides: { "GPT-4.1": { streamIdleTimeoutMs: 300_000 } },
+				},
+			},
+		});
+
+		const registry = new ModelRegistry(authStorage, modelsJsonPath);
+		expect(registry.getError()).toBeUndefined();
+		expect(registry.find("github-copilot", "gpt-4.1")).toMatchObject({ streamIdleTimeoutMs: 300_000 });
+	});
+
 	test("rejects model-configured stream idle timeouts on pi-native transport", () => {
 		const timeoutConfigs: Array<Record<string, unknown>> = [
 			{ streamIdleTimeoutMs: 300_000 },
