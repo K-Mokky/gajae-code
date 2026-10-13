@@ -3499,7 +3499,9 @@ export class ModelRegistry {
 				const inheritedCompat = explicitTransportMatches
 					? explicitTransport?.compat
 					: commonRegistryTransportCompat(transportTemplates);
-				const streamIdleTimeoutMs = registryModel.streamIdleTimeoutMs ?? explicitTransport?.streamIdleTimeoutMs;
+				const streamIdleTimeoutMs = isRequestTransformApi(registryModel.api)
+					? (registryModel.streamIdleTimeoutMs ?? explicitTransport?.streamIdleTimeoutMs)
+					: undefined;
 				const hydratedRegistryModel = {
 					...registryModel,
 					baseUrl: transportSource.baseUrl!,
@@ -3567,10 +3569,14 @@ export class ModelRegistry {
 			const existingIndex = indexByKey.get(key);
 			if (existingIndex !== undefined) {
 				const existingModel = merged[existingIndex];
+				const { streamIdleTimeoutMs: existingStreamIdleTimeoutMs, ...existingModelWithoutStreamIdleTimeout } =
+					existingModel;
 				const referenceModel = resolveCustomModelReference(customModel.id);
-				const streamIdleTimeoutMs = customModel.streamIdleTimeoutMs ?? existingModel.streamIdleTimeoutMs;
+				const streamIdleTimeoutMs = isRequestTransformApi(customModel.api)
+					? (customModel.streamIdleTimeoutMs ?? existingStreamIdleTimeoutMs)
+					: undefined;
 				merged[existingIndex] = enrichModelThinking({
-					...existingModel,
+					...existingModelWithoutStreamIdleTimeout,
 					id: customModel.id,
 					provider: customModel.provider,
 					api: customModel.api,

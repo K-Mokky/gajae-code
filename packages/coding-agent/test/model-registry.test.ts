@@ -6721,6 +6721,31 @@ describe("ModelRegistry", () => {
 		);
 	});
 
+	test("drops inherited provider timeouts when a custom model changes a bundled model API", () => {
+		writeRawModelsConfig({
+			providers: {
+				openai: {
+					baseUrl: "https://proxy.example.com/v1",
+					apiKey: "TEST_KEY",
+					streamIdleTimeoutMs: 300_000,
+					models: [
+						{ id: "gpt-4.1", api: "anthropic-messages" },
+						{ id: "custom-openai-model", api: "openai-completions" },
+					],
+				},
+			},
+		});
+
+		const registry = new ModelRegistry(authStorage, modelsJsonPath);
+		expect(registry.getError()).toBeUndefined();
+		expect(registry.find("openai", "gpt-4.1")).toMatchObject({ api: "anthropic-messages" });
+		expect(registry.find("openai", "gpt-4.1")).not.toHaveProperty("streamIdleTimeoutMs");
+		expect(registry.find("openai", "custom-openai-model")).toMatchObject({
+			api: "openai-completions",
+			streamIdleTimeoutMs: 300_000,
+		});
+	});
+
 	test("validates stream idle modelOverrides case-insensitively", () => {
 		writeRawModelsConfig({
 			providers: {

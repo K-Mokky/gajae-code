@@ -644,6 +644,53 @@ describe("signed model preset registry", () => {
 		}
 	});
 
+	test("does not inherit provider timeouts for registry-only Anthropic models", async () => {
+		const data = await fixture();
+		const registry = signedRegistry(
+			data.privateKey,
+			1,
+			[],
+			[
+				{
+					...registryPreset("registry-anthropic-model"),
+					provider: "github-copilot",
+					api: "anthropic-messages",
+				},
+				{ ...registryPreset("registry-openai-model"), provider: "github-copilot" },
+			],
+		);
+		await expect(accept(data, registry)).resolves.toMatchObject({ status: "updated", revision: 1 });
+		await Bun.write(
+			path.join(data.agentDir, "models.yml"),
+			`providers:
+  github-copilot:
+    streamIdleTimeoutMs: 360000
+`,
+		);
+		const authStorage = await AuthStorage.create(path.join(data.agentDir, "github-copilot-timeout-auth.db"));
+		try {
+			const modelRegistry = data.run(
+				() =>
+					new ModelRegistry(authStorage, path.join(data.agentDir, "models.yml"), undefined, {
+						automaticRefresh: false,
+					}),
+			);
+			expect(modelRegistry.getError()).toBeUndefined();
+			expect(modelRegistry.find("github-copilot", "registry-anthropic-model")).toMatchObject({
+				api: "anthropic-messages",
+			});
+			expect(modelRegistry.find("github-copilot", "registry-anthropic-model")).not.toHaveProperty(
+				"streamIdleTimeoutMs",
+			);
+			expect(modelRegistry.find("github-copilot", "registry-openai-model")).toMatchObject({
+				api: "openai-completions",
+				streamIdleTimeoutMs: 360_000,
+			});
+		} finally {
+			authStorage.close();
+		}
+	});
+
 	test("applies authHeader credentials to registry-only models", async () => {
 		const data = await fixture();
 		await expect(
