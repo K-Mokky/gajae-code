@@ -43,6 +43,7 @@ import {
 import type { CursorOptions } from "./providers/cursor";
 import type { DevinAcpOptions } from "./providers/devin-acp";
 import type { GoogleOptions } from "./providers/google";
+import { getVertexCredentialSource } from "./providers/google-auth";
 import type { GoogleGeminiCliOptions } from "./providers/google-gemini-cli";
 import type { GoogleVertexOptions } from "./providers/google-vertex";
 import type { KiroCodeWhispererOptions } from "./providers/kiro-codewhisperer";
@@ -73,6 +74,7 @@ import type {
 	AssistantMessageEvent,
 	AuthRetryCredential,
 	Context,
+	FetchImpl,
 	Model,
 	OptionsForApi,
 	SimpleStreamOptions,
@@ -82,8 +84,6 @@ import type {
 } from "./types";
 import { AssistantMessageEventStream } from "./utils/event-stream";
 import { isFoundryEnabled } from "./utils/foundry";
-
-let cachedVertexAdcCredentialsExists: boolean | null = null;
 
 function assertCustomApiRegistryActive(registry: CustomApiRegistry | undefined): void {
 	if (registry !== undefined) CustomApiRegistry.assertActive(registry);
@@ -111,24 +111,16 @@ function isBuiltInApi(api: Api): boolean {
 }
 
 function hasVertexAdcCredentials(): boolean {
-	if (cachedVertexAdcCredentialsExists === null) {
-		const gacPath = $credentialEnv("GOOGLE_APPLICATION_CREDENTIALS");
-		if (gacPath) {
-			cachedVertexAdcCredentialsExists = fs.existsSync(gacPath);
-		} else {
-			cachedVertexAdcCredentialsExists = fs.existsSync(
-				path.join(getTrustedHomeDir(), ".config", "gcloud", "application_default_credentials.json"),
-			);
-		}
-	}
-	return cachedVertexAdcCredentialsExists;
+	const gacPath = $credentialEnv("GOOGLE_APPLICATION_CREDENTIALS");
+	if (gacPath) return fs.existsSync(gacPath);
+	return fs.existsSync(path.join(getTrustedHomeDir(), ".config", "gcloud", "application_default_credentials.json"));
 }
 
 type KeyResolver = string | (() => string | undefined);
 
 export type EnvApiKeyCredentialSource =
 	| { kind: "environment"; name: string }
-	| { kind: "google-adc"; source: "explicit-file" | "default-file" }
+	| { kind: "google-adc"; source: "explicit-file" | "default-file" | "metadata-server" }
 	| { kind: "aws"; source: "bearer-token" | "environment-credentials" | "profile" }
 	| { kind: "unknown" };
 
@@ -303,6 +295,17 @@ export function getEnvApiKeyCredentialSource(provider: string): EnvApiKeyCredent
 		if (hasResolvableAwsProfileSource()) return { kind: "aws", source: "profile" };
 	}
 	return { kind: "unknown" };
+}
+
+/** Resolve Vertex ADC provenance, including metadata-server credentials, without acquiring a token. */
+export async function getGoogleVertexCredentialSource(options?: {
+	fetch?: FetchImpl;
+}): Promise<EnvApiKeyCredentialSource | undefined> {
+	const configuredSource = getEnvApiKeyCredentialSource("google-vertex");
+	if (configuredSource && configuredSource.kind !== "google-adc") return configuredSource;
+	if (!($env.GOOGLE_CLOUD_PROJECT || $env.GCLOUD_PROJECT) || !$env.GOOGLE_CLOUD_LOCATION) return undefined;
+	const source = await getVertexCredentialSource({ fetch: options?.fetch });
+	return source ? { kind: "google-adc", source } : undefined;
 }
 
 /** Name of the environment variable whose value is selected by `getEnvApiKey`, when identifiable. */

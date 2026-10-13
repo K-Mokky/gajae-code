@@ -3,6 +3,7 @@ import {
 	type EnvApiKeyCredentialSource,
 	getEnvApiKeyCredentialSource,
 	getEnvApiKeyEnvNames,
+	getGoogleVertexCredentialSource,
 	listProvidersWithEnvKey,
 	resolveOAuthStorageProvider,
 } from "@gajae-code/ai/core";
@@ -31,13 +32,21 @@ interface CredentialSource {
 	label: string;
 }
 
-const MAX_ACCOUNT_LABEL_WIDTH = 120;
+const MAX_STATUS_VALUE_WIDTH = 120;
 
-function displayAccountLabel(value: string): string {
+function displayStatusValue(value: string): string {
 	const safe = replaceTabs(sanitizeDisplayLine(value))
 		.replaceAll(/[\u2028\u2029]/gu, " ")
 		.trim();
-	return truncateToWidth(safe, MAX_ACCOUNT_LABEL_WIDTH).trim() || "unknown";
+	return truncateToWidth(safe, MAX_STATUS_VALUE_WIDTH).trim() || "unknown";
+}
+
+function displayAccountLabel(value: string): string {
+	return displayStatusValue(value);
+}
+
+function displayEnvironmentName(value: string): string {
+	return displayStatusValue(value);
 }
 
 function oauthLabel(entry: AuthCredentialSnapshotEntry): string {
@@ -47,9 +56,10 @@ function oauthLabel(entry: AuthCredentialSnapshotEntry): string {
 }
 
 function environmentCredentialLabel(name: string): string {
-	if (name.endsWith("_API_KEY")) return `API key (env ${name})`;
-	if (name.includes("OAUTH") || name.includes("ACCESS_TOKEN")) return `OAuth token (env ${name})`;
-	return `environment credential (env ${name})`;
+	const safeName = displayEnvironmentName(name);
+	if (name.endsWith("_API_KEY")) return `API key (env ${safeName})`;
+	if (name.includes("OAUTH") || name.includes("ACCESS_TOKEN")) return `OAuth token (env ${safeName})`;
+	return `environment credential (env ${safeName})`;
 }
 
 function environmentSourceLabel(source: EnvApiKeyCredentialSource): string {
@@ -59,7 +69,9 @@ function environmentSourceLabel(source: EnvApiKeyCredentialSource): string {
 		case "google-adc":
 			return source.source === "explicit-file"
 				? "Google ADC (env GOOGLE_APPLICATION_CREDENTIALS)"
-				: "Google ADC (default credentials file)";
+				: source.source === "default-file"
+					? "Google ADC (default credentials file)"
+					: "Google ADC (metadata server)";
 		case "aws":
 			return source.source === "bearer-token"
 				? "AWS bearer token (env AWS_BEARER_TOKEN_BEDROCK)"
@@ -113,6 +125,7 @@ function collectSources(
 	entries: AuthCredentialSnapshotEntry[],
 	registry: ProviderAuthStatusSession["modelRegistry"],
 	owner: object,
+	googleVertexSource: EnvApiKeyCredentialSource | undefined,
 ): CredentialSource[] {
 	const sources: CredentialSource[] = [];
 	const authStorage = registry.authStorage;
@@ -142,17 +155,18 @@ function collectSources(
 		addSource(sources, {
 			kind: "api_key",
 			layer: "runtime-provider",
-			label: envName ? `API key (env ${envName})` : "API key (runtime provider)",
+			label: envName ? `API key (env ${displayEnvironmentName(envName)})` : "API key (runtime provider)",
 		});
 	} else if (authStorage.hasConfigApiKey(provider, owner)) {
 		const envName = registry.getProviderConfigApiKeyEnvName(provider);
 		addSource(sources, {
 			kind: "api_key",
 			layer: "config",
-			label: envName ? `API key (env ${envName})` : "API key (models.yml)",
+			label: envName ? `API key (env ${displayEnvironmentName(envName)})` : "API key (models.yml)",
 		});
 	}
-	const selectedEnvSource = getEnvApiKeyCredentialSource(envProvider);
+	const selectedEnvSource =
+		provider === "google-vertex" ? googleVertexSource : getEnvApiKeyCredentialSource(envProvider);
 	for (const name of getEnvApiKeyEnvNames(envProvider)) {
 		const label =
 			selectedEnvSource?.kind === "aws" && selectedEnvSource.source === "bearer-token"
@@ -172,6 +186,7 @@ function activeSource(
 	session: ProviderAuthStatusSession,
 	owner: object,
 	activeType: "api_key" | "oauth",
+	googleVertexSource: EnvApiKeyCredentialSource | undefined,
 ): CredentialSource {
 	const { authStorage } = session.modelRegistry;
 	const sessionId = session.credentialSessionId;
@@ -202,7 +217,7 @@ function activeSource(
 		return {
 			kind: "api_key",
 			layer: "runtime-provider",
-			label: envName ? `API key (env ${envName})` : "API key (runtime provider)",
+			label: envName ? `API key (env ${displayEnvironmentName(envName)})` : "API key (runtime provider)",
 		};
 	}
 	if (authStorage.hasConfigApiKey(provider, owner)) {
@@ -215,7 +230,7 @@ function activeSource(
 		return {
 			kind: "api_key",
 			layer: "config",
-			label: envName ? `API key (env ${envName})` : "API key (models.yml)",
+			label: envName ? `API key (env ${displayEnvironmentName(envName)})` : "API key (models.yml)",
 		};
 	}
 	const selectedRowId = authStorage.getSelectedApiKeyCredentialRowId(provider, sessionId, { owner });
@@ -227,16 +242,17 @@ function activeSource(
 	if (storedSource) return { kind: "api_key", ...storedSource };
 
 	const envProvider = resolveOAuthStorageProvider(provider);
-	const envSource = getEnvApiKeyCredentialSource(envProvider);
+	const envSource = provider === "google-vertex" ? googleVertexSource : getEnvApiKeyCredentialSource(envProvider);
 	if (envSource) return { kind: "api_key", layer: "environment", label: environmentSourceLabel(envSource) };
 	return { kind: "api_key", layer: "fallback", label: "API key (configured)" };
 }
 
 /** Format credential provenance for `/provider status` without returning credential values. */
-export function buildProviderAuthStatusText(session: ProviderAuthStatusSession): string {
+export async function buildProviderAuthStatusText(session: ProviderAuthStatusSession): Promise<string> {
 	const { modelRegistry } = session;
 	// Status must reflect rotating env-backed keys even before another model selection runs.
 	modelRegistry.getAvailable();
+	const googleVertexSource = await getGoogleVertexCredentialSource();
 	const authStorage = modelRegistry.authStorage;
 	const owner = modelRegistry.getAuthStorageOwner();
 	const snapshot = authStorage.exportSnapshot();
@@ -249,6 +265,7 @@ export function buildProviderAuthStatusText(session: ProviderAuthStatusSession):
 	const providers = [...providerIds]
 		.filter(
 			provider =>
+				(provider === "google-vertex" && googleVertexSource !== undefined) ||
 				authStorage.hasSessionCredentialUnavailable(provider, session.credentialSessionId) ||
 				authStorage.hasAuth(provider, session.credentialSessionId, { owner }),
 		)
@@ -259,7 +276,7 @@ export function buildProviderAuthStatusText(session: ProviderAuthStatusSession):
 	for (const provider of providers) {
 		const entries = snapshot.credentials.filter(entry => resolveOAuthStorageProvider(entry.provider) === provider);
 		const activeType = authStorage.getEffectiveCredentialType(provider, session.credentialSessionId, { owner });
-		const sources = collectSources(provider, entries, modelRegistry, owner);
+		const sources = collectSources(provider, entries, modelRegistry, owner, googleVertexSource);
 		const sessionCredentialUnavailable = authStorage.hasSessionCredentialUnavailable(
 			provider,
 			session.credentialSessionId,
@@ -267,9 +284,15 @@ export function buildProviderAuthStatusText(session: ProviderAuthStatusSession):
 		const active = sessionCredentialUnavailable
 			? { kind: "api_key" as const, layer: "pending" as const, label: "selected credential unavailable" }
 			: activeType === "oauth" || activeType === "api_key"
-				? activeSource(provider, entries, session, owner, activeType)
-				: undefined;
-		lines.push(`${sanitizeDisplayLine(provider)}: ${active?.label ?? "credential source unavailable"}`);
+				? activeSource(provider, entries, session, owner, activeType, googleVertexSource)
+				: provider === "google-vertex" && googleVertexSource
+					? {
+							kind: "api_key" as const,
+							layer: "environment" as const,
+							label: environmentSourceLabel(googleVertexSource),
+						}
+					: undefined;
+		lines.push(`${displayStatusValue(provider)}: ${active?.label ?? "credential source unavailable"}`);
 		const shadowed =
 			active && active.layer !== "pending"
 				? sources

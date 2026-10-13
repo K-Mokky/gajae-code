@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -592,6 +592,109 @@ describe("provider slash command", () => {
 		} finally {
 			if (originalApiKey === undefined) delete Bun.env[TEST_PROVIDER_KEY_ENV];
 			else Bun.env[TEST_PROVIDER_KEY_ENV] = originalApiKey;
+		}
+	});
+
+	it("keeps configured and runtime environment names on one display line", async () => {
+		tempAgentDir = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-provider-slash-"));
+		setAgentDir(tempAgentDir);
+		const envName = "GJC_PROVIDER_STATUS_KEY\ninjected-row";
+		const originalEnvValue = Bun.env[envName];
+		Bun.env[envName] = "environment-name-injection-secret";
+		try {
+			const authStorage = await AuthStorage.create(path.join(tempAgentDir, "auth.db"));
+			authStorages.push(authStorage);
+			const model = {
+				id: "env-name-model",
+				name: "Environment Name Model",
+				reasoning: false,
+				input: ["text"] as ("image" | "text")[],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 100_000,
+				maxTokens: 8_000,
+			};
+			await Bun.write(
+				path.join(tempAgentDir, "models.yml"),
+				YAML.stringify({
+					providers: {
+						"status-env-injection": {
+							api: "openai-completions",
+							baseUrl: "https://config-proxy.example.test/v1",
+							apiKeyEnv: envName,
+							models: [model],
+						},
+					},
+				}),
+			);
+			const registry = new ModelRegistry(authStorage, path.join(tempAgentDir, "models.yml"));
+			modelRegistries.push(registry);
+			await registry.refresh("offline");
+			registry.registerProvider("status-runtime-env-injection", {
+				api: "openai-completions",
+				baseUrl: "https://runtime-proxy.example.test/v1",
+				apiKey: envName,
+				models: [model],
+			});
+			const outputs: string[] = [];
+			const command = BUILTIN_SLASH_COMMANDS_INTERNAL.find(entry => entry.name === "provider");
+			await command?.handle?.({ name: "provider", args: "status", text: "/provider status" }, {
+				session: { modelRegistry: registry },
+				output: (text: string) => outputs.push(text),
+			} as unknown as SlashCommandRuntime);
+
+			const output = outputs.join("\n");
+			expect(output).toContain("status-env-injection: API key (env GJC_PROVIDER_STATUS_KEY injected-row)");
+			expect(output).toContain("status-runtime-env-injection: API key (env GJC_PROVIDER_STATUS_KEY injected-row)");
+			expect(output.split("\n").some(line => line.startsWith("injected-row"))).toBe(false);
+			expect(output).not.toContain("environment-name-injection-secret");
+		} finally {
+			if (originalEnvValue === undefined) delete Bun.env[envName];
+			else Bun.env[envName] = originalEnvValue;
+		}
+	});
+
+	it("reports Vertex metadata-server credentials without retrieving an access token", async () => {
+		tempAgentDir = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-provider-slash-"));
+		setAgentDir(tempAgentDir);
+		const envNames = [
+			"HOME",
+			"GOOGLE_APPLICATION_CREDENTIALS",
+			"GOOGLE_CLOUD_API_KEY",
+			"GOOGLE_CLOUD_PROJECT",
+			"GOOGLE_CLOUD_LOCATION",
+		] as const;
+		const originalEnv = new Map(envNames.map(name => [name, Bun.env[name]]));
+		const metadataProjectUrl = "http://metadata.google.internal/computeMetadata/v1/project/project-id";
+		const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation((async (input: Parameters<typeof fetch>[0]) => {
+			if (String(input) !== metadataProjectUrl) throw new Error(`unexpected status fetch: ${input}`);
+			return new Response("status-project", { headers: { "Metadata-Flavor": "Google" } });
+		}) as unknown as typeof fetch);
+		try {
+			Bun.env.HOME = tempAgentDir;
+			delete Bun.env.GOOGLE_APPLICATION_CREDENTIALS;
+			delete Bun.env.GOOGLE_CLOUD_API_KEY;
+			Bun.env.GOOGLE_CLOUD_PROJECT = "status-project";
+			Bun.env.GOOGLE_CLOUD_LOCATION = "us-central1";
+			const authStorage = await AuthStorage.create(path.join(tempAgentDir, "auth.db"));
+			authStorages.push(authStorage);
+			const registry = new ModelRegistry(authStorage, path.join(tempAgentDir, "models.yml"));
+			modelRegistries.push(registry);
+			const outputs: string[] = [];
+			const command = BUILTIN_SLASH_COMMANDS_INTERNAL.find(entry => entry.name === "provider");
+			await command?.handle?.({ name: "provider", args: "status", text: "/provider status" }, {
+				session: { modelRegistry: registry },
+				output: (text: string) => outputs.push(text),
+			} as unknown as SlashCommandRuntime);
+
+			expect(outputs.join("\n")).toContain("google-vertex: Google ADC (metadata server)");
+			expect(fetchSpy).toHaveBeenCalledTimes(1);
+		} finally {
+			fetchSpy.mockRestore();
+			for (const name of envNames) {
+				const original = originalEnv.get(name);
+				if (original === undefined) delete Bun.env[name];
+				else Bun.env[name] = original;
+			}
 		}
 	});
 

@@ -22,6 +22,7 @@ import type { FetchImpl } from "../types";
 const OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token";
 const STS_TOKEN_URL = "https://sts.googleapis.com/v1/token";
 const METADATA_TOKEN_URL = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token";
+const METADATA_PROJECT_ID_URL = "http://metadata.google.internal/computeMetadata/v1/project/project-id";
 const CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform";
 const JWT_BEARER_GRANT = "urn:ietf:params:oauth:grant-type:jwt-bearer";
 const TOKEN_EXCHANGE_GRANT = "urn:ietf:params:oauth:grant-type:token-exchange";
@@ -36,6 +37,8 @@ interface CachedToken {
 	token: string;
 	expiresAtMs: number;
 }
+
+export type VertexCredentialSource = "explicit-file" | "default-file" | "metadata-server";
 
 interface ServiceAccountCredentials {
 	type: "service_account";
@@ -242,6 +245,54 @@ async function fetchMetadataToken(
 	} catch {
 		return undefined;
 	}
+}
+
+async function hasMetadataServer(fetchImpl: FetchImpl): Promise<boolean> {
+	const timeout = AbortSignal.timeout(1000);
+	try {
+		const response = await fetchImpl(METADATA_PROJECT_ID_URL, {
+			method: "GET",
+			headers: { "Metadata-Flavor": "Google" },
+			redirect: "error",
+			signal: timeout,
+		});
+		return (
+			response.ok &&
+			response.headers.get("Metadata-Flavor")?.toLowerCase() === "google" &&
+			Boolean((await response.text()).trim())
+		);
+	} catch {
+		return false;
+	}
+}
+
+function classifyCredentialSource(source: string): VertexCredentialSource | undefined {
+	if (source === "metadata") return "metadata-server";
+	if (source.startsWith("gac:")) return "explicit-file";
+	if (source.startsWith("user:")) return "default-file";
+	return undefined;
+}
+
+/** Resolve the source of a currently usable ADC credential without acquiring an access token. */
+export async function getVertexCredentialSource(options?: {
+	fetch?: FetchImpl;
+}): Promise<VertexCredentialSource | undefined> {
+	const now = Date.now();
+	const skew = getRefreshSkewMs();
+	for (const [source, cached] of tokenCache) {
+		if (cached.expiresAtMs - skew > now) return classifyCredentialSource(source);
+	}
+
+	let adc: { source: string; creds: AdcFileCredentials } | undefined;
+	try {
+		adc = await loadAdcCredentials();
+	} catch {
+		return undefined;
+	}
+	if (adc) return classifyCredentialSource(adc.source);
+
+	const fetchImpl = options?.fetch ?? globalThis.fetch.bind(globalThis);
+	return (await hasMetadataServer(fetchImpl)) ? "metadata-server" : undefined;
 }
 
 async function postForToken(

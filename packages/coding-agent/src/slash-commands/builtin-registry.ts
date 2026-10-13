@@ -1912,7 +1912,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 				return commandConsumed();
 			}
 			if (args === "status") {
-				await runtime.output(buildProviderAuthStatusText(runtime.session));
+				await runtime.output(await buildProviderAuthStatusText(runtime.session));
 				return commandConsumed();
 			}
 			if (args === "login" || args.startsWith("login ")) {
@@ -1984,7 +1984,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 				return;
 			}
 			if (args === "status") {
-				runtime.ctx.showStatus(buildProviderAuthStatusText(runtime.ctx.session));
+				runtime.ctx.showStatus(await buildProviderAuthStatusText(runtime.ctx.session));
 				runtime.ctx.editor.setText("");
 				return;
 			}
