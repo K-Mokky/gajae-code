@@ -6651,6 +6651,21 @@ describe("ModelRegistry", () => {
 		);
 	});
 
+	test("applies provider stream idle timeouts only to OpenAI models in mixed built-ins", () => {
+		writeRawModelsConfig({
+			providers: {
+				"github-copilot": {
+					streamIdleTimeoutMs: 300_000,
+				},
+			},
+		});
+
+		const registry = new ModelRegistry(authStorage, modelsJsonPath);
+		expect(registry.getError()).toBeUndefined();
+		expect(registry.find("github-copilot", "gpt-4.1")).toMatchObject({ streamIdleTimeoutMs: 300_000 });
+		expect(registry.find("github-copilot", "claude-sonnet-4")).not.toHaveProperty("streamIdleTimeoutMs");
+	});
+
 	test("validates stream idle modelOverrides case-insensitively", () => {
 		writeRawModelsConfig({
 			providers: {

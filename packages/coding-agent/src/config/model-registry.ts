@@ -454,6 +454,20 @@ function assertRequestTransformSupportedForKnownProvider(providerName: string, s
 	}
 }
 
+function assertStreamIdleTimeoutSupportedForKnownProvider(providerName: string, source: string): void {
+	const apis = getKnownProviderApis(providerName);
+	if (apis.size === 0) {
+		throw new Error(
+			`Provider ${providerName}: ${source} requires an OpenAI-compatible "api" when the provider is not built in.`,
+		);
+	}
+	if (![...apis].some(isRequestTransformApi)) {
+		throw new Error(
+			`Provider ${providerName}: ${source} is only supported with openai-completions or openai-responses APIs.`,
+		);
+	}
+}
+
 function assertRequestTransformSupportedForModelApi(
 	providerName: string,
 	modelId: string,
@@ -751,7 +765,7 @@ function validateProviderConfiguration(
 				);
 			}
 		} else if (models.length === 0) {
-			assertRequestTransformSupportedForKnownProvider(providerName, '"streamIdleTimeoutMs"');
+			assertStreamIdleTimeoutSupportedForKnownProvider(providerName, '"streamIdleTimeoutMs"');
 		}
 	}
 
