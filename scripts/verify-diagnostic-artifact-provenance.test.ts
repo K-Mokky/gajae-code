@@ -109,7 +109,7 @@ describe("diagnostic artifact provenance transfer (C2)", () => {
 			const localAddon = path.join(fixture.native, "pi_natives.linux-x64-modern.node");
 			const localManifest = path.join(fixture.native, "diagnostic-artifact.local.json");
 			await Bun.write(localAddon, "local addon bytes");
-			await Bun.write(`${localAddon}.build.json`, JSON.stringify({ profile: "local" }));
+			await Bun.write(`${localAddon}.build.json`, JSON.stringify({ profile: "local", version: fixture.version }));
 			await Bun.write(
 				localManifest,
 				JSON.stringify({
@@ -168,7 +168,7 @@ describe("diagnostic artifact provenance transfer (C2)", () => {
 				sidecars: "none",
 			});
 			const addon = path.join(fixture.native, "pi_natives.linux-x64-modern.node");
-			await Bun.write(`${addon}.build.json`, JSON.stringify({ profile: "local" }));
+			await Bun.write(`${addon}.build.json`, JSON.stringify({ profile: "local", version: fixture.version }));
 			await Bun.write(
 				path.join(fixture.native, "diagnostic-artifact.local.json"),
 				JSON.stringify({
