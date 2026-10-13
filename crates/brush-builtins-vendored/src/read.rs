@@ -360,6 +360,10 @@ where
 	loop {
 		ensure_not_cancelled(is_cancelled)?;
 		if let Some(guard) = held_input.try_lock_reader() {
+			if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+				drop(guard);
+				return Ok(None);
+			}
 			return Ok(Some(guard));
 		}
 
@@ -486,6 +490,9 @@ impl InputReader {
 		F: Fn() -> bool,
 	{
 		ensure_not_cancelled(is_cancelled)?;
+		if self.deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+			return Ok(InputEvent::Timeout);
+		}
 		// Held input is taken by one atomic pop and never waits. Any other byte
 		// is polled first: a ready count goes stale when another reader of a
 		// shared pipe drains it, and the read would then block where neither
@@ -1413,6 +1420,68 @@ mod tests {
 			|| false,
 		)?;
 		assert!(matches!(result, ReadResult::TimedOut(None)));
+		Ok(())
+	}
+
+	#[test]
+	#[expect(clippy::panic_in_result_fn)]
+	fn test_read_timeout_after_lock_wait_does_not_consume_held_input() -> anyhow::Result<()> {
+		let (reader, _writer) = std::io::pipe()?;
+		let input = brush_core::openfiles::OpenFile::from(reader);
+		let held = input.held_input().expect("pipe holds input").clone();
+		held.put_back(b"A");
+		let lock = std::cell::RefCell::new(Some(held.lock_reader()));
+		let cancellation_checks = std::cell::Cell::new(0);
+		let command = ReadCommand { delimiter: Some("A".to_owned()), ..test_command() };
+
+		let result = command.read_line(
+			input,
+			Vec::<u8>::new(),
+			Some(Duration::from_millis(20)),
+			|| {
+				let check = cancellation_checks.get();
+				cancellation_checks.set(check + 1);
+				if check == 1 {
+					// Release the other reader's lock only after this read's deadline.
+					std::thread::sleep(Duration::from_millis(40));
+					drop(lock.borrow_mut().take());
+				}
+				false
+			},
+		)?;
+
+		assert!(matches!(result, ReadResult::TimedOut(None)));
+		assert_eq!(held.pop(), Some(b'A'));
+		Ok(())
+	}
+
+	#[test]
+	#[expect(clippy::panic_in_result_fn)]
+	fn test_read_timeout_before_servicing_held_input_keeps_it_queued() -> anyhow::Result<()> {
+		let (reader, _writer) = std::io::pipe()?;
+		let input = brush_core::openfiles::OpenFile::from(reader);
+		let held = input.held_input().expect("pipe holds input").clone();
+		held.put_back(b"A");
+		let cancellation_checks = std::cell::Cell::new(0);
+		let command = ReadCommand { delimiter: Some("A".to_owned()), ..test_command() };
+
+		let result = command.read_line(
+			input,
+			Vec::<u8>::new(),
+			Some(Duration::from_millis(20)),
+			|| {
+				let check = cancellation_checks.get();
+				cancellation_checks.set(check + 1);
+				if check == 1 {
+					// The lock is acquired, but input is not serviced until the timeout.
+					std::thread::sleep(Duration::from_millis(40));
+				}
+				false
+			},
+		)?;
+
+		assert!(matches!(result, ReadResult::TimedOut(None)));
+		assert_eq!(held.pop(), Some(b'A'));
 		Ok(())
 	}
 
