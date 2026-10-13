@@ -22,11 +22,15 @@
  *       cache.
  *   --verify <nativeDir>
  *       Gate for embedding and packing: the record must exist, its version must
- *       equal the package version, and every addon present must match its recorded
+ *       equal to the package version, and every addon present must match its recorded
  *       digest. Addons recorded but not shipped in this package (the platform
- *       packages carry them) are allowed. A local addon is therefore refused unless
- *       it is byte-equal to the shipped trusted artifact; local build metadata alone
- *       never authorizes embedding.
+ *       packages carry them) are allowed. Local-profile addons are refused here even
+ *       when a local digest exists; this mode remains the release/package trust gate.
+ *   --verify-for-embedding <nativeDir>
+ *       Gate for a developer binary build. Release addons must match the shipped
+ *       trusted record; local-profile addons must match the gitignored local record.
+ *       The verified digests are copied into the compiled binary's separate
+ *       diagnostic trust record.
  *   --stage-check <stagedNativeDir> --trusted-native-dir <nativeDir>
  *       Gate for platform-package staging: every staged addon must be byte-equal to
  *       what the trusted record describes.
@@ -34,6 +38,7 @@
 
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { verifyDiagnosticArtifactDigest } from "../packages/natives/scripts/diagnostic-artifact-manifest";
 
 const SCHEMA = "gjc.diagnostic-artifact";
 const SIDECAR_SCHEMA = "gjc.diagnostic-artifact-provenance";
@@ -141,7 +146,7 @@ async function rebuildFromSidecars(nativeDir: string): Promise<void> {
 	);
 }
 
-async function verify(nativeDir: string): Promise<void> {
+async function verify(nativeDir: string, allowLocalBuilds = false): Promise<void> {
 	const version = await packageVersionFor(nativeDir);
 	const record = await readTrustedRecord(nativeDir);
 	if (record.version !== version) {
@@ -149,14 +154,19 @@ async function verify(nativeDir: string): Promise<void> {
 	}
 	const addons = await addonsIn(nativeDir);
 	for (const addon of addons) {
-		const expected = record.artifacts[addon];
-		if (expected === undefined) fail(`${addon} is present but has no trusted digest`);
-		const actual = await digestOf(path.join(nativeDir, addon));
-		if (actual !== expected) fail(`${addon} bytes do not match the trusted digest (${actual} != ${expected})`);
+		try {
+			await verifyDiagnosticArtifactDigest({
+				addonPath: path.join(nativeDir, addon),
+				nativeDir,
+				version,
+				allowLocalBuilds,
+			});
+		} catch (error) {
+			fail(error instanceof Error ? error.message : String(error));
+		}
 	}
-	process.stdout.write(
-		`diagnostic artifact provenance: verified ${addons.length} present artifact(s) against ${version}\n`,
-	);
+	const purpose = allowLocalBuilds ? "for embedding" : "against trusted records";
+	process.stdout.write(`diagnostic artifact provenance: verified ${addons.length} present artifact(s) ${purpose} for ${version}\n`);
 }
 
 async function stageCheck(stagedDir: string, trustedNativeDir: string): Promise<void> {
@@ -184,16 +194,21 @@ function valueFor(flag: string): string | undefined {
 
 const rebuildDir = valueFor("--rebuild-from-sidecars");
 const verifyDir = valueFor("--verify");
+const verifyEmbeddingDir = valueFor("--verify-for-embedding");
 const stagedDir = valueFor("--stage-check");
 
 if (rebuildDir !== undefined) {
 	await rebuildFromSidecars(path.resolve(rebuildDir));
 } else if (verifyDir !== undefined) {
 	await verify(path.resolve(verifyDir));
+} else if (verifyEmbeddingDir !== undefined) {
+	await verify(path.resolve(verifyEmbeddingDir), true);
 } else if (stagedDir !== undefined) {
 	const trusted = valueFor("--trusted-native-dir");
 	if (trusted === undefined) fail("--stage-check needs --trusted-native-dir");
 	await stageCheck(path.resolve(stagedDir), path.resolve(trusted));
 } else {
-	fail("usage: --rebuild-from-sidecars <dir> | --verify <dir> | --stage-check <dir> --trusted-native-dir <dir>");
+	fail(
+		"usage: --rebuild-from-sidecars <dir> | --verify <dir> | --verify-for-embedding <dir> | --stage-check <dir> --trusted-native-dir <dir>",
+	);
 }

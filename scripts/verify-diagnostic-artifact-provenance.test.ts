@@ -99,7 +99,7 @@ describe("diagnostic artifact provenance transfer (C2)", () => {
 		}
 	});
 
-	it("keeps local addons out of release records and refuses to embed them", async () => {
+	it("keeps local addons out of release records and verifies their separate embed digest", async () => {
 		const workspace = await fs.mkdtemp(path.join(await fs.realpath(os.tmpdir()), "gjc-prov-local-build-"));
 		try {
 			const fixture = await fixturePackage(workspace);
@@ -107,12 +107,42 @@ describe("diagnostic artifact provenance transfer (C2)", () => {
 			expect(initial.exitCode).toBe(0);
 
 			const localAddon = path.join(fixture.native, "pi_natives.linux-x64-modern.node");
+			const localManifest = path.join(fixture.native, "diagnostic-artifact.local.json");
 			await Bun.write(localAddon, "local addon bytes");
 			await Bun.write(`${localAddon}.build.json`, JSON.stringify({ profile: "local" }));
+			await Bun.write(
+				localManifest,
+				JSON.stringify({
+					schema: "gjc.diagnostic-artifact",
+					version: fixture.version,
+					artifacts: { [path.basename(localAddon)]: await sha256(localAddon) },
+				}),
+			);
 
 			const beforeRebuild = await run(["--verify", fixture.native], workspace);
 			expect(beforeRebuild.exitCode).not.toBe(0);
 			expect(beforeRebuild.stderr).toContain("pi_natives.linux-x64-modern.node");
+			await fs.rm(localManifest);
+			const missingLocalManifest = await run(["--verify-for-embedding", fixture.native], workspace);
+			expect(missingLocalManifest.exitCode).not.toBe(0);
+			expect(missingLocalManifest.stderr).toContain("has no local diagnostic artifact manifest");
+			await Bun.write(
+				localManifest,
+				JSON.stringify({
+					schema: "gjc.diagnostic-artifact",
+					version: fixture.version,
+					artifacts: { [path.basename(localAddon)]: await sha256(localAddon) },
+				}),
+			);
+			const embedding = await run(["--verify-for-embedding", fixture.native], workspace);
+			expect(embedding.exitCode).toBe(0);
+			expect(embedding.stdout).toContain("verified 2 present artifact(s)");
+
+			await Bun.write(localAddon, "modified local addon bytes");
+			const modified = await run(["--verify-for-embedding", fixture.native], workspace);
+			expect(modified.exitCode).not.toBe(0);
+			expect(modified.stderr).toContain("pi_natives.linux-x64-modern.node bytes do not match the local digest");
+
 			const rebuilt = await run(["--rebuild-from-sidecars", fixture.native], workspace);
 			expect(rebuilt.exitCode).toBe(0);
 			const manifest = (await Bun.file(path.join(fixture.native, "diagnostic-artifact.json")).json()) as {
@@ -269,6 +299,7 @@ describe("diagnostic artifact provenance transfer (C2)", () => {
 			expect(listed.exitCode).toBe(0);
 			const entries = new TextDecoder().decode(listed.stdout ?? new Uint8Array()).split("\n");
 			expect(entries).toContain("package/native/diagnostic-artifact.json");
+			expect(entries).toContain("package/native/diagnostic-artifact-embedded.json");
 			expect(entries).toContain("package/native/diagnostic-loader.js");
 		} finally {
 			await fs.rm(workspace, { recursive: true, force: true });

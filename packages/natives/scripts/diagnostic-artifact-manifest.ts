@@ -4,9 +4,59 @@ import * as path from "node:path";
 export type NativeBuildProfile = "local" | "ci" | "dist";
 
 type ArtifactManifest = {
+	schema?: string;
 	version?: string;
 	artifacts?: Record<string, string>;
 };
+
+/**
+ * Verify an addon against the manifest appropriate to its build profile and return
+ * the verified digest for inclusion in a compiled binary's diagnostic trust record.
+ * Local addons are admitted only for explicit embedding builds and only when their
+ * bytes match the gitignored local manifest.
+ */
+export async function verifyDiagnosticArtifactDigest(options: {
+	addonPath: string;
+	nativeDir: string;
+	version: string;
+	allowLocalBuilds: boolean;
+}): Promise<string> {
+	const { addonPath, nativeDir, version, allowLocalBuilds } = options;
+	const addon = path.basename(addonPath);
+	const metadataPath = `${addonPath}.build.json`;
+	const metadata = (await Bun.file(metadataPath).exists())
+		? ((await Bun.file(metadataPath).json()) as { profile?: string })
+		: undefined;
+	const localBuild = metadata?.profile === "local";
+	if (localBuild && !allowLocalBuilds) {
+		throw new Error(`${addon} is a local build and is not eligible for trusted verification`);
+	}
+
+	const manifestPath = path.join(
+		nativeDir,
+		localBuild ? "diagnostic-artifact.local.json" : "diagnostic-artifact.json",
+	);
+	if (!(await Bun.file(manifestPath).exists())) {
+		throw new Error(`${addon} has no ${localBuild ? "local" : "trusted"} diagnostic artifact manifest`);
+	}
+	const manifest = (await Bun.file(manifestPath).json()) as ArtifactManifest;
+	if (manifest.schema !== "gjc.diagnostic-artifact" || manifest.version !== version) {
+		throw new Error(
+			`${addon} has an invalid or stale ${localBuild ? "local" : "trusted"} diagnostic artifact manifest`,
+		);
+	}
+	const expected = manifest.artifacts?.[addon];
+	if (typeof expected !== "string" || !/^[0-9a-f]{64}$/.test(expected)) {
+		throw new Error(`${addon} has no usable ${localBuild ? "local" : "trusted"} diagnostic artifact digest`);
+	}
+	const actual = new Bun.CryptoHasher("sha256").update(await Bun.file(addonPath).bytes()).digest("hex");
+	if (actual !== expected) {
+		throw new Error(
+			`${addon} bytes do not match the ${localBuild ? "local" : "trusted"} digest (${actual} != ${expected})`,
+		);
+	}
+	return expected;
+}
 
 /**
  * Record the digest for the native build. Local builds use a gitignored manifest;
