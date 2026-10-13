@@ -359,6 +359,8 @@ describe("signed model preset registry", () => {
 		await Bun.write(
 			path.join(data.agentDir, "models.yml"),
 			`providers:
+  alibaba-token-plan:
+    streamIdleTimeoutMs: 360000
   configured-provider:
     baseUrl: https://configured.example/v1
     api: openai-completions
@@ -410,6 +412,7 @@ describe("signed model preset registry", () => {
 				contextWindow: 24_680,
 				baseUrl: expect.stringContaining("https://"),
 				compat: expect.objectContaining({ supportsDeveloperRole: false }),
+				streamIdleTimeoutMs: 360_000,
 			});
 			expect(
 				modelRegistry

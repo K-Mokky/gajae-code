@@ -3400,6 +3400,10 @@ export class ModelRegistry {
 				const inheritedCompat = explicitTransportMatches
 					? explicitTransport?.compat
 					: commonRegistryTransportCompat(transportTemplates);
+				const streamIdleTimeoutMs =
+					registryModel.streamIdleTimeoutMs ??
+					transportSource.streamIdleTimeoutMs ??
+					explicitTransport?.streamIdleTimeoutMs;
 				const hydratedRegistryModel = {
 					...registryModel,
 					baseUrl: transportSource.baseUrl!,
@@ -3407,6 +3411,7 @@ export class ModelRegistry {
 					transport: transportSource.transport,
 					requestTransform: transportSource.requestTransform,
 					cacheRetention: transportSource.cacheRetention,
+					...(streamIdleTimeoutMs !== undefined ? { streamIdleTimeoutMs } : {}),
 					isOAuth: transportSource.isOAuth,
 					compat:
 						inheritedCompat || registryModel.compat || explicitTransport?.compat
