@@ -711,6 +711,23 @@ test("async finish rejects elapsed expiry after decoding without an expiry callb
 	}
 });
 
+test("async finish rejects a disconnected owner without a disconnect sweep", async () => {
+	let connected = true;
+	const store = new PromptImageUploadStore(() => connected);
+	const bytes = tinyPng();
+	try {
+		const id = upload(store, "sender", bytes);
+		const finishing = store.finish("sender", { id });
+		connected = false;
+		await expect(finishing).rejects.toMatchObject({ code: "resource_gone" });
+
+		connected = true;
+		expect(() => store.redeem("sender", [{ id }])).toThrow(expect.objectContaining({ code: "resource_gone" }));
+	} finally {
+		store.close();
+	}
+});
+
 test("elapsed in-flight source bytes stay reserved until decode finally and repeated removal does not release twice", async () => {
 	let now = 0;
 	const clock = vi.spyOn(performance, "now").mockImplementation(() => now);
