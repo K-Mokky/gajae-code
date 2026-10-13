@@ -22,9 +22,11 @@
  *       cache.
  *   --verify <nativeDir>
  *       Gate for embedding and packing: the record must exist, its version must
- *       equal the package version, and every non-local addon present must match its
- *       recorded digest. Addons recorded but not shipped in this package (the
- *       platform packages carry them) are allowed.
+ *       equal the package version, and every addon present must match its recorded
+ *       digest. Addons recorded but not shipped in this package (the platform
+ *       packages carry them) are allowed. A local addon is therefore refused unless
+ *       it is byte-equal to the shipped trusted artifact; local build metadata alone
+ *       never authorizes embedding.
  *   --stage-check <stagedNativeDir> --trusted-native-dir <nativeDir>
  *       Gate for platform-package staging: every staged addon must be byte-equal to
  *       what the trusted record describes.
@@ -145,7 +147,7 @@ async function verify(nativeDir: string): Promise<void> {
 	if (record.version !== version) {
 		fail(`record version ${record.version} does not match package version ${version}`);
 	}
-	const addons = await addonsIn(nativeDir, true);
+	const addons = await addonsIn(nativeDir);
 	for (const addon of addons) {
 		const expected = record.artifacts[addon];
 		if (expected === undefined) fail(`${addon} is present but has no trusted digest`);

@@ -99,7 +99,7 @@ describe("diagnostic artifact provenance transfer (C2)", () => {
 		}
 	});
 
-	it("ignores local native build outputs in release provenance checks", async () => {
+	it("keeps local addons out of release records and refuses to embed them", async () => {
 		const workspace = await fs.mkdtemp(path.join(await fs.realpath(os.tmpdir()), "gjc-prov-local-build-"));
 		try {
 			const fixture = await fixturePackage(workspace);
@@ -110,7 +110,9 @@ describe("diagnostic artifact provenance transfer (C2)", () => {
 			await Bun.write(localAddon, "local addon bytes");
 			await Bun.write(`${localAddon}.build.json`, JSON.stringify({ profile: "local" }));
 
-			expect((await run(["--verify", fixture.native], workspace)).exitCode).toBe(0);
+			const beforeRebuild = await run(["--verify", fixture.native], workspace);
+			expect(beforeRebuild.exitCode).not.toBe(0);
+			expect(beforeRebuild.stderr).toContain("pi_natives.linux-x64-modern.node");
 			const rebuilt = await run(["--rebuild-from-sidecars", fixture.native], workspace);
 			expect(rebuilt.exitCode).toBe(0);
 			const manifest = (await Bun.file(path.join(fixture.native, "diagnostic-artifact.json")).json()) as {
@@ -119,6 +121,9 @@ describe("diagnostic artifact provenance transfer (C2)", () => {
 			expect(manifest.artifacts).toEqual({
 				"pi_natives.darwin-arm64.node": await sha256(path.join(fixture.native, "pi_natives.darwin-arm64.node")),
 			});
+			const afterRebuild = await run(["--verify", fixture.native], workspace);
+			expect(afterRebuild.exitCode).not.toBe(0);
+			expect(afterRebuild.stderr).toContain("pi_natives.linux-x64-modern.node");
 		} finally {
 			await fs.rm(workspace, { recursive: true, force: true });
 		}
@@ -270,13 +275,28 @@ describe("diagnostic artifact provenance transfer (C2)", () => {
 		}
 	}, 120_000);
 
-	it("keeps the shipped record in step with the built addon in this checkout", async () => {
+	it("verifies shipped artifacts and refuses local-profile artifacts in this checkout", async () => {
 		// The runner gets a task-owned HOME/TMPDIR even though it inspects the real
 		// package directory, so nothing is written inside the checkout.
 		const workspace = await fs.mkdtemp(path.join(await fs.realpath(os.tmpdir()), "gjc-prov-checkout-"));
 		try {
-			const result = await run(["--verify", path.join(NATIVES_PACKAGE, "native")], workspace);
-			expect(result.exitCode).toBe(0);
+			const nativeDir = path.join(NATIVES_PACKAGE, "native");
+			const entries = await fs.readdir(nativeDir);
+			const localAddons: string[] = [];
+			for (const addon of entries.filter(entry => entry.endsWith(".node"))) {
+				const metadataPath = `${path.join(nativeDir, addon)}.build.json`;
+				if (!(await Bun.file(metadataPath).exists())) continue;
+				const metadata = (await Bun.file(metadataPath).json()) as { profile?: string };
+				if (metadata.profile === "local") localAddons.push(addon);
+			}
+
+			const result = await run(["--verify", nativeDir], workspace);
+			if (localAddons.length === 0) {
+				expect(result.exitCode).toBe(0);
+			} else {
+				expect(result.exitCode).not.toBe(0);
+				for (const addon of localAddons) expect(result.stderr).toContain(addon);
+			}
 		} finally {
 			await fs.rm(workspace, { recursive: true, force: true });
 		}
