@@ -55,9 +55,13 @@ describe("workflow permission policy", () => {
 
 		expect(REQUIRED_READ_DEFAULT).toContain(CI_WORKFLOW);
 		expect(document.permissions).toEqual({ contents: "read" });
-		// Verify the CI workflow jobs are in the allowlist
-		expect(JOB_WRITE_ALLOWLIST).toContainEqual({ workflow: CI_WORKFLOW, job: "release_finalize", scope: "contents" });
-		expect(JOB_WRITE_ALLOWLIST).toContainEqual({ workflow: CI_WORKFLOW, job: "publish", scope: "id-token" });
+		// The full allowlist is exact so no additional write scope can be silently approved.
+		expect(JOB_WRITE_ALLOWLIST).toEqual([
+			{ workflow: CI_WORKFLOW, job: "release_finalize", scope: "contents" },
+			{ workflow: CI_WORKFLOW, job: "publish", scope: "id-token" },
+			{ workflow: RE_REVIEW_WORKFLOW, job: "request-review-on-comment", scope: "pull-requests" },
+			{ workflow: RE_REVIEW_WORKFLOW, job: "request-review-on-comment", scope: "issues" },
+		]);
 		expect(jobWriteScopes(document)).toEqual(["publish.id-token", "release_finalize.contents"]);
 	});
 
@@ -267,10 +271,6 @@ describe("workflow permission policy", () => {
 		const jobPermissions = documentRecord(requestReviewOnComment.permissions);
 		expect(jobPermissions["pull-requests"]).toBe("write");
 		expect(jobPermissions.issues).toBe("write");
-
-		// Verify the allowlist entries
-		expect(JOB_WRITE_ALLOWLIST).toContainEqual({ workflow: RE_REVIEW_WORKFLOW, job: "request-review-on-comment", scope: "pull-requests" });
-		expect(JOB_WRITE_ALLOWLIST).toContainEqual({ workflow: RE_REVIEW_WORKFLOW, job: "request-review-on-comment", scope: "issues" });
 
 		// Verify the workflow is NOT in the required read default list
 		// (it uses job-level permissions instead of workflow-level)
