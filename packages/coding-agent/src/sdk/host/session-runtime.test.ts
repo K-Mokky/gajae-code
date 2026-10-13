@@ -33,6 +33,7 @@ import { createKindAwareReconciliation } from "../bus/kind-aware-reconciliation"
 import { createPromptReconciliation } from "../bus/prompt-reconciliation";
 import {
 	createReconciliationStore,
+	type ReconciliationStore,
 	type ReconciliationStoreDocument,
 	reconciliationStorePath,
 } from "../bus/reconciliation-store";
