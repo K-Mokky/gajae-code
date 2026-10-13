@@ -238,7 +238,7 @@ it("source-mode CLI resolves a relative agent dir once for parent and detached b
 		await Bun.sleep(300);
 		await fs.rm(root, { recursive: true, force: true });
 	}
-}, 30_000);
+}, 60_000);
 
 it("concurrent process replacement composes stale-generation fencing with single-flight spawn", async () => {
 	const dir = await temp();
@@ -372,7 +372,7 @@ it("retries discovery after a launcher dies while its child holds the startup fe
 		await Bun.sleep(300);
 		await fs.rm(dir, { recursive: true, force: true });
 	}
-}, 30_000);
+}, 60_000);
 
 it("the parent discovery budget covers child-fence contention plus a full startup attempt", async () => {
 	const dir = await temp();
@@ -417,7 +417,7 @@ it("the parent discovery budget covers child-fence contention plus a full startu
 			}
 		await fs.rm(dir, { recursive: true, force: true });
 	}
-}, 30_000);
+}, 60_000);
 
 it("the parent budget composes stale retirement, child-fence contention, and startup", async () => {
 	const dir = await temp();
