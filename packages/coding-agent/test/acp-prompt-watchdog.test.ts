@@ -168,7 +168,7 @@ type FixtureOptions = {
 	noActiveTurnAbort?: boolean;
 	imageEchoGate?: { started: () => void; release: Promise<void> };
 	imageProgressMs?: number;
-	imageControlGate?: { operation: string; started: () => void; release: Promise<void> };
+	imageControlGate?: { operation: string; started: () => void; release: Promise<void>; responded: () => void };
 };
 
 async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
@@ -339,6 +339,20 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
 			},
 			message(socket, raw) {
 				const frame = JSON.parse(String(raw)) as Record<string, unknown>;
+				if (frame.type === "event_replay") {
+					// This fixture emits only unsequenced live frames, so its replay ring is empty.
+					socket.send(
+						JSON.stringify({
+							type: "event_replay_result",
+							id: frame.id,
+							ok: true,
+							generation: authority.endpointGeneration,
+							events: [],
+							lastSeq: 0,
+						}),
+					);
+					return;
+				}
 				if (frame.type === "register_provider") {
 					socket.send(
 						JSON.stringify({ type: "register_provider_result", id: frame.id, ok: true, leaseId: "lease" }),
@@ -397,6 +411,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
 							if (frame.operation === "turn.image.discard")
 								liveImageIds.delete((frame.input as { id: string }).id);
 							socket.send(JSON.stringify({ type: "control_response", id: frame.id, ok: true, result }));
+							if (gate && frame.operation === gate.operation) gate.responded();
 						} catch (error) {
 							const failure = error as Error & { code?: string };
 							socket.send(
@@ -774,8 +789,9 @@ for (const operation of ["turn.image.begin", "turn.image.append", "turn.image.fi
 	test(`cancelling held ${operation} is local and cannot publish a late image echo`, async () => {
 		const entered = Promise.withResolvers<void>();
 		const gate = Promise.withResolvers<void>();
+		const responded = Promise.withResolvers<void>();
 		const fixture = await createFixture({
-			imageControlGate: { operation, started: entered.resolve, release: gate.promise },
+			imageControlGate: { operation, started: entered.resolve, release: gate.promise, responded: responded.resolve },
 		});
 		try {
 			const image = Buffer.from(
@@ -795,6 +811,7 @@ for (const operation of ["turn.image.begin", "turn.image.append", "turn.image.fi
 			expect(fixture.promptDeliveryCount()).toBe(0);
 			expect(fixture.updates.filter(update => update.update.sessionUpdate === "user_message_chunk")).toHaveLength(0);
 			gate.resolve();
+			await bounded(responded.promise, "late image operation response");
 			await waitFor(() => fixture.liveImageUploadCount() === 0, "cancelled upload cleanup");
 			await Bun.sleep(20);
 			expect(fixture.promptDeliveryCount()).toBe(0);

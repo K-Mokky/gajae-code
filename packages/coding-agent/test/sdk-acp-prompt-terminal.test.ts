@@ -312,6 +312,20 @@ async function createFixture(
 			},
 			message(socket, raw) {
 				const frame = JSON.parse(String(raw)) as Record<string, unknown>;
+				if (frame.type === "event_replay") {
+					// This fixture emits only unsequenced live frames, so its replay ring is empty.
+					socket.send(
+						JSON.stringify({
+							type: "event_replay_result",
+							id: frame.id,
+							ok: true,
+							generation: reboundGeneration,
+							events: [],
+							lastSeq: 0,
+						}),
+					);
+					return;
+				}
 				if (frame.type === "register_provider") {
 					socket.send(
 						JSON.stringify({ type: "register_provider_result", id: frame.id, ok: true, leaseId: "lease" }),
@@ -629,6 +643,7 @@ async function createFixture(
 		token,
 	};
 	const authority: ExactSessionAuthorityFixture = await prepareExactSessionAuthority(authorityOptions);
+	let reboundGeneration = authority.endpointGeneration;
 	await writeBrokerDiscovery(agentDir, {
 		version: 1,
 		protocolVersion: 3,
@@ -756,7 +771,6 @@ async function createFixture(
 	);
 	blockNextIdleUpdate = options.blockIdleUpdate === true;
 	blockAdvisoryQuery = true;
-	let reboundGeneration = authority.endpointGeneration;
 
 	return {
 		agent,
