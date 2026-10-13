@@ -1260,12 +1260,12 @@ it("releases the spawn lock when the under-lock discovery read fails so the next
 	}
 }, 30_000);
 
-it("the spawn lock rejects an incomplete published owner instead of acquiring over it", async () => {
+it("the spawn lock rejects an ownerless empty directory instead of acquiring over it", async () => {
 	const dir = await temp();
 	try {
 		await fs.mkdir(path.join(dir, "sdk", "broker.spawn.lock"), { recursive: true });
 		await expect(acquireSpawnLockForTest(dir, { retries: 1, retryDelayMs: 1 })).rejects.toThrow(
-			"held by an unrecognized owner record",
+			"held by an ownerless empty lock directory",
 		);
 		expect(await fs.readdir(path.join(dir, "sdk", "broker.spawn.lock"))).toEqual([]);
 	} finally {
