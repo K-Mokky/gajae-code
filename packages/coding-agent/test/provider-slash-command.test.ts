@@ -217,6 +217,9 @@ describe("provider slash command", () => {
 			expect(beforeDispatch).not.toContain("shadowed: OAuth");
 			expect(beforeDispatch).not.toContain("kagi-account-one-secret");
 			expect(beforeDispatch).not.toContain("kagi-account-two-secret");
+			authStorage.setRuntimeCredentialSelector("kagi", { kind: "account", value: "kagi-account-two" });
+			const pinnedStatus = await status();
+			expect(pinnedStatus).toContain("kagi: OAuth (account kagi-account-two)");
 
 			await registry.getApiKeyForProvider("kagi", sessionId);
 			const rowId = authStorage.getSessionCredentialRowId("kagi", sessionId);
@@ -438,6 +441,14 @@ describe("provider slash command", () => {
 			const runtimeStatus = await status();
 			expect(runtimeStatus).toContain(`status-runtime: API key (env ${TEST_PROVIDER_KEY_ENV})`);
 			expect(runtimeStatus).not.toContain("custom-provider-secret-test-value");
+			authStorage.setRuntimeApiKey("status-runtime", "cli-override-secret-test-value");
+			const cliOverrideStatus = await status();
+			const runtimeLineIndex = cliOverrideStatus.split("\n").findIndex(line => line.startsWith("status-runtime:"));
+			const runtimeLines = cliOverrideStatus.split("\n");
+			expect(runtimeLines[runtimeLineIndex]).toBe("status-runtime: API key (runtime override)");
+			expect(runtimeLines[runtimeLineIndex + 1]).toContain(`shadowed: API key (env ${TEST_PROVIDER_KEY_ENV})`);
+			expect(cliOverrideStatus).not.toContain("cli-override-secret-test-value");
+			authStorage.removeRuntimeApiKey("status-runtime");
 
 			await authStorage.set("status-runtime", {
 				type: "oauth",

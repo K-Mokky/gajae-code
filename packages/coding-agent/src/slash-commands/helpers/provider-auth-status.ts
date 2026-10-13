@@ -26,7 +26,7 @@ type ProviderAuthStatusSession = Pick<AgentSession, "credentialSessionId"> & {
 
 interface CredentialSource {
 	kind: "api_key" | "oauth";
-	layer: "runtime" | "config" | "stored" | "environment" | "fallback" | "pending";
+	layer: "runtime-override" | "runtime-provider" | "config" | "stored" | "environment" | "fallback" | "pending";
 	label: string;
 }
 
@@ -128,17 +128,17 @@ function collectSources(
 	}
 
 	if (authStorage.hasRuntimeApiKey(provider)) {
-		const envName = registry.getProviderRuntimeApiKeyEnvName(provider);
 		addSource(sources, {
 			kind: "api_key",
-			layer: "runtime",
-			label: envName ? `API key (env ${envName})` : "API key (runtime override)",
+			layer: "runtime-override",
+			label: "API key (runtime override)",
 		});
-	} else if (registry.hasRuntimeProviderApiKey(provider)) {
+	}
+	if (registry.hasRuntimeProviderApiKey(provider)) {
 		const envName = registry.getProviderRuntimeApiKeyEnvName(provider);
 		addSource(sources, {
 			kind: "api_key",
-			layer: "runtime",
+			layer: "runtime-provider",
 			label: envName ? `API key (env ${envName})` : "API key (runtime provider)",
 		});
 	} else if (authStorage.hasConfigApiKey(provider, owner)) {
@@ -173,7 +173,9 @@ function activeSource(
 	const { authStorage } = session.modelRegistry;
 	const sessionId = session.credentialSessionId;
 	if (activeType === "oauth") {
-		const rowId = authStorage.getSessionCredentialRowId(provider, sessionId);
+		const rowId =
+			authStorage.getSelectedOAuthCredentialRowId(provider, sessionId, { owner }) ??
+			authStorage.getSessionCredentialRowId(provider, sessionId);
 		const selected = rowId === undefined ? undefined : entries.find(entry => entry.id === rowId);
 		if (selected?.credential.type === "oauth") return { kind: "oauth", layer: "stored", label: oauthLabel(selected) };
 		const oauthEntries = entries.filter(entry => entry.credential.type === "oauth");
@@ -186,18 +188,13 @@ function activeSource(
 	}
 
 	if (authStorage.hasRuntimeApiKey(provider)) {
-		const envName = session.modelRegistry.getProviderRuntimeApiKeyEnvName(provider);
-		return {
-			kind: "api_key",
-			layer: "runtime",
-			label: envName ? `API key (env ${envName})` : "API key (runtime override)",
-		};
+		return { kind: "api_key", layer: "runtime-override", label: "API key (runtime override)" };
 	}
 	if (session.modelRegistry.hasRuntimeProviderApiKey(provider)) {
 		const envName = session.modelRegistry.getProviderRuntimeApiKeyEnvName(provider);
 		return {
 			kind: "api_key",
-			layer: "runtime",
+			layer: "runtime-provider",
 			label: envName ? `API key (env ${envName})` : "API key (runtime provider)",
 		};
 	}
