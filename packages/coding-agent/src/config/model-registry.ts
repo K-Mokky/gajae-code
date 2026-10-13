@@ -473,6 +473,35 @@ function getKnownProviderModelApi(providerName: string, modelId: string): Api | 
 	)?.api as Api | undefined;
 }
 
+function resolveModelApiFromDiscovery(
+	providerApi: Api,
+	discovery: ProviderDiscovery,
+	modelId: string,
+	entry?: { id?: unknown; owned_by?: unknown },
+): Api {
+	// Explicit per-prefix routing always wins over model-id detection.
+	let matchedPrefixLength = -1;
+	let prefixApi: Api | undefined;
+	for (const [prefix, routedApi] of Object.entries(discovery.apiByModelPrefix ?? {})) {
+		if (modelId.startsWith(prefix) && prefix.length > matchedPrefixLength) {
+			prefixApi = routedApi;
+			matchedPrefixLength = prefix.length;
+		}
+	}
+	if (prefixApi !== undefined) return prefixApi;
+
+	// An OpenAI-shaped models list can advertise Anthropic models that must use
+	// the Anthropic transport even when the provider's default is OpenAI-family.
+	if (discovery.type === "openai-models-list") {
+		const detected = detectDiscoveredApiFamily(entry ?? { id: modelId });
+		if (detected === "anthropic-messages") return "anthropic-messages";
+		if (detected === "openai-completions") {
+			return isOpenAIFamilyApi(providerApi) ? providerApi : "openai-completions";
+		}
+	}
+	return providerApi;
+}
+
 function isCanonicalOpenAIAffinityBaseUrl(baseUrl: string | undefined): boolean {
 	if (!baseUrl) return false;
 	try {
@@ -646,8 +675,15 @@ function validateProviderConfiguration(
 	}
 	for (const [modelId, rawOverride] of Object.entries(config.modelOverrides ?? {})) {
 		const override = rawOverride as ModelOverride;
+		const configuredModel = models.find(model => model.id.toLowerCase() === modelId.toLowerCase());
+		const discoveryApi =
+			configuredModel || !config.discovery || !configuredApi
+				? undefined
+				: resolveModelApiFromDiscovery(configuredApi, config.discovery, modelId);
 		const effectiveApi =
-			models.find(model => model.id.toLowerCase() === modelId.toLowerCase())?.api ??
+			configuredModel?.api ??
+			(configuredModel ? config.api : undefined) ??
+			discoveryApi ??
 			config.api ??
 			getKnownProviderModelApi(providerName, modelId);
 		const effectiveTimeoutApi = effectiveApi ?? (config.openaiCompat ? "openai-completions" : undefined);
@@ -5283,36 +5319,7 @@ export class ModelRegistry {
 		modelId: string,
 		entry?: { id?: unknown; owned_by?: unknown },
 	): Api {
-		// 1. Explicit per-prefix routing from models.yml always wins — the user
-		//    stated the transport for these ids, so never second-guess it.
-		let matchedPrefixLength = -1;
-		let prefixApi: Api | undefined;
-		for (const [prefix, routedApi] of Object.entries(providerConfig.discovery.apiByModelPrefix ?? {})) {
-			if (modelId.startsWith(prefix) && prefix.length > matchedPrefixLength) {
-				prefixApi = routedApi;
-				matchedPrefixLength = prefix.length;
-			}
-		}
-		if (prefixApi !== undefined) return prefixApi;
-		// 2. For OpenAI-compatible gateways that can front both OpenAI and
-		//    Anthropic upstreams (e.g. CLIProxyAPI), auto-detect the wire family
-		//    per model from the `/v1/models` `owned_by` owner and the model id.
-		//    A mixed gateway then routes `claude-*` through Anthropic Messages
-		//    with zero manual config. OpenAI-family models keep the provider's
-		//    configured OpenAI transport (e.g. `openai-responses` vs
-		//    `openai-completions`) rather than being forced to chat-completions,
-		//    because a `/v1/models` list cannot reveal which OpenAI API the
-		//    gateway expects. Only override to `openai-completions` when the
-		//    provider default is not itself an OpenAI-family api.
-		if (providerConfig.discovery.type === "openai-models-list") {
-			const detected = detectDiscoveredApiFamily(entry ?? { id: modelId });
-			if (detected === "anthropic-messages") return "anthropic-messages";
-			if (detected === "openai-completions") {
-				return isOpenAIFamilyApi(providerConfig.api) ? providerConfig.api : "openai-completions";
-			}
-		}
-		// 3. Fall back to the provider-level default api.
-		return providerConfig.api;
+		return resolveModelApiFromDiscovery(providerConfig.api, providerConfig.discovery, modelId, entry);
 	}
 
 	async #discoverModelsDevProvider(providerConfig: DiscoveryProviderConfig): Promise<Model<Api>[]> {

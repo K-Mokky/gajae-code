@@ -6682,6 +6682,28 @@ describe("ModelRegistry", () => {
 		expect(registry.find("github-copilot", "gpt-4.1")).toMatchObject({ streamIdleTimeoutMs: 300_000 });
 	});
 
+	test.each([
+		["explicit prefix routing", { apiByModelPrefix: { "claude-": "anthropic-messages" } }],
+		["Claude model ID detection", {}],
+	] as const)("rejects stream idle modelOverrides for discovered Anthropic models via %s", (_route, discovery) => {
+		writeRawModelsConfig({
+			providers: {
+				proxy: {
+					baseUrl: "https://proxy.example.com/v1",
+					apiKey: "TEST_KEY",
+					api: "openai-completions",
+					discovery: { type: "openai-models-list", ...discovery },
+					modelOverrides: { "claude-sonnet-4": { streamIdleTimeoutMs: 300_000 } },
+				},
+			},
+		});
+
+		const registry = new ModelRegistry(authStorage, modelsJsonPath);
+		expect(String(registry.getError()?.message)).toContain(
+			'modelOverrides "streamIdleTimeoutMs" is only supported with openai-completions or openai-responses APIs',
+		);
+	});
+
 	test("rejects model-configured stream idle timeouts on pi-native transport", () => {
 		const timeoutConfigs: Array<Record<string, unknown>> = [
 			{ streamIdleTimeoutMs: 300_000 },
