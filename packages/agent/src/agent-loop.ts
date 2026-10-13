@@ -3866,6 +3866,14 @@ async function runLoopBody(
 		);
 		stream.end(newMessages);
 	};
+	const commitMessages = (messages: AgentMessage[], scope?: AttemptScope): void => {
+		for (const message of messages) {
+			stream.push({ type: "message_start", message, scope });
+			stream.push({ type: "message_end", message, scope });
+			currentContext.messages.push(message);
+			newMessages.push(message);
+		}
+	};
 
 	// Outer loop: continues when queued follow-up messages arrive after agent would stop
 	while (true) {
@@ -3898,12 +3906,7 @@ async function runLoopBody(
 			// Commit queued user input outside the provisional assistant transaction so a
 			// discarded managed attempt cannot lose it before its retry continuation.
 			if (pendingMessages.length > 0) {
-				for (const message of pendingMessages) {
-					stream.push({ type: "message_start", message, scope: attemptScope });
-					stream.push({ type: "message_end", message, scope: attemptScope });
-					currentContext.messages.push(message);
-					newMessages.push(message);
-				}
+				commitMessages(pendingMessages, attemptScope);
 				pendingMessages = [];
 			}
 
@@ -4614,7 +4617,16 @@ async function runLoopBody(
 		// user message can supersede it without letting the stale recovery resurface
 		// after that follow-up turn.
 		const syntheticRecoveryMessage = await config.getSyntheticRecoveryMessage?.();
+		if (loopSignal.aborted) {
+			finishCancelled(lastAttemptScope);
+			return;
+		}
 		const followUpMessages = (await config.getFollowUpMessages?.()) || [];
+		if (loopSignal.aborted) {
+			commitMessages(followUpMessages, lastAttemptScope);
+			finishCancelled(lastAttemptScope);
+			return;
+		}
 		if (followUpMessages.length > 0) {
 			// Set as pending so inner loop processes them
 			pendingMessages = followUpMessages;

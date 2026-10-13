@@ -1419,6 +1419,60 @@ describe("agentLoop with AgentMessage", () => {
 		}
 	});
 
+	it("commits a follow-up dequeued before cancellation instead of losing it", async () => {
+		const abortController = new AbortController();
+		const followUpConsumptionStarted = Promise.withResolvers<void>();
+		const releaseFollowUpConsumption = Promise.withResolvers<void>();
+		const followUp = createUserMessage("queued follow-up");
+		let followUpDequeued = false;
+		let modelCalls = 0;
+		const events: AgentEvent[] = [];
+		const mock = createMockModel({
+			responses: [{ content: ["initial answer"] }, { content: ["must not answer after cancellation"] }],
+		});
+		const stream = agentLoop(
+			[createUserMessage("start")],
+			{ systemPrompt: [""], messages: [], tools: [] },
+			{
+				model: mock.model,
+				convertToLlm: identityConverter,
+				getFollowUpMessages: async () => {
+					if (followUpDequeued) return [];
+					followUpDequeued = true;
+					followUpConsumptionStarted.resolve();
+					await releaseFollowUpConsumption.promise;
+					return [followUp];
+				},
+			},
+			abortController.signal,
+			(model, context, options) => {
+				modelCalls++;
+				return mock.stream(model, context, options);
+			},
+		);
+		const completion = (async () => {
+			for await (const event of stream) events.push(event);
+			return stream.result();
+		})();
+
+		try {
+			await followUpConsumptionStarted.promise;
+			abortController.abort();
+			releaseFollowUpConsumption.resolve();
+			const messages = await completion;
+
+			expect(messages.some(message => message.role === "user" && message.content === "queued follow-up")).toBe(true);
+			const agentEnds = events.filter(
+				(event): event is Extract<AgentEvent, { type: "agent_end" }> => event.type === "agent_end",
+			);
+			expect(agentEnds).toHaveLength(1);
+			expect(agentEnds[0]?.stopReason).toBe("cancelled");
+			expect(modelCalls).toBe(1);
+		} finally {
+			releaseFollowUpConsumption.resolve();
+		}
+	});
+
 	it("should skip remaining tool calls when steering is queued", async () => {
 		const toolSchema = z.object({ value: z.string() });
 		const executed: string[] = [];
