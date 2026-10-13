@@ -310,15 +310,27 @@ export async function buildProviderAuthStatusText(session: ProviderAuthStatusSes
 	const owner = modelRegistry.getAuthStorageOwner();
 	const snapshot = authStorage.exportSnapshot();
 	const storedProviders = new Set(snapshot.credentials.map(entry => resolveOAuthStorageProvider(entry.provider)));
-	const bedrockProviders = new Set(
-		modelRegistry
-			.getAll()
-			.filter(model => model.api === "bedrock-converse-stream")
-			.map(model => resolveOAuthStorageProvider(model.provider)),
-	);
-	bedrockProviders.add("amazon-bedrock");
+	const models = modelRegistry.getAll();
+	const providerApis = new Map<string, Set<string>>();
+	for (const model of models) {
+		const provider = resolveOAuthStorageProvider(model.provider);
+		const apis = providerApis.get(provider) ?? new Set<string>();
+		apis.add(model.api);
+		providerApis.set(provider, apis);
+	}
+	const bedrockRouteProviders = new Set<string>();
+	const bedrockOnlyProviders = new Set<string>();
+	for (const [provider, apis] of providerApis) {
+		if (!apis.has("bedrock-converse-stream")) continue;
+		bedrockRouteProviders.add(provider);
+		if (apis.size === 1) bedrockOnlyProviders.add(provider);
+	}
+	if (!providerApis.has("amazon-bedrock")) {
+		bedrockRouteProviders.add("amazon-bedrock");
+		bedrockOnlyProviders.add("amazon-bedrock");
+	}
 	const providerIds = new Set([
-		...modelRegistry.getAll().map(model => resolveOAuthStorageProvider(model.provider)),
+		...models.map(model => resolveOAuthStorageProvider(model.provider)),
 		...modelRegistry.getConfiguredProviderIds().map(provider => resolveOAuthStorageProvider(provider)),
 		...snapshot.credentials.map(entry => resolveOAuthStorageProvider(entry.provider)),
 		...listProvidersWithEnvKey().map(provider => resolveOAuthStorageProvider(provider)),
@@ -333,7 +345,7 @@ export async function buildProviderAuthStatusText(session: ProviderAuthStatusSes
 						modelRegistry.getProviderConfigApiKeySources(provider).length > 0 ||
 						hasRuntimeProviderCredential(modelRegistry, provider) ||
 						authStorage.hasRuntimeApiKey(provider)
-					: bedrockProviders.has(provider)
+					: bedrockRouteProviders.has(provider)
 						? bedrockCredentialSources.length > 0 ||
 							authStorage.hasAuth(provider, session.credentialSessionId, { owner })
 						: authStorage.hasAuth(provider, session.credentialSessionId, { owner })),
@@ -344,7 +356,8 @@ export async function buildProviderAuthStatusText(session: ProviderAuthStatusSes
 	const lines = ["Provider credentials (active source per provider):"];
 	for (const provider of providers) {
 		const entries = snapshot.credentials.filter(entry => resolveOAuthStorageProvider(entry.provider) === provider);
-		const usesBedrockResolver = bedrockProviders.has(provider);
+		const usesBedrockResolver = bedrockOnlyProviders.has(provider);
+		const hasBedrockRoute = bedrockRouteProviders.has(provider);
 		const environmentSources =
 			provider === "google-vertex"
 				? googleVertexSources
@@ -387,6 +400,13 @@ export async function buildProviderAuthStatusText(session: ProviderAuthStatusSes
 				MAX_STATUS_VALUE_WIDTH,
 			),
 		);
+		if (hasBedrockRoute && !usesBedrockResolver) {
+			const bedrockRouteSource = bedrockCredentialSources[0];
+			const bedrockRouteLabel = bedrockRouteSource
+				? environmentSourceLabel(bedrockRouteSource)
+				: "AWS credentials unavailable";
+			lines.push(...wrapTextWithAnsi(`  Bedrock route: ${bedrockRouteLabel}`, MAX_STATUS_VALUE_WIDTH));
+		}
 		const shadowed =
 			active && active.layer !== "pending"
 				? sources

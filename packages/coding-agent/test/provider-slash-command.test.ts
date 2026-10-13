@@ -202,6 +202,10 @@ describe("provider slash command", () => {
 			expect(withoutAwsCredentials).not.toContain("stored-bedrock-api-key-secret");
 			expect(withoutAwsCredentials).not.toContain("runtime-bedrock-api-key-secret");
 
+			await authStorage.set("status-mixed-bedrock", {
+				type: "api_key",
+				key: "stored-mixed-provider-api-key-secret",
+			});
 			Bun.env.AWS_ACCESS_KEY_ID = "aws-access-key-test";
 			Bun.env.AWS_SECRET_ACCESS_KEY = "aws-secret-key-test";
 			registry.registerProvider(
@@ -223,12 +227,46 @@ describe("provider slash command", () => {
 				},
 				"ext://provider-status-bedrock-test",
 			);
+			registry.registerProvider(
+				"status-mixed-bedrock",
+				{
+					baseUrl: "https://mixed-bedrock.example.test/v1",
+					api: "bedrock-converse-stream",
+					models: [
+						{
+							id: "us.anthropic.claude-opus-4-6-v1",
+							name: "Mixed Bedrock Model",
+							reasoning: false,
+							input: ["text"],
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+							contextWindow: 100_000,
+							maxTokens: 8_000,
+						},
+						{
+							id: "mixed-openai-model",
+							name: "Mixed OpenAI Model",
+							api: "openai-completions",
+							reasoning: false,
+							input: ["text"],
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+							contextWindow: 100_000,
+							maxTokens: 8_000,
+						},
+					],
+				},
+				"ext://provider-status-mixed-bedrock-test",
+			);
 			const withAwsCredentials = await status();
 			expect(withAwsCredentials).toContain("amazon-bedrock: AWS environment credentials");
 			expect(withAwsCredentials).toContain("status-custom-bedrock: AWS environment credentials");
+			expect(withAwsCredentials).toMatch(/status-mixed-bedrock: API key \(stored credential id:\d+\)/);
+			expect(withAwsCredentials).toContain("  Bedrock route: AWS environment credentials");
+			expect(withAwsCredentials).not.toContain("status-mixed-bedrock: AWS environment credentials");
 			expect(withAwsCredentials).not.toContain("API key (runtime override)");
-			expect(withAwsCredentials).not.toContain("API key (stored credential");
+			expect(withAwsCredentials).not.toMatch(/^amazon-bedrock: API key \(stored credential/m);
+			expect(withAwsCredentials).not.toMatch(/^status-custom-bedrock: API key \(stored credential/m);
 			expect(withAwsCredentials).not.toContain("stored-bedrock-api-key-secret");
+			expect(withAwsCredentials).not.toContain("stored-mixed-provider-api-key-secret");
 			expect(withAwsCredentials).not.toContain("runtime-bedrock-api-key-secret");
 			expect(withAwsCredentials).not.toContain("aws-access-key-test");
 			expect(withAwsCredentials).not.toContain("aws-secret-key-test");
