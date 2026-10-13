@@ -4,26 +4,32 @@ on:
   issue_comment:
     types: [created]
 
-permissions:
-  pull-requests: write
-  issues: write
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
 
 jobs:
   request-review-on-comment:
     name: Re-request review via comment
     runs-on: ubuntu-22.04
     timeout-minutes: 5
+    permissions:
+      pull-requests: write
+      issues: write
     steps:
       - name: Check authorization and comment format
         id: authorize
         uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea  # v7
         with:
+          result-encoding: string
           script: |
-            const issue = context.issue;
             const comment = context.payload.comment;
             
-            // Check if this is a PR (has pull_request field)
-            if (!context.payload.pull_request) {
+            // Check if this is a PR (issue_comment doesn't include pull_request directly)
+            // We need to fetch the PR using the issue number
+            if (!context.payload.issue.pull_request) {
               return 'not-pr';
             }
             
@@ -32,16 +38,22 @@ jobs:
               return 'no-match';
             }
             
-            const pr = context.payload.pull_request;
+            // Fetch full PR details by issue number
+            const pr = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+            });
+            
             const commentAuthor = comment.user.login;
-            const prAuthor = pr.user.login;
+            const prAuthor = pr.data.user.login;
             
             // Check if comment author is PR author
             if (commentAuthor === prAuthor) {
               return 'authorized';
             }
             
-            // Check if comment author has write permission
+            // Check if comment author has admin, maintain, or write permission
             try {
               const collaborator = await github.rest.repos.getCollaboratorPermissionLevel({
                 owner: context.repo.owner,
@@ -50,7 +62,7 @@ jobs:
               });
               
               const permission = collaborator.data.permission;
-              if (permission === 'admin' || permission === 'write') {
+              if (permission === 'admin' || permission === 'maintain' || permission === 'write') {
                 return 'authorized';
               }
             } catch (error) {
@@ -64,25 +76,31 @@ jobs:
         id: get-reviewers
         uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea  # v7
         with:
+          result-encoding: string
           script: |
-            const pr = context.payload.pull_request;
-            
-            // Get all reviews on the PR
-            const reviews = await github.rest.pulls.listReviews({
+            // Fetch full PR details by issue number
+            const pr = await github.rest.pulls.get({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              pull_number: pr.number,
+              pull_number: context.issue.number,
+            });
+            
+            // Get all reviews on the PR with pagination
+            const reviews = await github.paginate(github.rest.pulls.listReviews, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pr.data.number,
             });
             
             // Get currently requested reviewers
             const currentlyRequested = new Set(
-              pr.requested_reviewers.map(r => r.login)
+              pr.data.requested_reviewers.map(r => r.login)
             );
             
             // Find reviewers with CHANGES_REQUESTED or COMMENTED (latest review only)
             const reviewerMap = new Map();
             
-            for (const review of reviews.data) {
+            for (const review of reviews) {
               const reviewer = review.user.login;
               
               // Skip bots (check if user type is Bot)
@@ -117,23 +135,30 @@ jobs:
             return JSON.stringify(reviewersToRequest);
 
       - name: Request reviews
-        if: steps.get-reviewers.outputs.result != '[]'
+        if: steps.get-reviewers.outcome == 'success' && steps.get-reviewers.outputs.result != '[]'
         uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea  # v7
         with:
+          result-encoding: string
           script: |
-            const pr = context.payload.pull_request;
+            // Fetch full PR details by issue number
+            const pr = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+            });
+            
             const reviewersStr = '${{ steps.get-reviewers.outputs.result }}';
             const reviewers = JSON.parse(reviewersStr);
             
             await github.rest.pulls.requestReviewers({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              pull_number: pr.number,
+              pull_number: pr.data.number,
               reviewers: reviewers,
             });
 
       - name: React to comment on success
-        if: steps.get-reviewers.outputs.result != '[]'
+        if: steps.get-reviewers.outcome == 'success' && steps.get-reviewers.outputs.result != '[]'
         uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea  # v7
         with:
           script: |
@@ -147,16 +172,15 @@ jobs:
             });
 
       - name: Reply to comment on no-op
-        if: steps.get-reviewers.outputs.result == '[]'
+        if: steps.get-reviewers.outcome == 'success' && steps.get-reviewers.outputs.result == '[]'
         uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea  # v7
         with:
           script: |
-            const pr = context.payload.pull_request;
             const comment = context.payload.comment;
             
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              issue_number: pr.number,
+              issue_number: context.issue.number,
               body: 'No reviewers to re-request (all with pending feedback are already requested).',
             });

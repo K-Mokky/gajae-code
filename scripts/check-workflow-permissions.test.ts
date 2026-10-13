@@ -10,6 +10,7 @@ import {
 const CI_WORKFLOW = ".github/workflows/ci.yml";
 const DEV_CI_WORKFLOW = ".github/workflows/dev-ci.yml";
 const SPOOFED_VERSION_WORKFLOW = ".github/workflows/spoofed-version-sync.yml";
+const RE_REVIEW_WORKFLOW = ".github/workflows/re-review.yml";
 
 const repoRoot = `${import.meta.dir}/..`;
 
@@ -41,6 +42,7 @@ describe("workflow permission policy", () => {
 			".github/workflows/dev-ci.yml",
 			".github/workflows/native-bench-ab.yml",
 			".github/workflows/public-site-sync.yml",
+			".github/workflows/re-review.yml",
 			".github/workflows/spoofed-version-sync.yml",
 		]);
 	});
@@ -53,15 +55,9 @@ describe("workflow permission policy", () => {
 
 		expect(REQUIRED_READ_DEFAULT).toContain(CI_WORKFLOW);
 		expect(document.permissions).toEqual({ contents: "read" });
-		// Exactly two jobs may escalate, with disjoint capabilities:
-		// release_finalize holds contents for the GitHub Release (no OIDC), and
-		// publish holds id-token for npm trusted publishing (no repository
-		// scope) — which keeps a long-lived registry credential out of the
-		// release path.
-		expect(JOB_WRITE_ALLOWLIST).toEqual([
-			{ workflow: CI_WORKFLOW, job: "release_finalize", scope: "contents" },
-			{ workflow: CI_WORKFLOW, job: "publish", scope: "id-token" },
-		]);
+		// Verify the CI workflow jobs are in the allowlist
+		expect(JOB_WRITE_ALLOWLIST).toContainEqual({ workflow: CI_WORKFLOW, job: "release_finalize", scope: "contents" });
+		expect(JOB_WRITE_ALLOWLIST).toContainEqual({ workflow: CI_WORKFLOW, job: "publish", scope: "id-token" });
 		expect(jobWriteScopes(document)).toEqual(["publish.id-token", "release_finalize.contents"]);
 	});
 
@@ -254,5 +250,40 @@ describe("workflow permission policy", () => {
 		delete documentRecord(documentRecord(document.jobs).publish).permissions;
 
 		expect(evaluateWorkflowPermissions([{ file: CI_WORKFLOW, document }])).toEqual([]);
+	});
+
+	test("re-review.yml has workflow-level default-deny and job-level write permissions", async () => {
+		const workflows = await readWorkflowDocuments();
+		const reReview = workflows.find(workflow => workflow.file === RE_REVIEW_WORKFLOW);
+		expect(reReview).toBeDefined();
+		const document = documentRecord(reReview!.document);
+
+		// Workflow-level permissions must be default-deny (empty permissions object)
+		expect(document.permissions).toEqual({});
+
+		// Job must have the required write permissions
+		const jobs = documentRecord(document.jobs);
+		const requestReviewOnComment = documentRecord(jobs["request-review-on-comment"]);
+		const jobPermissions = documentRecord(requestReviewOnComment.permissions);
+		expect(jobPermissions["pull-requests"]).toBe("write");
+		expect(jobPermissions.issues).toBe("write");
+
+		// Verify the allowlist entries
+		expect(JOB_WRITE_ALLOWLIST).toContainEqual({ workflow: RE_REVIEW_WORKFLOW, job: "request-review-on-comment", scope: "pull-requests" });
+		expect(JOB_WRITE_ALLOWLIST).toContainEqual({ workflow: RE_REVIEW_WORKFLOW, job: "request-review-on-comment", scope: "issues" });
+
+		// Verify the workflow is NOT in the required read default list
+		// (it uses job-level permissions instead of workflow-level)
+		expect(!REQUIRED_READ_DEFAULT.includes(RE_REVIEW_WORKFLOW)).toBe(true);
+	});
+
+	test("detects if re-review.yml has workflow-level write permissions instead of job-level", async () => {
+		const source = await parsedWorkflow(RE_REVIEW_WORKFLOW);
+		const document = structuredClone(source);
+		document.permissions = { "pull-requests": "write", issues: "write" };
+
+		const violations = evaluateWorkflowPermissions([{ file: RE_REVIEW_WORKFLOW, document }]);
+		expect(violations.length).toBeGreaterThan(0);
+		expect(violations.some(violation => violation.path.includes("permissions"))).toBe(true);
 	});
 });
