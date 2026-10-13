@@ -3330,6 +3330,13 @@ describe("ralplan HUD lane verdict carriage", () => {
 		}
 	});
 
+	it("rejects --architect-decision outside artifact-write mode", async () => {
+		const root = await tempDir();
+		const result = await runNativeRalplanCommand(["--architect-decision", "APPROVE", "refine the plan"], root);
+		expect(result.status).toBe(2);
+		expect(result.stderr).toContain("--architect-decision is only supported with gjc ralplan --write");
+	});
+
 	it("clears both verdict sources when a new run starts and rebuilds HUD state", async () => {
 		const root = await tempDir();
 		const runOne = "hud-reset-one";

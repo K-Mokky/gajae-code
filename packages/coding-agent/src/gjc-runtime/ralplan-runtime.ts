@@ -68,8 +68,9 @@ import {
  *
  * 2. **Artifact write**: `gjc ralplan --write --stage <type> --stage_n <N>
  *    (--artifact <path-or-string> | --artifact-env GJC_RALPLAN_ARTIFACT)
- *    [--run-id <id>] [--session-id <id>] [--lane-verdict <token>] [--json]` persists Planner / Architect
- *    / Critic / intent / disposition / revision / post-interview / ADR / final artifacts under
+ *    [--run-id <id>] [--session-id <id>] [--lane-verdict <token>]
+ *    [--architect-decision <APPROVE|COMMENT|REQUEST_CHANGES>] [--json]` persists Planner / Architect / Critic
+ *    / intent / disposition / revision / post-interview / ADR / final artifacts under
  *    `.gjc/plans/ralplan/<run-id>/`, maintains an `index.jsonl` audit log, copies `final`
  *    stages to `pending-approval.md`, and advances the HUD chip to reflect the latest
  *    persisted stage. Disposition stage artifacts are fail-closed JSON documents that
@@ -2895,6 +2896,9 @@ function extractPositionalTask(args: readonly string[]): string {
 function resolveConsensusArgs(args: readonly string[], cwd: string): ConsensusHandoffArgs {
 	if (hasFlag(args, "--lane-verdict")) {
 		throw new RalplanCommandError(2, "--lane-verdict is only supported with gjc ralplan --write.");
+	}
+	if (hasFlag(args, "--architect-decision")) {
+		throw new RalplanCommandError(2, "--architect-decision is only supported with gjc ralplan --write.");
 	}
 	const architectKind = flagValue(args, "--architect")?.trim() || undefined;
 	if (architectKind && !KNOWN_ARCHITECT_KINDS.has(architectKind)) {
