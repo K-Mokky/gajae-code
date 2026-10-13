@@ -17,6 +17,11 @@ use crate::{ShellFd, error, ioutils, output_decode::OutputDecoderState, sys};
 pub trait Stream: std::io::Read + std::io::Write + Send + Sync {
 	/// Clones the stream into a boxed trait object.
 	fn clone_box(&self) -> Box<dyn Stream>;
+	/// Whether this stream is backed by a terminal. On Unix, implementations
+	/// must also expose the terminal descriptor through `try_borrow_as_fd`.
+	fn is_terminal(&self) -> bool {
+		false
+	}
 
 	/// Converts the stream into an `OwnedFd`. Returns an error if the operation
 	/// is not supported or if it fails.
@@ -273,7 +278,8 @@ impl OpenFile {
 			Self::Stdout(f) => f.is_terminal(),
 			Self::Stderr(f) => f.is_terminal(),
 			Self::File(f, _) => f.is_terminal(),
-			Self::PipeReader(..) | Self::PipeWriter(_) | Self::Stream(..) => false,
+			Self::Stream(stream, _) => stream.is_terminal(),
+			Self::PipeReader(..) | Self::PipeWriter(_) => false,
 		}
 	}
 
@@ -556,11 +562,50 @@ where
 #[cfg(test)]
 #[cfg(unix)]
 mod tests {
-	use std::io::{Read as _, Write as _};
+	use std::{
+		io::{IsTerminal as _, Read as _, Write as _},
+		os::fd::AsFd as _,
+	};
 
 	use anyhow::Result;
 
-	use super::OpenFile;
+	use super::{HeldInput, OpenFile, Stream};
+
+	struct TerminalStream(std::fs::File);
+
+	impl std::io::Read for TerminalStream {
+		fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+			self.0.read(buf)
+		}
+	}
+
+	impl std::io::Write for TerminalStream {
+		fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+			self.0.write(buf)
+		}
+
+		fn flush(&mut self) -> std::io::Result<()> {
+			self.0.flush()
+		}
+	}
+
+	impl Stream for TerminalStream {
+		fn clone_box(&self) -> Box<dyn Stream> {
+			Box::new(Self(self.0.try_clone().expect("clone pty stream")))
+		}
+
+		fn is_terminal(&self) -> bool {
+			self.0.is_terminal()
+		}
+
+		fn try_clone_to_owned(&self) -> Result<std::os::fd::OwnedFd, crate::error::Error> {
+			Ok(self.0.as_fd().try_clone_to_owned()?)
+		}
+
+		fn try_borrow_as_fd(&self) -> Result<std::os::fd::BorrowedFd<'_>, crate::error::Error> {
+			Ok(self.0.as_fd())
+		}
+	}
 
 	const CHILD_ENV: &str = "BRUSH_OPENFILE_STDIN_CHILD";
 	const TEST_NAME: &str = "openfiles::tests::stdin_read_leaves_unread_bytes_on_fd0";
@@ -596,6 +641,14 @@ mod tests {
 
 		let stdout = String::from_utf8_lossy(&output.stdout);
 		anyhow::ensure!(stdout.contains("first=a rest=bcdef"), "unexpected child output: {stdout}");
+		Ok(())
+	}
+
+	#[test]
+	fn terminal_backed_custom_stream_is_terminal() -> Result<()> {
+		let pty = nix::pty::openpty(None, None)?;
+		let stream = OpenFile::Stream(Box::new(TerminalStream(std::fs::File::from(pty.slave))), HeldInput::default());
+		assert!(stream.is_terminal());
 		Ok(())
 	}
 }

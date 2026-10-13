@@ -103,11 +103,11 @@ impl LineInput {
 		let (decoded, pending, state) = decode_bytes_without_eof(line, self.decoder_state());
 		if !pending.is_empty() {
 			self.unread(&pending);
-			// Keep an ACP choice when the unread suffix needs that decoder. A
-			// temporary invalid byte with no incomplete suffix must not select ACP.
-			if state.uses_acp() {
-				self.set_decoder_state(state);
-			}
+		}
+		// ACP selection is permanent for the input stream, even when the bytes
+		// that selected it decoded completely and left no suffix to put back.
+		if state.uses_acp() {
+			self.set_decoder_state(state);
 		}
 		decoded
 	}
@@ -265,32 +265,22 @@ mod tests {
 
 	#[cfg(windows)]
 	#[test]
-	fn temporary_decode_does_not_persist_acp_fallback() -> Result<()> {
-		// Regression: on timeout, decode_bytes_temporary must not persist ACP selection.
-		// Simulate: timeout on leading byte [0x80], then later read completes as UTF-8.
+	fn temporary_decode_persists_acp_fallback_for_the_stream() -> Result<()> {
+		// ACP selection applies to the whole stream, including bytes received
+		// after a timed-out read.
 		let (reader, _writer) = std::io::pipe()?;
 		let input = OpenFile::from(reader);
+		let held = input.held_input().expect("pipe holds decoder state").clone();
+		held.set_output_decoder_state(OutputDecoderState::with_fallback_codepage(1252));
 
-		// Initial state is UTF-8.
-		let line_input = LineInput::new(input.try_clone()?);
-		let initial_state = line_input.decoder_state();
-		assert!(!initial_state.uses_acp(), "initial state should be UTF-8");
+		let timed_out = LineInput::new(input.try_clone()?);
+		assert_eq!(timed_out.decode_bytes_temporary(&[0x80]), "€");
+		assert!(timed_out.decoder_state().uses_acp());
 
-		// Temporary decode (as on timeout) with a leading byte that could be ACP.
-		// This byte (0x80) is invalid UTF-8 but valid in many ACPs.
-		line_input.decode_bytes_temporary(&[0x80]);
-
-		// State should still be UTF-8, not ACP (even though 0x80 triggers ACP fallback in decode_line).
-		let state_after_temp = line_input.decoder_state();
-		assert!(
-			!state_after_temp.uses_acp(),
-			"temporary decode should not persist ACP selection"
-		);
-
-		// Verify that a later read still uses UTF-8, not ACP.
-		let second = LineInput::new(input);
-		// A complete UTF-8 char should decode as UTF-8, not ACP.
-		assert_eq!(second.decode_line(vec![0xe4, 0xb8, 0xad]), "中");
+		// These bytes are valid UTF-8 as £ but are CP1252 "Â£" once this
+		// stream has selected its ACP fallback.
+		let next_read = LineInput::new(input);
+		assert_eq!(next_read.decode_line(vec![0xc2, 0xa3]), "Â£");
 		Ok(())
 	}
 }

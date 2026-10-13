@@ -710,7 +710,8 @@ where
 					line.push(BACKSLASH);
 					raw_backslashes.push(false);
 				}
-				// Decode without finalizing partial character state or persisting ACP fallback.
+				// Decode without finalizing partial characters; stream-level ACP
+				// selection is still retained by the input source.
 				return Ok(ReadResult::TimedOut(
 					(!line.is_empty()).then(|| reader.source.decode_bytes_temporary(&line)),
 				));
