@@ -90,6 +90,40 @@ describe("SvgFigure", () => {
 		}
 	});
 
+	it("retries a source updated while graphics are unavailable after protocol restoration", async () => {
+		const previousProtocol = TERMINAL.imageProtocol;
+		const previousCellDimensions = getCellDimensions();
+		setTerminalImageProtocol(ImageProtocol.Kitty);
+		setCellDimensions({ widthPx: 9, heightPx: 18 });
+		let changed = Promise.withResolvers<void>();
+		const figure = new SvgFigure({ theme, palette, onChange: () => changed.resolve() });
+		try {
+			figure.update(SVG, true);
+			figure.render(80);
+			await changed.promise;
+			expect(figure.debugState()).toMatchObject({ current: true, raster: "18x18" });
+
+			setTerminalImageProtocol(null);
+			expect(figure.render(80)).toEqual([]);
+			figure.update('<svg width="24" height="7"><rect width="24" height="7" fill="#00f"/></svg>', true);
+			expect(figure.render(80)).toEqual([]);
+
+			changed = Promise.withResolvers<void>();
+			setTerminalImageProtocol(ImageProtocol.Kitty);
+			figure.render(80);
+			const rerasterized = await Promise.race([
+				changed.promise.then(() => true),
+				Bun.sleep(2_000).then(() => false),
+			]);
+			expect(rerasterized).toBe(true);
+			expect(figure.debugState()).toMatchObject({ current: true, raster: "27x18" });
+		} finally {
+			figure.dispose();
+			setCellDimensions(previousCellDimensions);
+			setTerminalImageProtocol(previousProtocol);
+		}
+	});
+
 	it("rerasterizes when the viewport height changes at the same terminal width", async () => {
 		const previousProtocol = TERMINAL.imageProtocol;
 		const previousRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");

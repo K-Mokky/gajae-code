@@ -143,6 +143,9 @@ export class SvgFigure implements Component {
 			}
 			return [];
 		}
+		// Source updates may arrive while graphics are unavailable, so a restored
+		// protocol must retry even when the visible layout did not change.
+		const graphicsRestored = this.#graphicsUnavailableNotified;
 		this.#graphicsUnavailableNotified = false;
 		const cell = getCellDimensions();
 		const limits = limitsFor(width, cell);
@@ -161,6 +164,7 @@ export class SvgFigure implements Component {
 			if (cellChanged) this.#image?.component.invalidate();
 			this.#schedule();
 		}
+		if (graphicsRestored && !layoutChanged) this.#schedule();
 		if (!this.#raster && !this.#failed) return [];
 		if (this.failed) return [];
 		if (this.#raster) {
