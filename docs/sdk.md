@@ -459,6 +459,10 @@ SDK frame cap remains 256 KiB. Large inline images cross it through SDK-core-own
 `turn.image.discard` controls, not by increasing the cap or exposing endpoint
 credentials to the ACP client.
 
+Hosts advertise staging controls only when their transport provides authoritative
+connection liveness. Custom transports without it retain ordinary SDK controls,
+but do not advertise image staging that they cannot safely serve.
+
 Staging is scoped to the authenticated live connection and session. Each upload
 has a two-minute inactivity lease, a declared byte length, MIME type, and SHA-256 digest.
 `turn.image.begin` optionally accepts a nonempty `batchId` of at most 128 characters.
@@ -468,6 +472,7 @@ ACP uses its request `clientRef` as the batch label so an early completed image 
 available while later images are still transferring. Invalid or rejected operations,
 unrelated batches/connections, and cleanup do not renew these leases. Two minutes
 without successful staging progress still retires the batch, without changing quotas.
+Elapsed leases are rejected even when their reclamation timer has not run yet.
 Chunks are canonical base64 in sequence, with at most 96 KiB decoded per chunk.
 The host verifies exact length, digest, MIME/header agreement, dimensions, and
 image decoding before a reference is usable. A prompt accepts at most 16 images,

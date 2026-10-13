@@ -4,7 +4,9 @@
 - Keep delayed-echo successor admission cancellable and restage one-shot image references only after a confirmed busy rejection.
 - Remove implicitly diverted queued images in both SDK hosts before acknowledging cancellation, and finalize each accepted image prompt at its exact consuming-run terminal or durably confirmed queue removal.
 - Suspend image-prompt deadlines while queued, renew joined prompts only on their exact consuming run's progress, and keep real terminal events private while exact deadline settlement remains uncertain.
-- Hold a turn's terminal event when a scheduled todo reminder continuation still owns the predecessor lifecycle, including synchronous continuation failure.
 - Bound retained upload allocations for tiny image fragments as well as payload bytes.
 - Renew upload inactivity leases only within an authenticated request batch, preserving earlier completed images during slow multi-image staging while abandoned uploads still expire.
 - Validate staged images and their SDK envelope before publishing any user echo; renew the local watchdog only for this request's validated staging progress.
+- Advertise image staging only when the host transport supplies authoritative connection liveness; keep other SDK controls available to custom transports.
+- Enforce the existing two-minute image inactivity lease even when expiry callbacks are delayed.
+- Interrupt existing first-turn readiness retry waits on cancellation or teardown without changing retry eligibility, budgets, or provider policies.
