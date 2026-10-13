@@ -43,7 +43,7 @@ import {
 import type { CursorOptions } from "./providers/cursor";
 import type { DevinAcpOptions } from "./providers/devin-acp";
 import type { GoogleOptions } from "./providers/google";
-import { getVertexCredentialSource } from "./providers/google-auth";
+import { getVertexCredentialSource, isValidVertexLocation } from "./providers/google-auth";
 import type { GoogleGeminiCliOptions } from "./providers/google-gemini-cli";
 import type { GoogleVertexOptions } from "./providers/google-vertex";
 import type { KiroCodeWhispererOptions } from "./providers/kiro-codewhisperer";
@@ -293,10 +293,9 @@ export async function getEnvApiKeyCredentialSources(
 	);
 
 	if (provider === "google-vertex") {
-		if (
-			($credentialEnv("GOOGLE_CLOUD_PROJECT") || $credentialEnv("GCLOUD_PROJECT")) &&
-			$credentialEnv("GOOGLE_CLOUD_LOCATION")
-		) {
+		const project = $credentialEnv("GOOGLE_CLOUD_PROJECT") || $credentialEnv("GCLOUD_PROJECT");
+		const location = $credentialEnv("GOOGLE_CLOUD_LOCATION");
+		if (project && location && isValidVertexLocation(location)) {
 			const source = await getVertexCredentialSource({ fetch: options?.fetch });
 			if (source) sources.push({ kind: "google-adc", source });
 		}

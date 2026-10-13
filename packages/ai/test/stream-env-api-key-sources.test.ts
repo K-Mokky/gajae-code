@@ -220,6 +220,9 @@ describe("environment API-key source names", () => {
 			kind: "google-adc",
 			source: "explicit-file",
 		});
+
+		Bun.env.GOOGLE_CLOUD_LOCATION = "us-central1/invalid-host";
+		expect(await getEnvApiKeyCredentialSource("google-vertex")).toBeUndefined();
 	});
 
 	it("does not report executable Vertex ADC until its opt-in is enabled", async () => {

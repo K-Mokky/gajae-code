@@ -25,6 +25,7 @@ const METADATA_TOKEN_URL = "http://metadata.google.internal/computeMetadata/v1/i
 const METADATA_PROJECT_ID_URL = "http://metadata.google.internal/computeMetadata/v1/project/project-id";
 const METADATA_SERVICE_ACCOUNT_EMAIL_URL =
 	"http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email";
+const VERTEX_LOCATION_RE = /^[a-z0-9-]+$/;
 const CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform";
 const JWT_BEARER_GRANT = "urn:ietf:params:oauth:grant-type:jwt-bearer";
 const TOKEN_EXCHANGE_GRANT = "urn:ietf:params:oauth:grant-type:token-exchange";
@@ -119,6 +120,11 @@ interface TokenResponse {
 
 const tokenCache = new Map<string, CachedToken>();
 const inflight = new Map<string, Promise<string>>();
+
+/** Match the region-label constraint used before Vertex interpolates a location into the request host. */
+export function isValidVertexLocation(location: string): boolean {
+	return VERTEX_LOCATION_RE.test(location);
+}
 
 function getRefreshSkewMs(): number {
 	return $envpos("GOOGLE_VERTEX_REFRESH_SKEW_MS", 60_000);
