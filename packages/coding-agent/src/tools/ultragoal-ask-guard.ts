@@ -8,6 +8,7 @@ import {
 import { ToolError } from "./tool-errors";
 
 const ULTRAGOAL_ASK_GUARD = Symbol.for("gajae-code.ultragoalAskGuard");
+const RALPLAN_ULTRAGOAL_APPROVAL_OPTIONS = ["Refine further", "Approve execution via ultragoal", "Stop here"] as const;
 
 type GuardedTool = AgentTool & { [ULTRAGOAL_ASK_GUARD]?: true };
 
@@ -18,13 +19,19 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function isSingleRalplanUltragoalApproval(params: unknown): boolean {
 	if (!isRecord(params) || !Array.isArray(params.questions) || params.questions.length !== 1) return false;
 	const question = params.questions[0];
-	if (!isRecord(question) || question.multi === true || !isRecord(question.workflowGate)) return false;
+	if (
+		!isRecord(question) ||
+		question.multi !== false ||
+		question.recommended !== 1 ||
+		!isRecord(question.workflowGate)
+	)
+		return false;
 	if (question.workflowGate.stage !== "ralplan" || question.workflowGate.kind !== "approval") return false;
-	if (!Array.isArray(question.options)) return false;
-	return question.options.some(option => {
-		if (!isRecord(option) || typeof option.label !== "string") return false;
-		return option.label.trim().replace(/\s*\(Recommended\)\s*$/i, "") === "Approve execution via ultragoal";
-	});
+	if (!Array.isArray(question.options) || question.options.length !== RALPLAN_ULTRAGOAL_APPROVAL_OPTIONS.length)
+		return false;
+	return question.options.every(
+		(option, index) => isRecord(option) && option.label === RALPLAN_ULTRAGOAL_APPROVAL_OPTIONS[index],
+	);
 }
 
 async function isVerifiedRalplanUltragoalApproval(

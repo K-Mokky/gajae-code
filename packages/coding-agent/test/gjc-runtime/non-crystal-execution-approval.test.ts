@@ -182,7 +182,9 @@ async function ask(
 			{
 				id,
 				question: "Approve this published artifact for execution?",
-				options: [{ label }, { label: "Keep planning" }],
+				options: [{ label: "Refine further" }, { label }, { label: "Stop here" }],
+				recommended: 1,
+				multi: false,
 				workflowGate,
 			},
 		],
@@ -358,6 +360,59 @@ describe("non-Crystal user-gated execution approval", () => {
 				),
 			).rejects.toThrow(/try-harder nudge/);
 			expect(select).not.toHaveBeenCalled();
+		});
+	});
+
+	it("blocks mixed-purpose options even when a current Ralplan final exists", async () => {
+		await withSession(async (cwd, _manager, sessionId) => {
+			await createUltragoalPlan({ cwd, brief: "Implement the approved repair" });
+			await publishReviewedRalplanFinal(cwd, sessionId);
+			const select = vi.fn(async () => "Postgres");
+			const tool = new AskTool({
+				cwd,
+				hasUI: true,
+				settings: Settings.isolated(),
+				getSessionId: () => sessionId,
+				getSessionFile: () => null,
+				getSessionSpawns: () => "*",
+			});
+			const guarded = guardToolForUltragoalAsk(
+				tool as AgentTool,
+				() => cwd,
+				() => ({ sessionId }),
+			) as AskTool;
+			const context = {
+				hasUI: true,
+				ui: { select, editor: async () => undefined },
+				abort: () => {},
+			} as unknown as AgentToolContext;
+
+			await expect(
+				guarded.execute(
+					"mixed-purpose-ask",
+					{
+						questions: [
+							{
+								id: "database-choice",
+								question: "Which database should we use?",
+								options: [
+									{ label: "Postgres" },
+									{ label: "SQLite" },
+									{ label: "Approve execution via ultragoal" },
+								],
+								recommended: 1,
+								multi: false,
+								workflowGate: { stage: "ralplan", kind: "approval" },
+							},
+						],
+					},
+					undefined,
+					undefined,
+					context,
+				),
+			).rejects.toThrow(/Ultragoal try-harder nudge/);
+			expect(select).not.toHaveBeenCalled();
+			expect(await Bun.file(nonCrystalExecutionApprovalRecordPath(cwd, sessionId, "ralplan")).exists()).toBe(false);
 		});
 	});
 
