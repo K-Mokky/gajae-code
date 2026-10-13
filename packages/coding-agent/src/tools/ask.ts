@@ -90,7 +90,11 @@ export { askSchema } from "./ask-contract";
 
 import { formatErrorMessage, formatMeta, formatTitle } from "./render-utils";
 import { ToolAbortError, ToolError } from "./tool-errors";
-import { assertUltragoalAskAllowed, markBuiltinAskTool } from "./ultragoal-ask-guard";
+import {
+	assertUltragoalAskAllowed,
+	isAcceptedRalplanApprovalResponse,
+	markBuiltinAskTool,
+} from "./ultragoal-ask-guard";
 
 // =============================================================================
 // Types
@@ -1601,6 +1605,11 @@ export class AskTool implements AgentTool<AskParametersSchema, AskToolDetails> {
 				throw new ToolAbortError("Ask tool was cancelled by the user");
 			}
 			if (
+				verifiedRalplanApprovalPresentation &&
+				!isAcceptedRalplanApprovalResponse(selectedOptions, customInput, clarificationQuestion, timedOut)
+			)
+				throw new ToolError("Ralplan approval during Ultragoal accepts only the listed choices, not free text.");
+			if (
 				clarificationQuestion === undefined &&
 				!(timedOut && (intentContract(q.deepInterview) || intentReview(q.deepInterview)))
 			) {
@@ -1684,6 +1693,11 @@ export class AskTool implements AgentTool<AskParametersSchema, AskToolDetails> {
 				context?.abort();
 				throw new ToolAbortError("Ask tool was cancelled by the user");
 			}
+			if (
+				verifiedRalplanApprovalPresentation &&
+				!isAcceptedRalplanApprovalResponse(selectedOptions, customInput, clarificationQuestion, timedOut)
+			)
+				throw new ToolError("Ralplan approval during Ultragoal accepts only the listed choices, not free text.");
 
 			resultsByIndex[questionIndex] = {
 				id: q.id,

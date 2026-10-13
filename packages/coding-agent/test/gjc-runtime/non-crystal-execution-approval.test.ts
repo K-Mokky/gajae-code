@@ -429,6 +429,64 @@ describe("non-Crystal user-gated execution approval", () => {
 		});
 	});
 
+	it("does not return free-text Other answers through the Ultragoal approval exception", async () => {
+		await withSession(async (cwd, _manager, sessionId) => {
+			await createUltragoalPlan({ cwd, brief: "Implement the approved repair" });
+			await publishReviewedRalplanFinal(cwd, sessionId);
+			const presentation = await captureExecutionApprovalPresentation(cwd, sessionId, "ralplan");
+			const question = formatRalplanUltragoalApprovalQuestion(presentation);
+			if (!question) throw new Error("expected canonical Ralplan approval question");
+			const tool = new AskTool({
+				cwd,
+				hasUI: true,
+				settings: Settings.isolated(),
+				getSessionId: () => sessionId,
+				getSessionFile: () => null,
+				getSessionSpawns: () => "*",
+			});
+			const guarded = guardToolForUltragoalAsk(
+				tool as AgentTool,
+				() => cwd,
+				() => ({ sessionId }),
+			) as AskTool;
+			const select = vi.fn(async () => "Other (type your own)");
+			const editor = vi.fn(async () => "Postgres");
+			const context = {
+				hasUI: true,
+				ui: { select, editor },
+				abort: () => {},
+			} as unknown as AgentToolContext;
+
+			await expect(
+				guarded.execute(
+					"free-text-approval-call",
+					{
+						questions: [
+							{
+								id: "approval",
+								question,
+								options: [
+									{ label: "Refine further" },
+									{ label: "Approve execution via ultragoal" },
+									{ label: "Stop here" },
+								],
+								recommended: 1,
+								multi: false,
+								workflowGate: { stage: "ralplan", kind: "approval" },
+							},
+						],
+					},
+					undefined,
+					undefined,
+					context,
+				),
+			).rejects.toThrow(/accepts only the listed choices, not free text/);
+			expect(select).toHaveBeenCalledTimes(1);
+			expect(editor).toHaveBeenCalledTimes(1);
+			expect(await Bun.file(nonCrystalExecutionApprovalRecordPath(cwd, sessionId, "ralplan")).exists()).toBe(false);
+		});
+	});
+
 	it("does not let Ralplan approval labels bypass the guard without a current final", async () => {
 		await withSession(async (cwd, manager, sessionId) => {
 			await createUltragoalPlan({ cwd, brief: "Implement the approved repair" });

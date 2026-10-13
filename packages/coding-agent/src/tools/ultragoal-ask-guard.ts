@@ -25,6 +25,21 @@ export function formatRalplanUltragoalApprovalQuestion(
 	return `Approve execution via ultragoal for the current Ralplan final at ${JSON.stringify(presentation.artifact_path)} (run_id=${JSON.stringify(presentation.run_id)}, sha256=${presentation.artifact_sha256})?`;
 }
 
+export function isAcceptedRalplanApprovalResponse(
+	selectedOptions: string[],
+	customInput: string | undefined,
+	clarificationQuestion: string | undefined,
+	timedOut: boolean,
+): boolean {
+	return (
+		!timedOut &&
+		selectedOptions.length === 1 &&
+		RALPLAN_ULTRAGOAL_APPROVAL_OPTIONS.some(option => option === selectedOptions[0]) &&
+		customInput === undefined &&
+		clarificationQuestion === undefined
+	);
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
