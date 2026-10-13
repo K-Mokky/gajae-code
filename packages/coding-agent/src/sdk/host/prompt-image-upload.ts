@@ -31,6 +31,7 @@ type Upload = {
 	sequence: number;
 	finishing: boolean;
 	finished: boolean;
+	expiresAt: number;
 	timer: NodeJS.Timeout;
 };
 
@@ -88,6 +89,7 @@ export class PromptImageUploadStore {
 			(typeof input.batchId !== "string" || input.batchId.length === 0 || input.batchId.length > MAX_BATCH_ID_LENGTH)
 		)
 			invalid("Image batchId must be a nonempty string of at most 128 characters.");
+		this.#reapExpired();
 		if (this.#uploads.size >= MAX_UPLOADS) busy("Too many concurrent image uploads.");
 		const id = crypto.randomUUID();
 		const timer = setTimeout(() => this.#remove(id), LEASE_MS);
@@ -104,6 +106,7 @@ export class PromptImageUploadStore {
 			sequence: 0,
 			finishing: false,
 			finished: false,
+			expiresAt: performance.now() + LEASE_MS,
 			timer,
 		};
 		this.#uploads.set(id, upload);
@@ -230,6 +233,7 @@ export class PromptImageUploadStore {
 				invalid("Image cannot be decoded.");
 			}
 			// The transport can disconnect while decoding. A removed lease cannot be resurrected.
+			this.#reapExpired();
 			if (this.#uploads.get(input.id as string) !== upload)
 				throw new TypedControlError("resource_gone", "Image upload expired.");
 			const releasedBytes = upload.reservedBytes - upload.length;
@@ -266,6 +270,7 @@ export class PromptImageUploadStore {
 		this.#assertConnected(owner);
 		if (!Array.isArray(value) || value.length === 0 || value.length > MAX_IMAGES)
 			invalid("stagedImages must contain 1–16 image IDs.");
+		this.#reapExpired();
 		const seen = new Set<string>();
 		const entries: Array<[string, Upload]> = [];
 		let bytes = 0;
@@ -324,6 +329,7 @@ export class PromptImageUploadStore {
 		const owner = ownerId(connectionId);
 		this.#assertConnected(owner);
 		if (typeof value !== "string" || !value) invalid("Image upload ID is required.");
+		this.#reapExpired();
 		const upload = this.#uploads.get(value);
 		if (!upload || upload.owner !== owner)
 			throw new TypedControlError("resource_gone", "Image upload is unavailable.");
@@ -337,6 +343,7 @@ export class PromptImageUploadStore {
 			throw new TypedControlError("resource_gone", "Image upload connection is closed.");
 	}
 	#renewBatch(owner: string, id: string, current: Upload): void {
+		this.#reapExpired();
 		if (this.#uploads.get(id) !== current) return;
 		if (current.batchId === undefined) {
 			this.#resetLease(id, current);
@@ -347,8 +354,13 @@ export class PromptImageUploadStore {
 	}
 	#resetLease(id: string, upload: Upload): void {
 		clearTimeout(upload.timer);
+		upload.expiresAt = performance.now() + LEASE_MS;
 		upload.timer = setTimeout(() => this.#remove(id), LEASE_MS);
 		upload.timer.unref?.();
+	}
+	#reapExpired(): void {
+		const now = performance.now();
+		for (const [id, upload] of this.#uploads) if (now >= upload.expiresAt) this.#remove(id);
 	}
 	#remove(id: string): void {
 		const upload = this.#uploads.get(id);
