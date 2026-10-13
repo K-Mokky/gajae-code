@@ -399,12 +399,11 @@ describe("workflow permission policy", () => {
 			repo: { owner: "Yeachan-Heo", repo: "gajae-code" },
 			issue: { number: 6599 },
 		};
-		type ContextType = typeof context;
 		const executeAuthorizationStep = new Function(
 			"github",
 			"context",
 			`return (async () => { ${authorizeScript} })();`,
-		) as (github: GithubStub, context: ContextType) => Promise<string>;
+		) as (github: GithubStub, ctx: typeof context) => Promise<string>;
 
 		expect(await executeAuthorizationStep(github, context)).toBe("authorized");
 		const unrelatedPrefixContext = {
@@ -507,14 +506,12 @@ describe("workflow permission policy", () => {
 		};
 		const context = { repo: { owner: "Yeachan-Heo", repo: "gajae-code" }, issue: { number: 6599 } };
 		const processStub = { env: { REVIEWERS_JSON: '["previous-reviewer"]' } };
-		type ContextType2 = typeof context;
-		type ProcessStubType = typeof processStub;
 		const executeRequestStep = new Function(
 			"github",
 			"context",
 			"process",
 			`return (async () => { ${requestScript} })();`,
-		) as (github: GithubStub, context: ContextType2, processStub: ProcessStubType) => Promise<void>;
+		) as (github: GithubStub, ctx: typeof context, proc: typeof processStub) => Promise<void>;
 
 		await executeRequestStep(github, context, processStub);
 
