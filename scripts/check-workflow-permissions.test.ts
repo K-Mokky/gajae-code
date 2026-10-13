@@ -313,6 +313,47 @@ describe("workflow permission policy", () => {
 		expect([...selected.keys()]).toEqual(["eligible-reviewer"]);
 	});
 
+	test("uses chronological API order when review timestamps tie", async () => {
+		const source = await parsedWorkflow(RE_REVIEW_WORKFLOW);
+		const jobs = documentRecord(source.jobs);
+		const steps = documentRecord(jobs["request-review-on-comment"]).steps as unknown[];
+		const getReviewers = steps.map(documentRecord).find(step => step.id === "get-reviewers");
+		const reviewerScript = documentRecord(documentRecord(getReviewers).with).script as string;
+		const helper = reviewerScript.match(/function latestReviewByUser\(reviews, prAuthor\) \{[\s\S]*?^\}/m);
+		expect(helper).not.toBeNull();
+
+		type Review = {
+			user: { login: string; type: string } | null;
+			state: string;
+			submitted_at: string;
+		};
+		const createLatestReviewByUser = new Function(
+			`${helper?.[0]}\nreturn latestReviewByUser;`,
+		) as () => (reviews: Review[], prAuthor: string | undefined) => Map<string, Review>;
+		const latestReviewByUser = createLatestReviewByUser();
+		const submittedAt = "2026-10-13T00:00:00Z";
+		const cases: Array<{ reviews: Review[]; expectedState: string }> = [
+			{
+				reviews: [
+					{ user: { login: "reviewer", type: "User" }, state: "COMMENTED", submitted_at: submittedAt },
+					{ user: { login: "reviewer", type: "User" }, state: "APPROVED", submitted_at: submittedAt },
+				],
+				expectedState: "APPROVED",
+			},
+			{
+				reviews: [
+					{ user: { login: "reviewer", type: "User" }, state: "APPROVED", submitted_at: submittedAt },
+					{ user: { login: "reviewer", type: "User" }, state: "CHANGES_REQUESTED", submitted_at: submittedAt },
+				],
+				expectedState: "CHANGES_REQUESTED",
+			},
+		];
+
+		for (const { reviews, expectedState } of cases) {
+			expect(latestReviewByUser(reviews, undefined).get("reviewer")?.state).toBe(expectedState);
+		}
+	});
+
 	test("requires the exact command and allows maintainers when the PR author is deleted", async () => {
 		const source = await parsedWorkflow(RE_REVIEW_WORKFLOW);
 		const jobs = documentRecord(source.jobs);
@@ -331,6 +372,7 @@ describe("workflow permission policy", () => {
 			};
 		};
 		let pullRequestLookups = 0;
+		let collaboratorError: (Error & { status: number }) | null = null;
 		const github: GithubStub = {
 			rest: {
 				pulls: {
@@ -339,7 +381,14 @@ describe("workflow permission policy", () => {
 						return { data: { user: null } };
 			},
 			},
-				repos: { getCollaboratorPermissionLevel: async () => ({ data: { permission: "write" } }) },
+				repos: {
+					getCollaboratorPermissionLevel: async () => {
+						if (collaboratorError) {
+							throw collaboratorError;
+						}
+						return { data: { permission: "write" } };
+					},
+				},
 			},
 		};
 		const context = {
@@ -366,6 +415,11 @@ describe("workflow permission policy", () => {
 		};
 		expect(await executeAuthorizationStep(github, unrelatedPrefixContext)).toBe("no-match");
 		expect(pullRequestLookups).toBe(1);
+
+		collaboratorError = Object.assign(new Error("Not Found"), { status: 404 });
+		expect(await executeAuthorizationStep(github, context)).toBe("unauthorized");
+		collaboratorError = Object.assign(new Error("Internal Server Error"), { status: 500 });
+		await expect(executeAuthorizationStep(github, context)).rejects.toBe(collaboratorError);
 	});
 
 	test("re-review filters to requestable reviewers and passes reviewer data through the environment", async () => {

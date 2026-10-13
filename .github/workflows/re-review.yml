@@ -66,7 +66,10 @@ jobs:
                 return 'authorized';
               }
             } catch (error) {
-              console.log('Could not determine permission level:', error.message);
+              if (error.status === 404) {
+                return 'unauthorized';
+              }
+              throw error;
             }
 
             return 'unauthorized';
@@ -120,12 +123,13 @@ jobs:
                   continue;
                 }
 
-                // Keep track of the latest review state for each reviewer
+                // Reviews are returned chronologically. Let the later response
+                // win when timestamps share the same second.
                 if (!reviewerMap.has(reviewer)) {
                   reviewerMap.set(reviewer, review);
                 } else {
                   const existing = reviewerMap.get(reviewer);
-                  if (new Date(review.submitted_at) > new Date(existing.submitted_at)) {
+                  if (new Date(review.submitted_at) >= new Date(existing.submitted_at)) {
                     reviewerMap.set(reviewer, review);
                   }
                 }
