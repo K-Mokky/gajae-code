@@ -3,6 +3,7 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { getBundledModels, writeModelCache } from "@gajae-code/ai";
 import { registerOwnedDeletionRoot } from "../../../scripts/safe-cleanup";
 import { withModelPresetRegistryTestTrust } from "../src/config/internal/model-preset-registry-test-support";
 import {
@@ -360,7 +361,11 @@ describe("signed model preset registry", () => {
 			path.join(data.agentDir, "models.yml"),
 			`providers:
   alibaba-token-plan:
+    auth: none
     streamIdleTimeoutMs: 360000
+    modelOverrides:
+      cached-alibaba-model:
+        streamIdleTimeoutMs: 450000
   configured-provider:
     baseUrl: https://configured.example/v1
     api: openai-completions
@@ -378,7 +383,40 @@ describe("signed model preset registry", () => {
 `,
 		);
 		const authStorage = await AuthStorage.create(path.join(data.agentDir, "auth.db"));
+		const previousAlibabaBaseUrl = Bun.env.ALIBABA_TOKEN_PLAN_BASE_URL;
 		try {
+			Bun.env.ALIBABA_TOKEN_PLAN_BASE_URL = "https://alibaba-cache.example/v1";
+			const seedRegistry = data.run(
+				() =>
+					new ModelRegistry(authStorage, path.join(data.agentDir, "models.yml"), undefined, {
+						automaticRefresh: false,
+					}),
+			);
+			const alibabaTemplate = getBundledModels("alibaba-token-plan").find(
+				model => model.api === "openai-completions",
+			);
+			if (!alibabaTemplate?.baseUrl) throw new Error("Expected a bundled Alibaba Completions model");
+			const cachedModel = { ...alibabaTemplate, id: "cached-alibaba-model", name: "Cached Alibaba model" };
+			const providerBaseUrl = seedRegistry.getProviderBaseUrl("alibaba-token-plan");
+			if (!providerBaseUrl) throw new Error("Expected an Alibaba provider endpoint");
+			const parsedEndpoint = new URL(providerBaseUrl);
+			const endpoint = `${parsedEndpoint.protocol}//${parsedEndpoint.host}${parsedEndpoint.pathname.replace(/\/+$/g, "")}${parsedEndpoint.search}`;
+			const cachedModelProvenance = sha256(
+				`gajae:model-discovery-provenance\0${JSON.stringify({
+					authEvidence: "credentialless:alibaba-token-plan",
+					endpoint,
+				})}`,
+			);
+			writeModelCache(
+				"alibaba-token-plan",
+				Date.now(),
+				[cachedModel],
+				true,
+				"",
+				path.join(data.agentDir, "models.db"),
+				[cachedModel.id],
+				cachedModelProvenance,
+			);
 			const modelRegistry = data.run(
 				() =>
 					new ModelRegistry(authStorage, path.join(data.agentDir, "models.yml"), undefined, {
@@ -414,6 +452,9 @@ describe("signed model preset registry", () => {
 				compat: expect.objectContaining({ supportsDeveloperRole: false }),
 				streamIdleTimeoutMs: 360_000,
 			});
+			expect(modelRegistry.find("alibaba-token-plan", "cached-alibaba-model")).toMatchObject({
+				streamIdleTimeoutMs: 450_000,
+			});
 			expect(
 				modelRegistry
 					.getAll()
@@ -432,6 +473,8 @@ describe("signed model preset registry", () => {
 			);
 		} finally {
 			authStorage.close();
+			if (previousAlibabaBaseUrl === undefined) delete Bun.env.ALIBABA_TOKEN_PLAN_BASE_URL;
+			else Bun.env.ALIBABA_TOKEN_PLAN_BASE_URL = previousAlibabaBaseUrl;
 		}
 		const merged = mergeModelProfiles(
 			{ remote: { required_providers: ["user"], model_mapping: { default: "user/model" } } },

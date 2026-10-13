@@ -854,7 +854,6 @@ function hasMatchingRegistryTransport(left: Model<Api>, right: Model<Api> | Prov
 		left.transport === right.transport &&
 		isDeepStrictEqual(left.requestTransform, right.requestTransform) &&
 		left.cacheRetention === right.cacheRetention &&
-		left.streamIdleTimeoutMs === right.streamIdleTimeoutMs &&
 		left.isOAuth === right.isOAuth
 	);
 }
@@ -3400,10 +3399,7 @@ export class ModelRegistry {
 				const inheritedCompat = explicitTransportMatches
 					? explicitTransport?.compat
 					: commonRegistryTransportCompat(transportTemplates);
-				const streamIdleTimeoutMs =
-					registryModel.streamIdleTimeoutMs ??
-					transportSource.streamIdleTimeoutMs ??
-					explicitTransport?.streamIdleTimeoutMs;
+				const streamIdleTimeoutMs = registryModel.streamIdleTimeoutMs ?? explicitTransport?.streamIdleTimeoutMs;
 				const hydratedRegistryModel = {
 					...registryModel,
 					baseUrl: transportSource.baseUrl!,
