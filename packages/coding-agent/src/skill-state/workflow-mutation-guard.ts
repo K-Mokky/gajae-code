@@ -1803,8 +1803,14 @@ function tempEnvNames(): readonly string[] {
 // The snapshot is the cwd at module import, not a directory created later or a chdir before this module is imported.
 const startupTempSnapshot = projectEnvSnapshot();
 
-function projectTempSnapshots(_cwd: string): ProjectEnvSnapshot[] {
-	return [startupTempSnapshot];
+function projectTempSnapshots(cwd: string): ProjectEnvSnapshot[] {
+	// Check both the cwd's .env and the startup snapshot (for module-import-time cwd).
+	// The cwd's .env catches project-declared TMPDIR in the current working directory.
+	// The startup snapshot is a fallback for when the cwd's .env is deleted or inaccessible
+	// (e.g., after unlink or chdir), and also handles the case where cwd differs from the
+	// module-import-time cwd.
+	const snapshots: ProjectEnvSnapshot[] = [projectEnvSnapshot(cwd), startupTempSnapshot];
+	return snapshots;
 }
 
 /** macOS account temp directory. `getconf` does not read `TMPDIR`. */
