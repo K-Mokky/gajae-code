@@ -2490,12 +2490,19 @@ export class AcpAgent implements Agent {
 		record.pendingPromptAdmission = reservation;
 		try {
 			const query = record.adapter.query("session.progress");
-			void query.catch(() => undefined);
-			const result = await Promise.race([query.then(value => ({ value })), woken.then(() => undefined)]);
+			const result = await Promise.race([
+				query.then(
+					value => ({ value }),
+					error => ({ error }),
+				),
+				woken.then(() => undefined),
+			]);
 			const settlement = reservation.settlement;
-			if (settlement?.kind === "rejected") throw settlement.error;
 			if (settlement?.kind === "cancelled" || reservation.cancelled || !result) return { stopReason: "cancelled" };
-			const text = acpProgressReportText(result.value);
+			if (settlement?.kind === "rejected") throw settlement.error;
+			const queryError = (result as { error?: unknown })?.error;
+			if (queryError) throw queryError;
+			const text = acpProgressReportText((result as { value?: unknown })?.value);
 			await this.#publishSessionUpdate(
 				sessionId,
 				{ sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text } } },
