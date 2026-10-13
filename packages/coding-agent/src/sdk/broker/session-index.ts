@@ -770,7 +770,11 @@ function reduceEvents(
 
 // Global launch bursts may queue behind legitimate long index transactions. Keep
 // this bounded at one minute while the shared lock's exact dead-owner recovery runs.
-const SESSION_INDEX_LOCK_OPTIONS = { retries: 600, retryDelayMs: 100 } as const;
+const SESSION_INDEX_LOCK_OPTIONS = {
+	retries: 600,
+	retryDelayMs: 100,
+	orphanTransitionAgeMs: FILE_LOCK_ORPHAN_TRANSITION_ADOPTION_AGE_MS,
+} as const;
 // Leave one retry interval beyond the transition's safe-adoption age so a fresh
 // ownerless transition can be reclaimed during ordinary startup.
 const SESSION_INDEX_STARTUP_LOCK_WAIT_MS =

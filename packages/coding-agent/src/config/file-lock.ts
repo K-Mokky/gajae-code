@@ -24,6 +24,8 @@ import { nativeProcessBindings } from "@gajae-code/utils/native-process";
 
 export interface FileLockOptions {
 	staleMs?: number;
+	/** Age after which an ownerless removal transition may be adopted; defaults to `staleMs`. */
+	orphanTransitionAgeMs?: number;
 	retries?: number;
 	retryDelayMs?: number;
 	signal?: AbortSignal;
@@ -91,7 +93,10 @@ export function isFileLockAcquireTimeout(error: unknown): error is FileLockAcqui
 }
 
 const DEFAULT_OPTIONS: Required<
-	Omit<FileLockOptions, "ownerHostId" | "previousOwnerHostIds" | "signal" | "onAcquired" | "onContended">
+	Omit<
+		FileLockOptions,
+		"orphanTransitionAgeMs" | "ownerHostId" | "previousOwnerHostIds" | "signal" | "onAcquired" | "onContended"
+	>
 > = {
 	staleMs: 10_000,
 	retries: 50,
@@ -2571,7 +2576,9 @@ export async function acquireFileLock(filePath: string, options: FileLockOptions
 	if (options.previousOwnerHostIds?.some(hostId => !hostId))
 		throw new Error("previousOwnerHostIds must contain only non-empty identities");
 	const opts = { ...DEFAULT_OPTIONS, ...options };
-	const orphanTransitionAgeMs = FILE_LOCK_ORPHAN_TRANSITION_ADOPTION_AGE_MS;
+	const orphanTransitionAgeMs = options.orphanTransitionAgeMs ?? options.staleMs ?? DEFAULT_OPTIONS.staleMs;
+	if (!Number.isFinite(orphanTransitionAgeMs) || orphanTransitionAgeMs < 0)
+		throw new RangeError("orphanTransitionAgeMs must be a finite, non-negative number");
 
 	if (opts.signal?.aborted) throw opts.signal.reason ?? new Error("File lock acquisition aborted");
 	const lockPath = getLockPath(filePath);

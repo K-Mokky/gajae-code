@@ -1098,6 +1098,37 @@ describe("file lock cleanup failure handling (#2478)", () => {
 	);
 
 	test.skipIf(process.platform === "win32")(
+		"reclaims an eight-second orphan transition within the default retry budget",
+		async () => {
+			const lockedFile = path.join(await makeTemp(), "default-transition-age.json");
+			const detachedPath = `${lockedFile}.lock.removing`;
+			await fs.mkdir(detachedPath);
+			// Default callers keep the 10-second stale threshold and 5-second wait budget.
+			const old = new Date(Date.now() - 8_000);
+			await fs.utimes(detachedPath, old, old);
+			let entered = false;
+
+			await withFileLock(lockedFile, async () => {
+				entered = true;
+			});
+
+			expect(entered).toBe(true);
+			expect(await fs.exists(detachedPath)).toBe(false);
+		},
+	);
+
+	test.each([
+		-1,
+		Number.NaN,
+		Number.POSITIVE_INFINITY,
+	])("rejects invalid orphan-transition adoption age %s", async orphanTransitionAgeMs => {
+		const lockedFile = path.join(await makeTemp(), "invalid-transition-age.json");
+		await expect(withFileLock(lockedFile, async () => undefined, { orphanTransitionAgeMs })).rejects.toThrow(
+			"orphanTransitionAgeMs must be a finite, non-negative number",
+		);
+	});
+
+	test.skipIf(process.platform === "win32")(
 		"reclaims a young orphan transition within a longer acquisition budget",
 		async () => {
 			const lockedFile = path.join(await makeTemp(), "short-grace-transition.json");
