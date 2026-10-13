@@ -772,13 +772,30 @@ where
 					}
 				}
 
-				// Classify multibyte input before checking for delimiter.
-				// If we have pending multibyte input, resolve it first.
+				// When we have incomplete multibyte input, we must decide whether to
+				// consume this byte to complete it. The issue: if completing would exceed
+				// the limit, we'd need to unread the byte via HeldInput, which is hidden
+				// from native child processes. Instead, finalize incomplete input without
+				// consuming lookahead bytes: if we have pending at a limit boundary, return.
 				if count.len > 0 {
+					// Check if we're at the character limit already with pending input.
+					// If so, finalize the pending character(s) and return without consuming this byte.
+					if config.char_limit.is_some_and(|limit| count.chars >= limit) {
+						// We're at the limit with pending incomplete bytes.
+						// Finalize them without reading the current byte.
+						// This prevents the byte from being consumed and hidden in HeldInput.
+						match count.finish(None) {
+							Limit::NotReached => {},  // Pending finalized, but still under limit. Treat as complete.
+							Limit::Reached | Limit::Passed(_) => {},  // Already counted in finish().
+						}
+						return Ok(ReadResult::Line(reader.source.decode_line(line)));
+					}
+
+					// We have pending but haven't hit the limit yet.
+					// Try to complete the multibyte sequence with this byte.
 					line.push(byte);
 					raw_backslashes.push(false);
 
-					// Check character limit (based on output length).
 					match count.push(byte, config.char_limit) {
 						Limit::NotReached => continue,  // Byte was consumed as part of multibyte character.
 						Limit::Reached => return Ok(ReadResult::Line(reader.source.decode_line(line))),
@@ -1816,6 +1833,47 @@ mod tests {
 		// Third read: should get 'X'
 		let third = test_command().read_line(input, Vec::<u8>::new(), None, || false)?;
 		assert!(matches!(third, ReadResult::Line(ref text) if text == "X"));
+		Ok(())
+	}
+
+	/// Native child reads after builtin read with malformed UTF-8 and lookahead.
+	/// When read -r -n 1 encounters malformed UTF-8 (0xC3 followed by 0x41),
+	/// it should not consume 0x41 in a way that hides it from external readers.
+	#[test]
+	#[expect(clippy::panic_in_result_fn)]
+	fn test_native_child_sees_bytes_after_malformed_utf8_lookahead() -> anyhow::Result<()> {
+		use std::io::Write;
+
+		let (reader, mut writer) = std::io::pipe()?;
+		let input = OpenFile::from(reader);
+
+		// Input: malformed UTF-8 lead byte, non-continuation byte, newline
+		writer.write_all(&[0xc3, b'A', b'\n'])?;
+		drop(writer);
+
+		let limited = ReadCommand {
+			raw_mode: true,
+			return_after_n_chars: Some(1),
+			..test_command()
+		};
+
+		// First read: -n 1 should read one character (the invalid UTF-8 byte 0xC3)
+		let first = limited.read_line(input.try_clone()?, Vec::<u8>::new(), None, || false)?;
+		let first_text = match first {
+			ReadResult::Line(text) => text,
+			_ => panic!("expected line"),
+		};
+		// The malformed 0xC3 becomes U+FFFD (replacement character)
+		assert_eq!(first_text, "\u{FFFD}");
+
+		// Second read: should get 'A' followed by newline delimiter
+		let second = test_command().read_line(input, Vec::<u8>::new(), None, || false)?;
+		let second_text = match second {
+			ReadResult::Line(text) => text,
+			_ => panic!("expected line"),
+		};
+		// The 0x41 ('A') should be available and processed
+		assert_eq!(second_text, "A");
 		Ok(())
 	}
 }

@@ -68,11 +68,6 @@ impl HeldInput {
 		self.lock_bytes().is_empty()
 	}
 
-	/// Returns a copy of all held bytes without consuming them.
-	pub fn peek_all(&self) -> Vec<u8> {
-		self.lock_bytes().iter().copied().collect()
-	}
-
 	/// Returns the decoder selection shared by builtin readers of this input.
 	pub fn output_decoder_state(&self) -> OutputDecoderState {
 		*self.decoder.lock().unwrap_or_else(PoisonError::into_inner)
