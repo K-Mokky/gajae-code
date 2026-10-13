@@ -313,7 +313,23 @@ export async function launchAuthorizedBrokerSuccessor(
 				expectedBrokerIncarnation = observation.incarnation;
 			}
 		}
-		const discovered = await readBrokerDiscovery(options.agentDir);
+		let discovered: BrokerDiscovery | null;
+		try {
+			discovered = await readBeforeBrokerDeadline(
+				readBrokerDiscovery(options.agentDir),
+				until,
+				"Timed out waiting for broker discovery before successor expiry.",
+			);
+		} catch (error) {
+			if (!(error instanceof BrokerSuccessorDeadlineError)) throw error;
+			return await refuseUnpublishedBrokerSuccessor(
+				child,
+				realBrokerPid,
+				expectedBrokerIncarnation,
+				spawnOutcome.handoff,
+				"publication_timeout",
+			);
+		}
 		if (
 			discovered &&
 			discovered.pid === realBrokerPid &&

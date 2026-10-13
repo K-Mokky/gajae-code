@@ -6,7 +6,7 @@ import { FILE_LOCK_ORPHAN_TRANSITION_ADOPTION_AGE_MS, FileLockAcquireError } fro
 import { Broker } from "../src/sdk/broker/broker";
 import { readBrokerExitRecord, readBrokerStartupExitRecord } from "../src/sdk/broker/broker-exit";
 import { launchAuthorizedBrokerSuccessor, oldOwnerConfirmedExited } from "../src/sdk/broker/daemon-entry";
-import type { BrokerRestartIntentWithIdentity } from "../src/sdk/broker/discovery";
+import type { BrokerDiscovery, BrokerRestartIntentWithIdentity } from "../src/sdk/broker/discovery";
 import * as brokerDiscovery from "../src/sdk/broker/discovery";
 import {
 	brokerRestartIntentPath,
@@ -569,6 +569,52 @@ describe("doctor broker restart protocol", () => {
 			discoveryRead.mockRestore();
 			startupLock.mockRestore();
 			await broker.stop();
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	}, 5_000);
+
+	it("bounds stalled successor discovery reads by the committed lease and reaps the child", async () => {
+		const dir = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-doctor-stalled-publication-"));
+		const requestId = "stalled-successor-publication";
+		const deadlineAt = Date.now() + 1_000;
+		const stalledRead = Promise.withResolvers<BrokerDiscovery | null>();
+		let discoveryReads = 0;
+		let launcher: childProcess.ChildProcess | undefined;
+		await fs.mkdir(path.join(dir, "sdk"), { recursive: true });
+		await fs.writeFile(
+			brokerRestartIntentPath(dir),
+			JSON.stringify({ phase: "committed", requestId, expiresAt: deadlineAt, lease: "successor-lease" }),
+		);
+		const launchMode = spyOn(brokerEnsure, "resolveBrokerLaunchMode").mockReturnValue("posix-trampoline");
+		const launch = spyOn(brokerEnsure, "launchBrokerViaPosixTrampoline").mockImplementation(async () => {
+			launcher = childProcess.spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+			const pid = launcher.pid;
+			if (pid === undefined) throw new Error("successor fixture did not start");
+			const incarnation = brokerDiscovery.brokerProcessIncarnation(pid);
+			if (incarnation === undefined) throw new Error("successor fixture incarnation is unavailable");
+			return { process: launcher, realBrokerPid: pid, realBrokerIncarnation: incarnation, error: undefined };
+		});
+		const discoveryRead = spyOn(brokerDiscovery, "readBrokerDiscovery").mockImplementation(async () => {
+			discoveryReads++;
+			return discoveryReads === 1 ? null : await stalledRead.promise;
+		});
+		try {
+			const result = await launchAuthorizedBrokerSuccessor({
+				agentDir: dir,
+				requestId,
+				deadlineAt,
+				packageGeneration: "test-generation",
+			});
+			expect(result).toMatchObject({ kind: "refused", reason: "publication_timeout" });
+			expect(discoveryReads).toBe(2);
+			expect(Date.now()).toBeLessThan(deadlineAt + 1_000);
+			if (launcher?.pid !== undefined) expect(oldOwnerConfirmedExited(launcher.pid)).toBe(true);
+		} finally {
+			stalledRead.resolve(null);
+			discoveryRead.mockRestore();
+			launch.mockRestore();
+			launchMode.mockRestore();
+			if (launcher?.pid !== undefined && !oldOwnerConfirmedExited(launcher.pid)) launcher.kill("SIGKILL");
 			await fs.rm(dir, { recursive: true, force: true });
 		}
 	}, 5_000);
