@@ -253,6 +253,34 @@ describe("environment API-key source names", () => {
 		});
 	});
 
+	it("omits external-account ADC until its subject-token file is readable", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-vertex-adc-subject-file-"));
+		tempDirs.push(dir);
+		const credentialPath = path.join(dir, "adc.json");
+		const subjectTokenPath = path.join(dir, "subject-token");
+		await Bun.write(
+			credentialPath,
+			JSON.stringify({
+				type: "external_account",
+				audience: "//iam.googleapis.com/projects/test/locations/global/workloadIdentityPools/test/providers/test",
+				subject_token_type: "urn:ietf:params:oauth:token-type:jwt",
+				credential_source: { file: subjectTokenPath },
+			}),
+		);
+		delete Bun.env.GOOGLE_CLOUD_API_KEY;
+		Bun.env.GOOGLE_APPLICATION_CREDENTIALS = credentialPath;
+		Bun.env.GOOGLE_CLOUD_PROJECT = "test-project";
+		Bun.env.GOOGLE_CLOUD_LOCATION = "us-central1";
+
+		expect(await getEnvApiKeyCredentialSource("google-vertex")).toBeUndefined();
+
+		await Bun.write(subjectTokenPath, "subject-token-value");
+		expect(await getEnvApiKeyCredentialSource("google-vertex")).toEqual({
+			kind: "google-adc",
+			source: "explicit-file",
+		});
+	});
+
 	it("enumerates a Vertex API key before valid ADC", async () => {
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-vertex-key-adc-"));
 		tempDirs.push(dir);

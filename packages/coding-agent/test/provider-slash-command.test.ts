@@ -1111,10 +1111,34 @@ describe("provider slash command", () => {
 			delete Bun.env.GOOGLE_CLOUD_API_KEY;
 			Bun.env.GOOGLE_CLOUD_PROJECT = "status-project";
 			Bun.env.GOOGLE_CLOUD_LOCATION = "us-central1";
+			await Bun.write(
+				path.join(tempAgentDir, "models.yml"),
+				YAML.stringify({
+					providers: {
+						"status-custom-vertex": {
+							api: "google-vertex",
+							baseUrl: "https://aiplatform.googleapis.com",
+							auth: "none",
+							models: [
+								{
+									id: "gemini-3-flash-preview",
+									name: "Custom Vertex Model",
+									reasoning: false,
+									input: ["text"],
+									cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+									contextWindow: 100_000,
+									maxTokens: 8_000,
+								},
+							],
+						},
+					},
+				}),
+			);
 			const authStorage = await AuthStorage.create(path.join(tempAgentDir, "auth.db"));
 			authStorages.push(authStorage);
 			const registry = new ModelRegistry(authStorage, path.join(tempAgentDir, "models.yml"));
 			modelRegistries.push(registry);
+			await registry.refresh("offline");
 			const outputs: string[] = [];
 			const command = BUILTIN_SLASH_COMMANDS_INTERNAL.find(entry => entry.name === "provider");
 			await command?.handle?.({ name: "provider", args: "status", text: "/provider status" }, {
@@ -1123,6 +1147,7 @@ describe("provider slash command", () => {
 			} as unknown as SlashCommandRuntime);
 
 			expect(outputs.join("\n")).toContain("google-vertex: Google ADC (metadata server)");
+			expect(outputs.join("\n")).toContain("status-custom-vertex: Google ADC (metadata server)");
 			expect(requestedUrls).toContain(metadataServiceAccountUrl);
 			expect(requestedUrls).not.toContain(
 				"http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token",

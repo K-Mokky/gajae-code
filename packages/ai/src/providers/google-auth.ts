@@ -15,6 +15,8 @@
  */
 
 import { Buffer } from "node:buffer";
+import * as fsSync from "node:fs";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { $credentialEnv, $envpos, getTrustedHomeDir, isEnoent, logger } from "@gajae-code/utils";
 import type { FetchImpl } from "../types";
@@ -203,12 +205,20 @@ function isSupportedAdcFileCredentials(value: unknown): value is AdcFileCredenti
 	}
 }
 
-function isAvailableAdcFileCredentialSource(credentials: AdcFileCredentials): boolean {
-	return (
-		credentials.type !== "external_account" ||
-		!("executable" in credentials.credential_source) ||
-		$credentialEnv("GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES") === "1"
-	);
+async function isAvailableAdcFileCredentialSource(credentials: AdcFileCredentials): Promise<boolean> {
+	if (credentials.type !== "external_account") return true;
+	const source = credentials.credential_source;
+	if ("executable" in source) return $credentialEnv("GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES") === "1";
+	if ("file" in source) {
+		try {
+			if (!(await fs.stat(source.file)).isFile()) return false;
+			await fs.access(source.file, fsSync.constants.R_OK);
+			return true;
+		} catch {
+			return false;
+		}
+	}
+	return true;
 }
 
 /** Test seam: the ADC credentials file path as resolved from trusted env. */
@@ -389,7 +399,7 @@ export async function getVertexCredentialSource(options?: {
 		return undefined;
 	}
 	if (adc) {
-		return isAvailableAdcFileCredentialSource(adc.creds) ? classifyCredentialSource(adc.source) : undefined;
+		return (await isAvailableAdcFileCredentialSource(adc.creds)) ? classifyCredentialSource(adc.source) : undefined;
 	}
 
 	const fetchImpl = options?.fetch ?? globalThis.fetch.bind(globalThis);

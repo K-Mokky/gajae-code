@@ -304,7 +304,6 @@ export async function buildProviderAuthStatusText(session: ProviderAuthStatusSes
 	// Status must reflect rotating env-backed keys even before another model selection runs.
 	modelRegistry.getAvailable();
 	const googleVertexSources = await getEnvApiKeyCredentialSources("google-vertex");
-	const googleVertexSource = googleVertexSources[0];
 	const bedrockCredentialSources = await getEnvApiKeyCredentialSources("amazon-bedrock");
 	const authStorage = modelRegistry.authStorage;
 	const owner = modelRegistry.getAuthStorageOwner();
@@ -320,11 +319,14 @@ export async function buildProviderAuthStatusText(session: ProviderAuthStatusSes
 	}
 	const bedrockRouteProviders = new Set<string>();
 	const bedrockOnlyProviders = new Set<string>();
+	const googleVertexRouteProviders = new Set<string>();
 	for (const [provider, apis] of providerApis) {
+		if (apis.has("google-vertex")) googleVertexRouteProviders.add(provider);
 		if (!apis.has("bedrock-converse-stream")) continue;
 		bedrockRouteProviders.add(provider);
 		if (apis.size === 1) bedrockOnlyProviders.add(provider);
 	}
+	if (!providerApis.has("google-vertex")) googleVertexRouteProviders.add("google-vertex");
 	if (!providerApis.has("amazon-bedrock")) {
 		bedrockRouteProviders.add("amazon-bedrock");
 		bedrockOnlyProviders.add("amazon-bedrock");
@@ -340,11 +342,12 @@ export async function buildProviderAuthStatusText(session: ProviderAuthStatusSes
 			provider =>
 				authStorage.hasSessionCredentialUnavailable(provider, session.credentialSessionId) ||
 				storedProviders.has(provider) ||
-				(provider === "google-vertex"
-					? googleVertexSource !== undefined ||
+				(googleVertexRouteProviders.has(provider)
+					? googleVertexSources.length > 0 ||
 						modelRegistry.getProviderConfigApiKeySources(provider).length > 0 ||
 						hasRuntimeProviderCredential(modelRegistry, provider) ||
-						authStorage.hasRuntimeApiKey(provider)
+						authStorage.hasRuntimeApiKey(provider) ||
+						authStorage.hasAuth(provider, session.credentialSessionId, { owner })
 					: bedrockRouteProviders.has(provider)
 						? bedrockCredentialSources.length > 0 ||
 							authStorage.hasAuth(provider, session.credentialSessionId, { owner })
@@ -358,12 +361,11 @@ export async function buildProviderAuthStatusText(session: ProviderAuthStatusSes
 		const entries = snapshot.credentials.filter(entry => resolveOAuthStorageProvider(entry.provider) === provider);
 		const usesBedrockResolver = bedrockOnlyProviders.has(provider);
 		const hasBedrockRoute = bedrockRouteProviders.has(provider);
-		const environmentSources =
-			provider === "google-vertex"
-				? googleVertexSources
-				: usesBedrockResolver
-					? bedrockCredentialSources
-					: await getEnvApiKeyCredentialSources(provider);
+		const environmentSources = googleVertexRouteProviders.has(provider)
+			? googleVertexSources
+			: usesBedrockResolver
+				? bedrockCredentialSources
+				: await getEnvApiKeyCredentialSources(provider);
 		const activeType = authStorage.getEffectiveCredentialType(provider, session.credentialSessionId, { owner });
 		const sources = collectSources(provider, entries, modelRegistry, environmentSources, usesBedrockResolver);
 		const sessionCredentialUnavailable = authStorage.hasSessionCredentialUnavailable(
