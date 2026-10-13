@@ -889,6 +889,7 @@ export async function withBrokerStartupLock<T>(
 		{
 			retries: Math.ceil(lockWaitMs / SPAWN_LOCK_RETRY_DELAY_MS),
 			retryDelayMs: SPAWN_LOCK_RETRY_DELAY_MS,
+			orphanTransitionAgeMs: FILE_LOCK_ORPHAN_TRANSITION_ADOPTION_AGE_MS,
 			onAcquired: options.onAcquired,
 			onContended: options.onContended,
 			...hostIdentity,
