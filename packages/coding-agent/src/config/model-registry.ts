@@ -731,19 +731,30 @@ function validateProviderConfiguration(
 			configuredModel || !effectiveDiscovery || !discoveryProviderApi
 				? undefined
 				: resolveModelApiOverrideFromDiscovery(discoveryProviderApi, effectiveDiscovery, modelId, undefined, false);
+		const bundledModelApi = getKnownProviderModelApi(providerName, modelId);
+		// An OpenAI models-list row may override both its ID-based family and the
+		// provider default via `owned_by`. Defer ambiguous timeout validation until
+		// discovery supplies that metadata; applying the override validates the
+		// resolved model API before it can take effect.
+		const deferTimeoutValidation =
+			!configuredModel &&
+			effectiveDiscovery?.type === "openai-models-list" &&
+			discoveryTimeoutApi === undefined &&
+			bundledModelApi === undefined;
 		const effectiveApi =
 			configuredModel?.api ??
 			(configuredModel ? config.api : undefined) ??
 			discoveryApi ??
-			getKnownProviderModelApi(providerName, modelId) ??
+			bundledModelApi ??
 			config.api;
 		const effectiveTimeoutApi =
 			configuredModel?.api ??
 			(configuredModel ? config.api : undefined) ??
 			discoveryTimeoutApi ??
-			getKnownProviderModelApi(providerName, modelId) ??
-			config.api ??
-			(config.openaiCompat ? "openai-completions" : undefined);
+			bundledModelApi ??
+			(deferTimeoutValidation
+				? undefined
+				: (config.api ?? (config.openaiCompat ? "openai-completions" : undefined)));
 		if (override.compat?.supportsResponsesSessionAffinity !== undefined) {
 			assertResponsesSessionAffinitySupported(
 				providerName,
@@ -760,7 +771,7 @@ function validateProviderConfiguration(
 					effectiveTimeoutApi,
 					'modelOverrides "streamIdleTimeoutMs"',
 				);
-			} else {
+			} else if (!deferTimeoutValidation) {
 				assertRequestTransformSupportedForKnownProvider(
 					providerName,
 					`modelOverrides ${modelId} "streamIdleTimeoutMs"`,

@@ -6875,6 +6875,36 @@ describe("ModelRegistry", () => {
 		});
 	});
 
+	test("defers discovered timeout overrides when the provider default conflicts with the catalog owner", async () => {
+		writeRawModelsConfig({
+			providers: {
+				proxy: {
+					baseUrl: "https://proxy.example.com/v1",
+					apiKey: "TEST_KEY",
+					api: "anthropic-messages",
+					discovery: { type: "openai-models-list" },
+					modelOverrides: { "gpt-5": { streamIdleTimeoutMs: 300_000 } },
+				},
+			},
+		});
+
+		const registry = new ModelRegistry(authStorage, modelsJsonPath);
+		expect(registry.getError()).toBeUndefined();
+		using _hook = hookFetch(
+			() =>
+				new Response(JSON.stringify({ data: [{ id: "gpt-5", owned_by: "openai" }] }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				}),
+		);
+		await registry.refreshProvider("proxy", "online");
+
+		expect(registry.find("proxy", "gpt-5")).toMatchObject({
+			api: "openai-completions",
+			streamIdleTimeoutMs: 300_000,
+		});
+	});
+
 	test("rejects discovered idle timeout overrides when the catalog resolves to Anthropic", async () => {
 		writeRawModelsConfig({
 			providers: {
