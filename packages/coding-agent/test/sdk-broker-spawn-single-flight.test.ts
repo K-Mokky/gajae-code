@@ -507,9 +507,9 @@ it("spends the parent discovery budget one composition leg at a time", async () 
 	const clock = virtualBudgetClock();
 	const testProcessIncarnation = brokerProcessIncarnation(process.pid);
 	if (!testProcessIncarnation) throw new Error("test process incarnation unavailable");
-	// An incumbent of the wrong generation that never retires: a pid this process
-	// cannot match by incarnation keeps retirement on its polling path and out of
-	// process.kill entirely, and the unroutable url refuses its shutdown request.
+	// The wrong generation forces retirement of a live same-process owner. Its
+	// incarnation keeps cleanup away from process.kill, and the unroutable URL
+	// refuses shutdown while discovery remains published during the polling leg.
 	const unretirable: BrokerDiscovery = {
 		version: 1,
 		protocolVersion: 3,
@@ -527,11 +527,12 @@ it("spends the parent discovery budget one composition leg at a time", async () 
 	// Model discovery-owner retirement transition: return unretirable for a while,
 	// then null when retirement is about to complete, to show the discovery owner has retired.
 	const retirementDeadline = clock.timing.now() + BROKER_DISCOVERY_BUDGET.staleRetirementMs;
+	const retirementTransitionAt = retirementDeadline - 50;
 	const readSpy = spyOn(brokerDiscovery, "readBrokerDiscovery").mockImplementation(() => {
 		// Keep returning unretirable while inside retirement window.
 		// Once enough time has passed, return null to complete retirement.
 		const now = clock.timing.now();
-		return Promise.resolve(now < retirementDeadline ? unretirable : null);
+		return Promise.resolve(now < retirementTransitionAt ? unretirable : null);
 	});
 	setEnsureBrokerTimingForTest(clock.timing);
 	try {
@@ -540,14 +541,14 @@ it("spends the parent discovery budget one composition leg at a time", async () 
 			{ agentDir: dir },
 			budgetStart + BROKER_DISCOVERY_BUDGET.discoveryMs,
 		);
-		// Leg one gives up on an incumbent that never goes away (discovery always shows the same owner),
-		// and spends exactly its own leg doing so -- never the caller's whole budget.
+		// Leg one spends its retirement budget polling the same owner until the
+		// mocked discovery transition completes, without consuming the caller's full budget.
 		expect(reconciled).toBeUndefined();
-		expect(clock.elapsedMs()).toBe(BROKER_DISCOVERY_BUDGET.staleRetirementMs);
+		expect(clock.elapsedMs()).toBe(BROKER_DISCOVERY_BUDGET.staleRetirementMs - 50);
 		// What survives retirement is still a full child-fence wait plus one
 		// publication attempt; that remainder is what the wall-clock case stages.
 		expect(budgetStart + BROKER_DISCOVERY_BUDGET.discoveryMs - clock.timing.now()).toBe(
-			BROKER_DISCOVERY_BUDGET.startupLockWaitMs + BROKER_DISCOVERY_BUDGET.publicationMs,
+			BROKER_DISCOVERY_BUDGET.startupLockWaitMs + BROKER_DISCOVERY_BUDGET.publicationMs + 50,
 		);
 		// The fence itself grants its holder retirement plus that publication.
 		const fenceDeadline = await withBrokerStartupLock(dir, deadline => Promise.resolve(deadline));
@@ -558,6 +559,50 @@ it("spends the parent discovery budget one composition leg at a time", async () 
 		await fs.rm(dir, { recursive: true, force: true });
 	}
 }, 15_000);
+
+it("bounds same-process retirement reads and preserves both fail-closed errors", async () => {
+	const dir = await temp();
+	const incarnation = brokerProcessIncarnation(process.pid);
+	if (!incarnation) throw new Error("test process incarnation unavailable");
+	const stale: BrokerDiscovery = {
+		version: 1,
+		protocolVersion: 3,
+		packageGeneration: "pr6667-incompatible-generation",
+		ownerId: "pr6667-stalled-discovery-owner",
+		pid: process.pid,
+		incarnation,
+		host: "127.0.0.1",
+		port: 1,
+		url: "ws://127.0.0.1:1",
+		token: "pr6667-stalled-discovery-token",
+		startedAt: Date.now(),
+		heartbeatAt: Date.now(),
+	};
+	const stalledRead = Promise.withResolvers<BrokerDiscovery | null>();
+	let reads = 0;
+	const readSpy = spyOn(brokerDiscovery, "readBrokerDiscovery").mockImplementation(() => {
+		reads += 1;
+		return reads < 4 ? Promise.resolve(stale) : stalledRead.promise;
+	});
+	try {
+		const failure = await reconcileBrokerGenerationForStartup({ agentDir: dir }, Date.now() + 1_000).then(
+			() => undefined,
+			error => (error instanceof Error ? error : new Error(String(error))),
+		);
+		expect(failure).toBeInstanceOf(AggregateError);
+		if (!(failure instanceof AggregateError)) throw new Error("expected aggregated retirement failure");
+		expect(failure.message).toContain("shutdown RPC and discovery retirement both failed");
+		expect(failure.errors).toHaveLength(2);
+		expect(failure.errors[1]).toBeInstanceOf(Error);
+		if (!(failure.errors[1] instanceof Error)) throw new Error("expected bounded discovery read failure");
+		expect(failure.errors[1].message).toBe("Timed out reading SDK broker discovery.");
+		expect(reads).toBe(4);
+	} finally {
+		readSpy.mockRestore();
+		stalledRead.resolve(null);
+		await fs.rm(dir, { recursive: true, force: true });
+	}
+}, 5_000);
 
 it("stale broker client teardown cannot extend an expired retirement deadline", async () => {
 	const stalled = Promise.withResolvers<void>();
