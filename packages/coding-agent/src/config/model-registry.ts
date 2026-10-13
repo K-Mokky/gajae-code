@@ -1099,7 +1099,10 @@ export function mergeDiscoveredModel<TApi extends Api>(
 ): Model<TApi> {
 	if (existing) {
 		const streamIdleTimeoutMs =
-			model.streamIdleTimeoutMs ?? existing.streamIdleTimeoutMs ?? providerOverride?.streamIdleTimeoutMs;
+			model.streamIdleTimeoutMs ??
+			(isRequestTransformApi(model.api)
+				? (existing.streamIdleTimeoutMs ?? providerOverride?.streamIdleTimeoutMs)
+				: undefined);
 		return {
 			...model,
 			baseUrl: providerOverride?.baseUrl ?? model.baseUrl ?? existing.baseUrl,
@@ -1113,7 +1116,9 @@ export function mergeDiscoveredModel<TApi extends Api>(
 		};
 	}
 	if (providerOverride) {
-		const streamIdleTimeoutMs = model.streamIdleTimeoutMs ?? providerOverride.streamIdleTimeoutMs;
+		const streamIdleTimeoutMs =
+			model.streamIdleTimeoutMs ??
+			(isRequestTransformApi(model.api) ? providerOverride.streamIdleTimeoutMs : undefined);
 		return {
 			...model,
 			baseUrl: providerOverride.baseUrl ?? model.baseUrl,
@@ -1436,7 +1441,8 @@ function applyModelOverride(model: Model<Api>, override: ModelOverride): Model<A
 	if (override.input !== undefined) result.input = override.input as ("text" | "image")[];
 	if (override.output !== undefined) result.output = override.output as ("text" | "image")[];
 	if (override.cacheRetention !== undefined) result.cacheRetention = override.cacheRetention;
-	if (override.streamIdleTimeoutMs !== undefined) result.streamIdleTimeoutMs = override.streamIdleTimeoutMs;
+	if (override.streamIdleTimeoutMs !== undefined && isRequestTransformApi(model.api))
+		result.streamIdleTimeoutMs = override.streamIdleTimeoutMs;
 	const contextWindowOverride = toPositiveNumberOrUndefined(override.contextWindow);
 	if (contextWindowOverride !== undefined) {
 		result.contextWindow = contextWindowOverride;
@@ -5845,7 +5851,8 @@ export class ModelRegistry {
 			delete overrideHeaders[GENERATED_AUTH_HEADER];
 		}
 		const headers = mergeAuthHeader(overrideHeaders, canInject, canInject ? override.apiKey : undefined);
-		const streamIdleTimeoutMs = entry.streamIdleTimeoutMs ?? override.streamIdleTimeoutMs;
+		const streamIdleTimeoutMs =
+			entry.streamIdleTimeoutMs ?? (isRequestTransformApi(entry.api) ? override.streamIdleTimeoutMs : undefined);
 		const result = {
 			...entry,
 			compat: mergeProviderCompat(entry.compat, override.compat),

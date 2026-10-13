@@ -6704,6 +6704,45 @@ describe("ModelRegistry", () => {
 		);
 	});
 
+	test("does not apply provider stream idle timeouts to discovered Anthropic routes", async () => {
+		writeRawModelsConfig({
+			providers: {
+				proxy: {
+					baseUrl: "https://proxy.example.com/v1",
+					auth: "none",
+					api: "openai-completions",
+					streamIdleTimeoutMs: 300_000,
+					modelOverrides: { "opaque-model": { streamIdleTimeoutMs: 450_000 } },
+					discovery: {
+						type: "openai-models-list",
+						apiByModelPrefix: { "claude-": "anthropic-messages" },
+					},
+				},
+			},
+		});
+
+		const registry = new ModelRegistry(authStorage, modelsJsonPath);
+		using _hook = hookFetch(
+			() =>
+				new Response(
+					JSON.stringify({
+						data: [{ id: "claude-sonnet-4" }, { id: "gpt-5" }, { id: "opaque-model", owned_by: "anthropic" }],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				),
+		);
+		await registry.refreshProvider("proxy", "online");
+
+		expect(registry.find("proxy", "claude-sonnet-4")).toMatchObject({ api: "anthropic-messages" });
+		expect(registry.find("proxy", "claude-sonnet-4")).not.toHaveProperty("streamIdleTimeoutMs");
+		expect(registry.find("proxy", "opaque-model")).toMatchObject({ api: "anthropic-messages" });
+		expect(registry.find("proxy", "opaque-model")).not.toHaveProperty("streamIdleTimeoutMs");
+		expect(registry.find("proxy", "gpt-5")).toMatchObject({
+			api: "openai-completions",
+			streamIdleTimeoutMs: 300_000,
+		});
+	});
+
 	test("rejects model-configured stream idle timeouts on pi-native transport", () => {
 		const timeoutConfigs: Array<Record<string, unknown>> = [
 			{ streamIdleTimeoutMs: 300_000 },
