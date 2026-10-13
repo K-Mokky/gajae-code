@@ -244,6 +244,7 @@ export async function launchAuthorizedBrokerSuccessor(
 				},
 				{ deadlineAt: options.deadlineAt },
 			);
+			startupLockFailure = undefined;
 			if (spawnOutcome.kind === "retry") {
 				// The validation read exhausted this short lock operation, not the
 				// committed lease. The lock has been released; revalidate under a fresh

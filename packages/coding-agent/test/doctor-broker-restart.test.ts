@@ -707,6 +707,44 @@ describe("doctor broker restart protocol", () => {
 		}
 	});
 
+	it("clears an old lock refusal after reacquiring the startup fence", async () => {
+		const dir = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-doctor-reacquired-lock-"));
+		let now = Date.now();
+		const deadlineAt = now + 60;
+		const dateNow = spyOn(Date, "now").mockImplementation(() => now);
+		const sleep = spyOn(Bun, "sleep").mockImplementation(async milliseconds => {
+			now += typeof milliseconds === "number" ? milliseconds : Math.max(0, milliseconds.getTime() - now);
+		});
+		let attempts = 0;
+		const lock = spyOn(brokerEnsure, "withBrokerStartupLock").mockImplementation(async (_agentDir, operation) => {
+			attempts++;
+			if (attempts === 1)
+				throw new FileLockAcquireError(
+					path.join(dir, "sdk", "broker.startup"),
+					`${path.join(dir, "sdk", "broker.startup")}.lock`,
+					180,
+					"startup lock was temporarily unavailable",
+				);
+			return await operation(Date.now() - 1);
+		});
+		try {
+			const result = await launchAuthorizedBrokerSuccessor({
+				agentDir: dir,
+				requestId: "reacquired-lock-deadline",
+				deadlineAt,
+				packageGeneration: "test-generation",
+			});
+			expect(result).toMatchObject({ kind: "refused", reason: "deadline_elapsed" });
+			expect(attempts).toBe(2);
+			expect(now).toBe(deadlineAt);
+		} finally {
+			lock.mockRestore();
+			sleep.mockRestore();
+			dateNow.mockRestore();
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
 	it("accepts a published successor when handoff release completes after its deadline", async () => {
 		const { dir, broker, discovery } = await fixture();
 		const requestId = "late-handoff-release";
