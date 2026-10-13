@@ -35,7 +35,7 @@ export type AuthorizedBrokerSuccessorResult =
 			realBrokerPid: number | undefined;
 			realBrokerIncarnation: string | undefined;
 			handoff: BrokerLaunchHandoff | undefined;
-			discovery?: BrokerDiscovery;
+			discovery: BrokerDiscovery;
 	  }
 	| {
 			kind: "refused";
@@ -47,6 +47,16 @@ export type AuthorizedBrokerSuccessorResult =
 				| "publication_timeout"
 				| "startup_lock_unavailable";
 			detail?: string;
+	  };
+
+type BrokerSuccessorSpawnOutcome =
+	| Exclude<AuthorizedBrokerSuccessorResult, { kind: "spawned" }>
+	| {
+			kind: "spawned";
+			child: childProcess.ChildProcess;
+			realBrokerPid: number | undefined;
+			realBrokerIncarnation: string | undefined;
+			handoff: BrokerLaunchHandoff | undefined;
 	  };
 
 const SUCCESSOR_SPAWN_POLL_MS = 25;
@@ -116,7 +126,7 @@ async function refuseUnpublishedBrokerSuccessor(
 export async function launchAuthorizedBrokerSuccessor(
 	options: AuthorizedBrokerSuccessorOptions,
 ): Promise<AuthorizedBrokerSuccessorResult> {
-	let spawnOutcome: AuthorizedBrokerSuccessorResult;
+	let spawnOutcome: BrokerSuccessorSpawnOutcome;
 	let successorDeadlineAt = options.deadlineAt;
 	let startupLockFailure: FileLockAcquireError | undefined;
 	for (;;) {

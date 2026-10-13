@@ -234,12 +234,11 @@ export async function restartBrokerForDoctor(options: DoctorBrokerRestartOptions
 	});
 	if (successor.kind === "refused")
 		return { kind: "successor_refused", requestId, oldOwner, reason: successor.reason, detail: successor.detail };
-	const successorDiscovery = successor.kind === "adopted" ? successor.discovery : successor.discovery!;
 	return {
 		kind: "restarted",
 		requestId,
 		oldOwner,
-		successor: successorDiscovery,
+		successor: successor.discovery,
 		adopted: successor.kind === "adopted",
 	};
 }
