@@ -685,7 +685,14 @@ where
 	let mut pending_backslash = false;
 
 	loop {
-		let event = reader.read_event(is_cancelled)?;
+		let event = match reader.read_event(is_cancelled) {
+			Ok(event) => event,
+			Err(error) => {
+				// Bytes already consumed may have selected ACP for this stream.
+				reader.source.set_decoder_state(count.state);
+				return Err(error);
+			},
+		};
 
 		match event {
 			InputEvent::Eof => {
@@ -1194,6 +1201,33 @@ mod tests {
 		fn clone_box(&self) -> Box<dyn brush_core::openfiles::Stream> {
 			Box::new(self.clone())
 		}
+	}
+
+	#[cfg(windows)]
+	#[test]
+	#[expect(clippy::panic_in_result_fn)]
+	fn cancellation_after_acp_selection_persists_for_the_next_read() -> anyhow::Result<()> {
+		let cursor = std::sync::Arc::new(std::sync::Mutex::new(std::io::Cursor::new(vec![
+			0xff, 0xd2, 0xbb, b'\n',
+		])));
+		let input = OpenFile::Stream(
+			Box::new(CursorStream(std::sync::Arc::clone(&cursor))),
+			HeldInput::default(),
+		);
+		let held = input.held_input().expect("stream holds decoder state").clone();
+		held.set_output_decoder_state(OutputDecoderState::with_fallback_codepage(936));
+
+		let interrupted = test_command().read_line(input.try_clone()?, Vec::<u8>::new(), None, || {
+			cursor.lock().expect("cursor lock").position() > 0
+		});
+		assert!(matches!(interrupted, Err(ref error) if error.to_string() == "interrupted"));
+		assert!(held.output_decoder_state().uses_acp());
+
+		assert!(matches!(
+			test_command().read_line(input, Vec::<u8>::new(), None, || false)?,
+			ReadResult::Line(ref text) if text == "一"
+		));
+		Ok(())
 	}
 
 	#[cfg(windows)]
