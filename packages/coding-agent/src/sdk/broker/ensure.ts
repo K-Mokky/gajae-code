@@ -710,7 +710,9 @@ const BROKER_SESSION_ENV_PREFIXES = [
 	"GJC_MANAGED_OWNER_",
 ] as const;
 
-export interface BrokerStartupLockTestHooks {
+export interface BrokerStartupLockOptions {
+	/** Stop waiting for the startup lock at this absolute wall-clock deadline. */
+	deadlineAt?: number;
 	onAcquired?: () => void;
 	onContended?: () => void;
 }
@@ -857,17 +859,29 @@ async function acquireSpawnLock(agentDir: string, options: SpawnLockOptions = {}
 export async function withBrokerStartupLock<T>(
 	agentDir: string,
 	operation: (deadline: number) => Promise<T>,
-	testHooks: BrokerStartupLockTestHooks = {},
+	options: BrokerStartupLockOptions = {},
 ): Promise<T> {
+	if (options.deadlineAt !== undefined && !Number.isFinite(options.deadlineAt))
+		throw new TypeError("Broker startup-lock deadline must be finite.");
 	const hostIdentity = await brokerLockHostIdentity(agentDir);
+	const now = ensureBrokerTiming.now();
+	const lockWaitMs =
+		options.deadlineAt === undefined
+			? STARTUP_LOCK_WAIT_MS
+			: Math.max(0, Math.min(STARTUP_LOCK_WAIT_MS, options.deadlineAt - now));
 	return withFileLock(
 		path.join(agentDir, "sdk", STARTUP_LOCK_TARGET_NAME),
-		() => operation(ensureBrokerTiming.now() + BROKER_DISCOVERY_BUDGET.fenceOperationMs),
+		() => {
+			const operationDeadline = ensureBrokerTiming.now() + BROKER_DISCOVERY_BUDGET.fenceOperationMs;
+			return operation(
+				options.deadlineAt === undefined ? operationDeadline : Math.min(operationDeadline, options.deadlineAt),
+			);
+		},
 		{
-			retries: Math.ceil(STARTUP_LOCK_WAIT_MS / SPAWN_LOCK_RETRY_DELAY_MS),
+			retries: Math.ceil(lockWaitMs / SPAWN_LOCK_RETRY_DELAY_MS),
 			retryDelayMs: SPAWN_LOCK_RETRY_DELAY_MS,
-			onAcquired: testHooks.onAcquired,
-			onContended: testHooks.onContended,
+			onAcquired: options.onAcquired,
+			onContended: options.onContended,
 			...hostIdentity,
 		},
 	);

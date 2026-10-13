@@ -1294,7 +1294,7 @@ describe("file lock cleanup failure handling (#2478)", () => {
 			const lockedFile = path.join(await makeTemp(), "orphan-adoption-retry.json");
 			const detachedPath = `${lockedFile}.lock.removing`;
 			await fs.mkdir(detachedPath);
-			const old = new Date(Date.now() - 120_000);
+			const old = new Date(Date.now() - 20_000);
 			await fs.utimes(detachedPath, old, old);
 			let removalAttempts = 0;
 			FileLockTestHooks.nativeQuarantineBindings = () => ({

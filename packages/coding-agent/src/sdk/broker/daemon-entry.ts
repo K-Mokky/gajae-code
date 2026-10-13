@@ -102,85 +102,98 @@ export async function launchAuthorizedBrokerSuccessor(
 	options: AuthorizedBrokerSuccessorOptions,
 ): Promise<AuthorizedBrokerSuccessorResult> {
 	let spawnOutcome: AuthorizedBrokerSuccessorResult;
-	try {
-		spawnOutcome = await withBrokerStartupLock(options.agentDir, async deadline => {
-			if (Date.now() >= Math.min(deadline, options.deadlineAt))
-				return { kind: "refused" as const, reason: "deadline_elapsed" as const };
-			// Only a durably COMMITTED intent for this exact requestId authorizes a
-			// spawn. A prepared-but-not-committed or absent intent means the owner
-			// side of the protocol never reached its commit boundary, so no successor
-			// may exist yet -- spawning here would double-launch a broker the owner
-			// might still be about to retire cleanly on its own.
-			const intent = await readBrokerRestartIntent(options.agentDir);
-			if (intent?.phase !== "committed" || intent.requestId !== options.requestId)
-				return { kind: "refused" as const, reason: "intent_not_committed" as const };
-			const existing = await readBrokerDiscovery(options.agentDir);
-			if (
-				existing &&
-				existing.packageGeneration === options.packageGeneration &&
-				existing.restartRequestId === options.requestId
-			)
-				return { kind: "adopted" as const, discovery: existing };
-			const command = resolveSdkInternalSpawnCommand("broker-internal");
-			try {
-				const env = { ...command.env, GJC_BROKER_RESTART_REQUEST: options.requestId };
-				const launchMode = resolveBrokerLaunchMode(process.platform, "discovery");
-				if (launchMode === "direct") throw new Error("Broker successor launch cannot use a fixture child.");
-				const timeoutMs = Math.max(0, Math.min(deadline, options.deadlineAt) - Date.now());
-				const launched =
-					launchMode === "windows-hop"
-						? await launchBrokerViaHop(
-								{
-									command: {
-										file: command.file,
-										args: [...command.args, "--agent-dir", options.agentDir],
-									},
-									...(command.kind === "bun-source" ? { cwd: command.cwd } : {}),
-								},
-								{
-									env,
-									cwd: command.kind === "bun-source" ? command.cwd : undefined,
-									timeoutMs,
-								},
-							)
-						: await launchBrokerViaPosixTrampoline(options.agentDir, {
-								env,
-								...(command.kind === "bun-source" ? { cwd: command.cwd } : {}),
-								timeoutMs,
-								retainChildUntilPublication: launchMode === "darwin-trampoline",
+	let successorDeadlineAt = options.deadlineAt;
+	for (;;) {
+		if (Date.now() >= successorDeadlineAt) return { kind: "refused", reason: "deadline_elapsed" };
+		try {
+			spawnOutcome = await withBrokerStartupLock(
+				options.agentDir,
+				async deadline => {
+					if (Date.now() >= Math.min(deadline, successorDeadlineAt))
+						return { kind: "refused" as const, reason: "deadline_elapsed" as const };
+					// A matching published owner proves this request already succeeded; the
+					// broker may have cleared its committed intent after publication.
+					const existing = await readBrokerDiscovery(options.agentDir);
+					if (
+						existing &&
+						existing.packageGeneration === options.packageGeneration &&
+						existing.restartRequestId === options.requestId
+					)
+						return { kind: "adopted" as const, discovery: existing };
+					// Only a durably COMMITTED intent for this exact requestId authorizes a
+					// new spawn. Re-read it on every lock attempt so a retry cannot use stale
+					// authorization or launch a duplicate successor.
+					const intent = await readBrokerRestartIntent(options.agentDir);
+					if (intent?.phase !== "committed" || intent.requestId !== options.requestId)
+						return { kind: "refused" as const, reason: "intent_not_committed" as const };
+					if (intent.expiresAt <= Date.now())
+						return { kind: "refused" as const, reason: "deadline_elapsed" as const };
+					successorDeadlineAt = Math.min(successorDeadlineAt, intent.expiresAt);
+					if (Date.now() >= successorDeadlineAt)
+						return { kind: "refused" as const, reason: "deadline_elapsed" as const };
+					const command = resolveSdkInternalSpawnCommand("broker-internal");
+					try {
+						const env = {
+							...command.env,
+							GJC_BROKER_RESTART_REQUEST: options.requestId,
+							GJC_BROKER_RESTART_DEADLINE: String(intent.expiresAt),
+						};
+						const launchMode = resolveBrokerLaunchMode(process.platform, "discovery");
+						if (launchMode === "direct") throw new Error("Broker successor launch cannot use a fixture child.");
+						const timeoutMs = Math.max(0, Math.min(deadline, successorDeadlineAt) - Date.now());
+						const launched =
+							launchMode === "windows-hop"
+								? await launchBrokerViaHop(
+										{
+											command: {
+												file: command.file,
+												args: [...command.args, "--agent-dir", options.agentDir],
+											},
+											...(command.kind === "bun-source" ? { cwd: command.cwd } : {}),
+										},
+										{
+											env,
+											cwd: command.kind === "bun-source" ? command.cwd : undefined,
+											timeoutMs,
+										},
+									)
+								: await launchBrokerViaPosixTrampoline(options.agentDir, {
+										env,
+										...(command.kind === "bun-source" ? { cwd: command.cwd } : {}),
+										timeoutMs,
+										retainChildUntilPublication: launchMode === "darwin-trampoline",
+									});
+						if (launched.error) return await refuseFailedBrokerLaunch(launched);
+						if (launched.realBrokerPid === undefined || launched.realBrokerIncarnation === undefined)
+							return await refuseFailedBrokerLaunch({
+								...launched,
+								error: new Error("Broker launcher returned no verified process identity."),
 							});
-				if (launched.error) return await refuseFailedBrokerLaunch(launched);
-				if (launched.realBrokerPid === undefined || launched.realBrokerIncarnation === undefined)
-					return await refuseFailedBrokerLaunch({
-						...launched,
-						error: new Error("Broker launcher returned no verified process identity."),
-					});
-				const child: childProcess.ChildProcess = launched.process;
-				if (!launched.handoff) child.unref();
-				return {
-					kind: "spawned" as const,
-					child,
-					realBrokerPid: launched.realBrokerPid,
-					realBrokerIncarnation: launched.realBrokerIncarnation,
-					handoff: launched.handoff,
-				};
-			} catch (spawnError) {
-				return {
-					kind: "refused" as const,
-					reason: "spawn_failed" as const,
-					detail: spawnError instanceof Error ? spawnError.message : String(spawnError),
-				};
-			}
-		});
-	} catch (lockError) {
-		if (lockError instanceof FileLockAcquireError) {
-			return {
-				kind: "refused",
-				reason: "startup_lock_unavailable",
-				detail: lockError.message,
-			};
+						const child: childProcess.ChildProcess = launched.process;
+						if (!launched.handoff) child.unref();
+						return {
+							kind: "spawned" as const,
+							child,
+							realBrokerPid: launched.realBrokerPid,
+							realBrokerIncarnation: launched.realBrokerIncarnation,
+							handoff: launched.handoff,
+						};
+					} catch (spawnError) {
+						return {
+							kind: "refused" as const,
+							reason: "spawn_failed" as const,
+							detail: spawnError instanceof Error ? spawnError.message : String(spawnError),
+						};
+					}
+				},
+				{ deadlineAt: options.deadlineAt },
+			);
+			break;
+		} catch (lockError) {
+			if (!(lockError instanceof FileLockAcquireError)) throw lockError;
+			if (Date.now() >= successorDeadlineAt) return { kind: "refused", reason: "deadline_elapsed" };
+			await Bun.sleep(Math.min(50, options.deadlineAt - Date.now()));
 		}
-		throw lockError;
 	}
 	if (spawnOutcome.kind !== "spawned") return spawnOutcome;
 	const { child } = spawnOutcome;
@@ -190,8 +203,16 @@ export async function launchAuthorizedBrokerSuccessor(
 		(realBrokerPid !== undefined && realBrokerPid === child.pid
 			? brokerProcessIncarnation(realBrokerPid)
 			: undefined);
-	const until = Math.min(Date.now() + Math.max(1, options.deadlineAt - Date.now()), options.deadlineAt);
+	const until = Math.min(Date.now() + Math.max(1, successorDeadlineAt - Date.now()), successorDeadlineAt);
 	for (;;) {
+		if (Date.now() >= until)
+			return await refuseUnpublishedBrokerSuccessor(
+				child,
+				realBrokerPid,
+				expectedBrokerIncarnation,
+				spawnOutcome.handoff,
+				"publication_timeout",
+			);
 		// On Darwin the trampoline remains alive until publication; elsewhere the
 		// launcher exits after handoff. The broker identity remains authoritative.
 		const failedSpawn = child.signalCode !== null || (child.exitCode !== null && child.exitCode !== 0);
@@ -234,6 +255,14 @@ export async function launchAuthorizedBrokerSuccessor(
 			discovered.packageGeneration === options.packageGeneration &&
 			discovered.restartRequestId === options.requestId
 		) {
+			if (Date.now() >= until)
+				return await refuseUnpublishedBrokerSuccessor(
+					child,
+					realBrokerPid,
+					expectedBrokerIncarnation,
+					spawnOutcome.handoff,
+					"publication_timeout",
+				);
 			try {
 				await spawnOutcome.handoff?.release();
 			} catch (error) {
@@ -251,6 +280,14 @@ export async function launchAuthorizedBrokerSuccessor(
 					}`,
 				};
 			}
+			if (Date.now() >= until)
+				return await refuseUnpublishedBrokerSuccessor(
+					child,
+					realBrokerPid,
+					expectedBrokerIncarnation,
+					spawnOutcome.handoff,
+					"publication_timeout",
+				);
 			return {
 				kind: "spawned" as const,
 				child,

@@ -696,6 +696,45 @@ it("kills a broker bootstrap that outlives the startup fence deadline", async ()
 	}
 }, 15_000);
 
+it("bounds authorized child fence acquisition by the committed restart expiry", async () => {
+	const dir = await temp();
+	const requestId = "fence-expiry";
+	const expiresAt = Date.now() + 2_000;
+	await fs.mkdir(path.join(dir, "sdk"), { recursive: true });
+	await fs.writeFile(
+		brokerDiscovery.brokerRestartIntentPath(dir),
+		JSON.stringify({ phase: "committed", requestId, expiresAt, lease: "fence-expiry-lease" }),
+	);
+	try {
+		await withBrokerStartupLock(
+			dir,
+			async () => {
+				const child = Bun.spawn([process.execPath, "run", cli, "sdk", "broker-internal", "--agent-dir", dir], {
+					cwd: import.meta.dir,
+					stdin: "ignore",
+					stdout: "ignore",
+					stderr: "pipe",
+					env: {
+						...process.env,
+						GJC_BROKER_RESTART_REQUEST: requestId,
+						GJC_BROKER_RESTART_DEADLINE: String(expiresAt),
+					},
+				});
+				const [code] = await Promise.all([child.exited, new Response(child.stderr).text()]);
+				expect(code).toBe(1);
+				expect(await readBrokerStartupExitRecord(dir)).toMatchObject({
+					mode: "startup",
+					reason: "startup-lock-unavailable",
+					exitCode: 1,
+				});
+			},
+			{ deadlineAt: expiresAt },
+		);
+	} finally {
+		await fs.rm(dir, { recursive: true, force: true });
+	}
+}, 5_000);
+
 it("records a startup exit when acquisition is blocked by a retained removal transition", async () => {
 	const dir = await temp();
 	const blockingLockPath = path.join(dir, "sdk", "broker.startup.lock.removing");
@@ -731,7 +770,7 @@ it("records a startup exit when acquisition is blocked by a retained removal tra
 	}
 });
 
-it("records a typed startup-lock refusal when the session-index lock times out", async () => {
+it("retries session-index acquisition timeouts within the startup fence before refusing", async () => {
 	const dir = await temp();
 	const indexDir = path.join(dir, "sdk", "sessions");
 	const blockingLockPath = path.join(indexDir, "index.jsonl.lock");
@@ -746,6 +785,8 @@ it("records a typed startup-lock refusal when the session-index lock times out",
 			code: "acquire_timeout",
 			lockPath: blockingLockPath,
 		});
+		expect(start).toHaveBeenCalledTimes(3);
+		expect(stop).toHaveBeenCalledTimes(3);
 		expect(await readBrokerStartupExitRecord(dir)).toMatchObject({
 			mode: "startup",
 			reason: "startup-lock-unavailable",
@@ -758,6 +799,30 @@ it("records a typed startup-lock refusal when the session-index lock times out",
 	} finally {
 		stop.mockRestore();
 		start.mockRestore();
+		await fs.rm(dir, { recursive: true, force: true });
+	}
+});
+
+it("refuses untagged startup when a restart intent cannot be read", async () => {
+	const dir = await temp();
+	const requestId = "transient-intent-read";
+	const priorRequestId = process.env.GJC_BROKER_RESTART_REQUEST;
+	process.env.GJC_BROKER_RESTART_REQUEST = requestId;
+	const readIntent = spyOn(brokerDiscovery, "readBrokerRestartIntent").mockRejectedValue(
+		new Error("injected transient intent read failure"),
+	);
+	const start = spyOn(Broker.prototype, "start");
+	try {
+		const command = new Sdk(["broker-internal", "--agent-dir", dir], {} as never);
+		await expect(command.run()).rejects.toThrow("refusing untagged startup");
+		expect(readIntent).toHaveBeenCalledTimes(1);
+		expect(start).not.toHaveBeenCalled();
+		expect(await brokerDiscovery.readBrokerDiscovery(dir)).toBeNull();
+	} finally {
+		if (priorRequestId === undefined) delete process.env.GJC_BROKER_RESTART_REQUEST;
+		else process.env.GJC_BROKER_RESTART_REQUEST = priorRequestId;
+		start.mockRestore();
+		readIntent.mockRestore();
 		await fs.rm(dir, { recursive: true, force: true });
 	}
 });

@@ -29,7 +29,11 @@ import {
 	type BrokerStartupExitWriteStatus,
 	writeBrokerStartupExitRecordBounded,
 } from "../sdk/broker/broker-exit";
-import { readBrokerDiscovery, readBrokerRestartIntent } from "../sdk/broker/discovery";
+import {
+	type BrokerRestartIntentWithIdentity,
+	readBrokerDiscovery,
+	readBrokerRestartIntent,
+} from "../sdk/broker/discovery";
 import { type EndpointFileRead, readEndpointFile } from "../sdk/broker/endpoint-authority";
 import {
 	BROKER_DISCOVERY_BUDGET,
@@ -1853,7 +1857,13 @@ async function runSdkInternal(internal: SdkInternalArgv, publicBrokerRun = false
 		if (startupExitLogged) return;
 		startupExitLogged = true;
 		const level = record.exitCode === 1 ? "error" : "warn";
-		if (record.exitCode === 1) logger.error("sdk broker: startup watchdog forcing exit", record);
+		if (record.exitCode === 1)
+			logger.error(
+				record.reason === "startup-deadline"
+					? "sdk broker: startup watchdog forcing exit"
+					: "sdk broker: startup refused",
+				record,
+			);
 		else logger.warn("sdk broker: startup interrupted", record);
 		process.stderr.write(`${JSON.stringify({ level, message, ...record })}\n`);
 	};
@@ -1873,9 +1883,11 @@ async function runSdkInternal(internal: SdkInternalArgv, publicBrokerRun = false
 		const message =
 			reason === "startup-lock-blocked" && blockingLockPath
 				? `SDK broker startup blocked by retained removal transition ${blockingLockPath}.`
-				: reason === "startup-deadline"
-					? `SDK broker startup exceeded its ${timeoutMs}ms fence deadline.`
-					: `SDK broker startup interrupted by ${signal} before readiness.`;
+				: reason === "startup-lock-unavailable"
+					? `SDK broker startup could not acquire ${blockingLockPath ?? "a required lock"}.`
+					: reason === "startup-deadline"
+						? `SDK broker startup exceeded its ${timeoutMs}ms fence deadline.`
+						: `SDK broker startup interrupted by ${signal} before readiness.`;
 		writeStartupExitLog(exitRecord, message);
 		startupExitTask = (async () => {
 			const exitRecordWrite = await beginStartupExitRecordWrite(exitRecord);
@@ -1931,68 +1943,136 @@ async function runSdkInternal(internal: SdkInternalArgv, publicBrokerRun = false
 	};
 	let startupFenceAcquired = false;
 	try {
+		const restartRequestEnv = process.env.GJC_BROKER_RESTART_REQUEST;
+		const requestIdEnv =
+			typeof restartRequestEnv === "string" && /^[A-Za-z0-9_-]{1,256}$/.test(restartRequestEnv)
+				? restartRequestEnv
+				: undefined;
+		const restartDeadlineEnv = process.env.GJC_BROKER_RESTART_DEADLINE;
+		let restartDeadlineAt: number | undefined;
+		if (restartDeadlineEnv !== undefined) {
+			const parsedDeadlineAt = Number(restartDeadlineEnv);
+			if (
+				requestIdEnv === undefined ||
+				!/^[0-9]{1,16}$/.test(restartDeadlineEnv) ||
+				!Number.isSafeInteger(parsedDeadlineAt) ||
+				parsedDeadlineAt <= Date.now()
+			)
+				throw new Error("Invalid SDK broker restart deadline; refusing successor startup.");
+			restartDeadlineAt = parsedDeadlineAt;
+		}
+		const MAX_SESSION_INDEX_TIMEOUT_RETRIES = 2;
+		let sessionIndexTimeoutRetries = 0;
+		let activeStartupDeadlineAt = 0;
 		const startupOperation = async (deadline: number): Promise<Broker | undefined> => {
+			for (;;) {
+				activeStartupDeadlineAt = deadline;
+				try {
+					return await singleStartupAttempt(deadline);
+				} catch (error) {
+					if (
+						!(error instanceof FileLockAcquireError) ||
+						!startupFenceAcquired ||
+						error.code !== "acquire_timeout" ||
+						path.resolve(error.filePath) !==
+							path.resolve(path.join(agentDir, "sdk", "sessions", "index.jsonl")) ||
+						sessionIndexTimeoutRetries >= MAX_SESSION_INDEX_TIMEOUT_RETRIES
+					)
+						throw error;
+					sessionIndexTimeoutRetries++;
+					const backoffMs = 100 * 2 ** (sessionIndexTimeoutRetries - 1);
+					if (Date.now() + backoffMs >= activeStartupDeadlineAt) throw error;
+					const failedBroker = broker;
+					if (failedBroker) {
+						try {
+							await failedBroker.stop({ kind: "startup-failure" });
+						} catch (cleanupError) {
+							throw new AggregateError(
+								[error, cleanupError],
+								"Session-index startup retry could not clean up the failed broker candidate.",
+							);
+						}
+						if (broker === failedBroker) broker = undefined;
+						if (runningBroker === failedBroker) runningBroker = undefined;
+					}
+					candidateStartTask = undefined;
+					logger.debug("sdk broker: session-index lock timeout, retrying startup", {
+						reason: "session-index-timeout-retry",
+						attempt: sessionIndexTimeoutRetries,
+						backoffMs,
+					});
+					await Bun.sleep(backoffMs);
+				}
+			}
+		};
+		const singleStartupAttempt = async (deadline: number): Promise<Broker | undefined> => {
 			const remainingMs = Math.max(1, deadline - Date.now());
 			const testWatchdogMs = Number(process.env.GJC_SDK_TEST_BROKER_STARTUP_WATCHDOG_MS ?? 0);
 			const ordinaryWatchdogMs =
 				Number.isSafeInteger(testWatchdogMs) && testWatchdogMs > 0 && testWatchdogMs <= remainingMs
 					? testWatchdogMs
 					: remainingMs;
-
-			// Validate the restart intent early to determine the actual watchdog deadline.
-			// This must happen before arming the watchdog so we use the correct deadline.
-			const restartRequestEnv = process.env.GJC_BROKER_RESTART_REQUEST;
-			const requestIdEnv =
-				typeof restartRequestEnv === "string" && /^[A-Za-z0-9_-]{1,256}$/.test(restartRequestEnv)
-					? restartRequestEnv
-					: undefined;
-
 			let restartRequestId: string | undefined;
+			let startupDeadlineAt = deadline;
 			let effectiveWatchdogMs = ordinaryWatchdogMs;
-
-			if (requestIdEnv !== undefined) {
-				try {
-					const intent = await readBrokerRestartIntent(agentDir);
-					if (
-						intent &&
-						intent.phase === "committed" &&
-						intent.requestId === requestIdEnv &&
-						intent.expiresAt > Date.now()
-					) {
-						restartRequestId = requestIdEnv;
-						// Convert the epoch-based expiresAt deadline to monotonic clock domain.
-						// Intent expiresAt is Date.now()-based; remaining time until expiry is
-						// (expiresAt - Date.now()); add that to performance.now() to get the
-						// monotonic deadline. Leave 1 second headroom for checkpoint writes.
-						const remainingSuccessorMs = Math.max(1, intent.expiresAt - Date.now() - 1_000);
-						if (remainingSuccessorMs > effectiveWatchdogMs) {
-							effectiveWatchdogMs = remainingSuccessorMs;
+			let startupCheckpointDeadline = performance.now() + Math.max(1, effectiveWatchdogMs - 1_000);
+			const armStartupWatchdog = (): NodeJS.Timeout =>
+				setTimeout(() => {
+					startupAbortController.abort();
+					void exitDuringStartup("startup-deadline", 1, null, effectiveWatchdogMs).then(async started => {
+						if (!started) {
+							// A prior startup signal owns the exit cause; its postmortem callback
+							// returns after bounded cleanup and preserves the signal status.
+							return;
 						}
-					}
-				} catch {
-					// Ignore read failures; proceed without restart request ID.
-				}
-			}
-
-			const startupCheckpointDeadline = performance.now() + effectiveWatchdogMs - 1_000;
-			const startupWatchdog = setTimeout(() => {
-				startupAbortController.abort();
-				void exitDuringStartup("startup-deadline", 1, null, effectiveWatchdogMs).then(async started => {
-					if (!started) {
-						// A prior startup signal owns the exit cause; its postmortem callback
-						// returns after bounded cleanup and preserves the signal status.
-						return;
-					}
-					await waitForStartupAbortCleanup();
-					process.exit(1);
-				});
-			}, effectiveWatchdogMs);
+						await waitForStartupAbortCleanup();
+						process.exit(1);
+					});
+				}, effectiveWatchdogMs);
+			let startupWatchdog = armStartupWatchdog();
 			try {
+				if (requestIdEnv !== undefined) {
+					let restartIntent: BrokerRestartIntentWithIdentity | null;
+					try {
+						restartIntent = await readBrokerRestartIntent(agentDir);
+					} catch (error) {
+						throw new Error("Could not validate SDK broker restart intent; refusing untagged startup.", {
+							cause: error,
+						});
+					}
+					if (
+						restartDeadlineAt !== undefined &&
+						(restartIntent?.phase !== "committed" ||
+							restartIntent.requestId !== requestIdEnv ||
+							restartIntent.expiresAt !== restartDeadlineAt)
+					)
+						throw new Error("Could not validate SDK broker restart deadline; refusing successor startup.");
+					if (restartIntent?.requestId === requestIdEnv) {
+						if (restartIntent.phase !== "committed")
+							throw new Error("SDK broker restart intent is not committed; refusing successor startup.");
+						const remainingSuccessorMs = restartIntent.expiresAt - Date.now();
+						if (remainingSuccessorMs <= 0)
+							throw new Error("SDK broker restart intent expired; refusing untagged startup.");
+						restartRequestId = requestIdEnv;
+						startupDeadlineAt = restartDeadlineAt ?? restartIntent.expiresAt;
+						activeStartupDeadlineAt = startupDeadlineAt;
+						effectiveWatchdogMs =
+							Number.isSafeInteger(testWatchdogMs) &&
+							testWatchdogMs > 0 &&
+							testWatchdogMs <= remainingSuccessorMs
+								? testWatchdogMs
+								: remainingSuccessorMs;
+						clearTimeout(startupWatchdog);
+						startupCheckpointDeadline = performance.now() + Math.max(1, effectiveWatchdogMs - 1_000);
+						startupWatchdog = armStartupWatchdog();
+					}
+				}
+				if (startupAbortController.signal.aborted) return undefined;
 				// `gjc sdk broker run` never retires another owner, even one this generation cannot
 				// reuse: any live incumbent is a refusal. Autostart repairs unusable generations.
 				const existing = publicBrokerRun
 					? ((await readBrokerDiscovery(agentDir)) ?? undefined)
-					: await reconcileBrokerGenerationForStartup({ agentDir }, deadline);
+					: await reconcileBrokerGenerationForStartup({ agentDir }, startupDeadlineAt);
 				if (startupAbortController.signal.aborted) return undefined;
 				if (existing) {
 					logger.info("sdk broker: startup reused an existing owner", {
@@ -2029,8 +2109,8 @@ async function runSdkInternal(internal: SdkInternalArgv, publicBrokerRun = false
 				// launcher-supplied environment variable; it is validated here and handed
 				// to Broker as a typed setting, never read a second time inside broker.ts
 				// from process.env directly.
-				// Note: restartRequestId and watchdog deadline were already validated earlier
-				// before arming the watchdog.
+				// Restart authorization is revalidated before constructing the broker; the
+				// watchdog was already armed before any intent-file I/O.
 				const effectiveCheckpointDeadline = startupCheckpointDeadline;
 				const testPostPublicationDelayMs = Number(process.env.GJC_SDK_TEST_BROKER_POST_PUBLICATION_DELAY_MS ?? 0);
 				const startupPostPublicationDelayMs =
@@ -2108,6 +2188,7 @@ async function runSdkInternal(internal: SdkInternalArgv, publicBrokerRun = false
 			}
 		};
 		broker = await withBrokerStartupLock(agentDir, startupOperation, {
+			...(restartDeadlineAt === undefined ? {} : { deadlineAt: restartDeadlineAt }),
 			onAcquired: () => {
 				startupFenceAcquired = true;
 				void emitBrokerStartupTestSignal("fence-acquired");

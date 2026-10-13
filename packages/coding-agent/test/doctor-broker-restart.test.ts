@@ -1,13 +1,18 @@
 import { describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import path from "node:path";
-import { type NativeExactUnlinkResult, snapshotDirectoryTree } from "@gajae-code/natives";
-import { FileLockTestHooks } from "../src/config/file-lock";
+import { FileLockAcquireError } from "../src/config/file-lock";
 import { Broker } from "../src/sdk/broker/broker";
 import { readBrokerExitRecord, readBrokerStartupExitRecord } from "../src/sdk/broker/broker-exit";
 import { launchAuthorizedBrokerSuccessor, oldOwnerConfirmedExited } from "../src/sdk/broker/daemon-entry";
-import { brokerRestartIntentPath, publishBrokerDiscovery, readBrokerRestartIntent } from "../src/sdk/broker/discovery";
+import {
+	brokerRestartIntentPath,
+	publishBrokerDiscovery,
+	readBrokerDiscovery,
+	readBrokerRestartIntent,
+} from "../src/sdk/broker/discovery";
 import { restartBrokerForDoctor } from "../src/sdk/broker/doctor-restart";
+import * as brokerEnsure from "../src/sdk/broker/ensure";
 
 async function fixture() {
 	const dir = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-doctor-restart-"));
@@ -378,16 +383,83 @@ describe("doctor broker restart protocol", () => {
 		if (cleanupFailed) throw cleanupError;
 	}, 45_000);
 
-	it("ignores stale restart request ID when no matching committed intent exists", async () => {
-		const { dir, broker } = await fixture();
-		// Verify no restart intent exists
-		expect(await readBrokerRestartIntent(dir)).toBeNull();
-		await broker.stop();
-		await fs.rm(dir, { recursive: true, force: true });
-		// This test verifies that the bootstrap logic ignores stale GJC_BROKER_RESTART_REQUEST
-		// environment variables when there is no matching committed intent, preventing
-		// them from unexpectedly extending the session-index lock acquisition deadline.
-	});
+	it("does not publish an authorized successor after a short committed lease expires", async () => {
+		const { dir, broker, discovery } = await fixture();
+		const lockPath = path.join(dir, "sdk", "sessions", "index.jsonl.lock");
+		const requestId = "doctor-short-index-lock";
+		let successorPid: number | undefined;
+		let cleanupError: unknown;
+		try {
+			const prepared = await broker.prepareRestart({
+				ownerId: discovery.ownerId,
+				generation: discovery.packageGeneration,
+				pid: discovery.pid,
+				incarnation: discovery.incarnation,
+				requestId,
+				deadlineAt: Date.now() + 8_000,
+			});
+			expect(prepared.ok).toBe(true);
+			if (!prepared.ok) return;
+			const lease = prepared.result as { lease: string; occupancyEpoch: number; expiresAt: number };
+			const committed = await broker.commitRestart({
+				ownerId: discovery.ownerId,
+				generation: discovery.packageGeneration,
+				pid: discovery.pid,
+				incarnation: discovery.incarnation,
+				requestId,
+				deadlineAt: lease.expiresAt,
+				lease: lease.lease,
+				occupancyEpoch: lease.occupancyEpoch,
+			});
+			expect(committed.ok).toBe(true);
+			if (!committed.ok) return;
+			await broker.completion;
+
+			await fs.mkdir(lockPath, { recursive: true });
+			await fs.writeFile(
+				path.join(lockPath, "info"),
+				JSON.stringify({ pid: process.pid, timestamp: Date.now(), owner_token: "live-short-index-owner" }),
+			);
+			const outcome = await launchAuthorizedBrokerSuccessor({
+				agentDir: dir,
+				requestId,
+				deadlineAt: lease.expiresAt,
+				packageGeneration: discovery.packageGeneration,
+			});
+			if (outcome.kind === "spawned") successorPid = outcome.realBrokerPid ?? outcome.discovery?.pid;
+			expect(outcome.kind).toBe("refused");
+			if (outcome.kind === "refused")
+				expect(["spawn_exited_before_publication", "publication_timeout"]).toContain(outcome.reason);
+			expect(Date.now()).toBeLessThanOrEqual(lease.expiresAt + 1_000);
+			expect(await readBrokerDiscovery(dir)).toBeNull();
+			expect(await readBrokerRestartIntent(dir)).toMatchObject({ phase: "committed", requestId });
+		} finally {
+			await fs.rm(lockPath, { recursive: true, force: true });
+			const startupExit = await readBrokerStartupExitRecord(dir);
+			successorPid ??= startupExit?.pid;
+			if (successorPid !== undefined && !oldOwnerConfirmedExited(successorPid)) {
+				try {
+					process.kill(successorPid, "SIGTERM");
+				} catch (error) {
+					if ((error as NodeJS.ErrnoException).code !== "ESRCH") cleanupError = error;
+				}
+				const stopDeadline = Date.now() + 2_000;
+				while (Date.now() < stopDeadline && !oldOwnerConfirmedExited(successorPid)) await Bun.sleep(25);
+				if (!oldOwnerConfirmedExited(successorPid) && process.platform !== "win32") {
+					try {
+						process.kill(successorPid, "SIGKILL");
+					} catch (error) {
+						if ((error as NodeJS.ErrnoException).code !== "ESRCH") cleanupError = error;
+					}
+					const killDeadline = Date.now() + 1_000;
+					while (Date.now() < killDeadline && !oldOwnerConfirmedExited(successorPid)) await Bun.sleep(25);
+				}
+			}
+			await broker.stop();
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+		if (cleanupError !== undefined) throw cleanupError;
+	}, 18_000);
 
 	it("restartBrokerForDoctor refuses in attach-only mode and leaves the live owner untouched", async () => {
 		const { dir, broker, discovery } = await fixture();
@@ -436,31 +508,86 @@ describe("doctor broker restart protocol", () => {
 		if (result.kind === "refused") expect(result.reason).toBe("intent_not_committed");
 	});
 
-	it("launchAuthorizedBrokerSuccessor maps a retained orphan transition to a startup-lock refusal", async () => {
+	it("retries a retained startup transition and revalidates the committed successor", async () => {
 		const dir = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-doctor-orphan-lock-"));
-		const transitionPath = path.join(dir, "sdk", "broker.startup.lock.removing");
-		await fs.mkdir(transitionPath, { recursive: true });
+		const requestId = "retained-orphan-lock";
+		const expiresAt = Date.now() + 30_000;
+		await fs.mkdir(path.join(dir, "sdk"), { recursive: true });
 		await fs.writeFile(
-			path.join(transitionPath, "info"),
-			JSON.stringify({ pid: 525_252, timestamp: Date.now() - 120_000, owner_token: "dead-owner" }),
+			brokerRestartIntentPath(dir),
+			JSON.stringify({ phase: "committed", requestId, expiresAt, lease: "successor-lease" }),
 		);
-		FileLockTestHooks.nativeQuarantineBindings = () => ({
-			snapshotDirectoryTree,
-			exactRemoveDirectoryTree: () => ({ ok: false, code: "identity_mismatch" }) as NativeExactUnlinkResult,
-		});
-		const sleep = spyOn(Bun, "sleep").mockImplementation(async () => undefined);
+		const broker = new Broker({ agentDir: dir, restartRequestId: requestId });
+		const discovery = await broker.start();
+		const transitionPath = path.join(dir, "sdk", "broker.startup.lock.removing");
+		let attempts = 0;
+		const lock = spyOn(brokerEnsure, "withBrokerStartupLock").mockImplementation(
+			async (_agentDir, operation, lockOptions) => {
+				attempts++;
+				expect(lockOptions?.deadlineAt).toBe(expiresAt);
+				if (attempts === 1)
+					throw new FileLockAcquireError(
+						path.join(dir, "sdk", "broker.startup"),
+						`${path.join(dir, "sdk", "broker.startup")}.lock`,
+						180,
+						`orphan transition retained at ${transitionPath}`,
+						"orphan_transition",
+						transitionPath,
+					);
+				return await operation(Date.now() + 20_000);
+			},
+		);
 		try {
 			const result = await launchAuthorizedBrokerSuccessor({
 				agentDir: dir,
-				requestId: "retained-orphan-lock",
-				deadlineAt: Date.now() + 30_000,
+				requestId,
+				deadlineAt: expiresAt,
+				packageGeneration: discovery.packageGeneration,
+			});
+			expect(attempts).toBe(2);
+			expect(result).toMatchObject({
+				kind: "adopted",
+				discovery: { ownerId: discovery.ownerId, restartRequestId: requestId },
+			});
+		} finally {
+			lock.mockRestore();
+			await broker.stop();
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("stops retrying startup-lock acquisition at the committed deadline", async () => {
+		const dir = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-doctor-deadline-"));
+		let now = Date.now();
+		const deadlineAt = now + 100;
+		const dateNow = spyOn(Date, "now").mockImplementation(() => now);
+		const sleep = spyOn(Bun, "sleep").mockImplementation(async milliseconds => {
+			now += typeof milliseconds === "number" ? milliseconds : Math.max(0, milliseconds.getTime() - now);
+		});
+		const lock = spyOn(brokerEnsure, "withBrokerStartupLock").mockRejectedValue(
+			new FileLockAcquireError(
+				path.join(dir, "sdk", "broker.startup"),
+				`${path.join(dir, "sdk", "broker.startup")}.lock`,
+				180,
+				"orphan transition retained",
+				"orphan_transition",
+				path.join(dir, "sdk", "broker.startup.lock.removing"),
+			),
+		);
+		try {
+			const result = await launchAuthorizedBrokerSuccessor({
+				agentDir: dir,
+				requestId: "deadline-lock-retry",
+				deadlineAt,
 				packageGeneration: "test-generation",
 			});
-			expect(result).toMatchObject({ kind: "refused", reason: "startup_lock_unavailable" });
-			if (result.kind === "refused") expect(result.detail).toContain("blocked by retained removal transition");
+			expect(result).toMatchObject({ kind: "refused", reason: "deadline_elapsed" });
+			expect(lock).toHaveBeenCalledTimes(2);
+			expect(now).toBe(deadlineAt);
 		} finally {
+			lock.mockRestore();
 			sleep.mockRestore();
-			FileLockTestHooks.nativeQuarantineBindings = undefined;
+			dateNow.mockRestore();
 			await fs.rm(dir, { recursive: true, force: true });
 		}
 	});
