@@ -2577,7 +2577,9 @@ export interface PtyStartOptions {
 export declare function ptyTimeoutCount(): bigint
 
 /**
- * Rasterize SVG/SVGZ bytes into a bounded PNG without resolving local files.
+ * Rasterize bounded SVG/SVGZ bytes into a PNG without resolving local files.
+ * DTD/entity declarations and SVG image elements are rejected rather than
+ * allowing unbounded expansion or silently returning an incomplete preview.
  *
  * Conversion runs on the native blocking pool so parsing and rendering do not
  * stall the JavaScript event loop.
