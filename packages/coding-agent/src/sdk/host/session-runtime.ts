@@ -2925,7 +2925,7 @@ function createControlSurface(
 	) => void,
 	armPromptDeadline: (correlation: InvocationCorrelation) => void,
 	steerReconciliation: KindAwareReconciliation,
-	imageUploads: PromptImageUploadStore,
+	imageUploads?: PromptImageUploadStore,
 	onPromotedTurn?: (
 		kind: InvocationKind,
 		correlation: InvocationCorrelation,
@@ -4728,9 +4728,7 @@ function createControlSurface(
 		retryLast: () => typed("retry.last"),
 		retryNow: () => typed("retry.now"),
 		backgroundBash: () => typed("bash.background"),
-		installedOperations: imageUploads
-			? surfacePolicy.installedControls
-			: new Set([...surfacePolicy.installedControls].filter(operation => !operation.startsWith("turn.image."))),
+		installedOperations: surfacePolicy.installedControls,
 		revisionProvider: resource => (resource === "config" ? String(configRevision.current) : undefined),
 	};
 }
@@ -6747,10 +6745,27 @@ export function createSdkSessionRuntimeExtension(api: ExtensionAPI, options: Cre
 			await Promise.race([settled, timeout]);
 		};
 		let runtime: SessionSdkSessionRuntime;
+		// Frame observation is not authoritative socket membership. Unsupported
+		// transports omit staging from both advertisement and dispatch.
+		const imageUploads =
+			typeof transport.isConnectionOpen === "function"
+				? new PromptImageUploadStore(connectionId => transport.isConnectionOpen?.(connectionId) === true)
+				: undefined;
+		currentImageUploads = imageUploads;
+		const policy = createSdkSurfacePolicyForContext(ctx, hasSdkWorkflowGateCapability(ctx.workflowGate));
+		const surfacePolicy: SdkSurfacePolicy = imageUploads
+			? policy
+			: {
+					...policy,
+					installedControls: new Set(
+						[...policy.installedControls].filter(operation => !operation.startsWith("turn.image.")),
+					),
+				};
 		const surfaceFactory = createSdkSurfaceFactory({
 			ctx,
 			id: sessionId,
 			api,
+			policy: surfacePolicy,
 			reconciliation,
 			turnResultLookup: selector => reconciliation.lookupResult(selector.kind, selector),
 			steerStatusLookup: selector => steerReconciliation.lookupSteer(selector),
@@ -6900,12 +6915,6 @@ export function createSdkSessionRuntimeExtension(api: ExtensionAPI, options: Cre
 			return attempt(3);
 		};
 
-		// Never fall back to the runtime's frame-observer set: it is not the
-		// transport's authoritative socket membership. Missing liveness fails closed.
-		const imageUploads = new PromptImageUploadStore(
-			connectionId => transport.isConnectionOpen?.(connectionId) === true,
-		);
-		currentImageUploads = imageUploads;
 		const controlSurface = createControlSurface(
 			ctx,
 			api,
@@ -7229,7 +7238,7 @@ export function createSdkSessionRuntimeExtension(api: ExtensionAPI, options: Cre
 		};
 		runtime = new SessionSdkSessionRuntime({
 			transport,
-			onDisconnected: connectionId => imageUploads.disconnect(connectionId),
+			onDisconnected: connectionId => imageUploads?.disconnect(connectionId),
 			eventRevision: () =>
 				typeof (ctx as Partial<ExtensionContext>).getTranscript === "function"
 					? ctx.getTranscript().length
@@ -7687,7 +7696,7 @@ export function createSdkSessionRuntimeExtension(api: ExtensionAPI, options: Cre
 			} catch (cleanupError) {
 				queueCancellationFailure = cleanupError;
 			}
-			imageUploads.close();
+			imageUploads?.close();
 			if (currentImageUploads === imageUploads) currentImageUploads = undefined;
 			for (const release of acceptedImages.values()) release();
 			acceptedImages.clear();

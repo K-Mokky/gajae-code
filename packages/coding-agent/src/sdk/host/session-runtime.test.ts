@@ -4593,6 +4593,8 @@ async function invocationHarness(
 		invokeSkill?: (name: string, args?: string, options?: PreflightHooks) => Promise<unknown>;
 		abort?: () => void;
 		isIdle?: () => boolean;
+		/** Null omits authoritative transport liveness entirely. */
+		isConnectionOpen?: ((connectionId: string) => boolean) | null;
 		settings?: Settings;
 		/** Throw to inject a durable-write failure for matching transitions. */
 		persistInterceptor?: (transition: { type: string }) => void;
@@ -4669,7 +4671,7 @@ async function invocationHarness(
 				sessionId: id,
 				stateRoot,
 				token,
-				isConnectionOpen: () => open,
+				...(hooks.isConnectionOpen === null ? {} : { isConnectionOpen: hooks.isConnectionOpen ?? (() => open) }),
 				onFrame(handler) {
 					deliver = handler;
 					deliveries.set(id, handler);
@@ -5278,6 +5280,81 @@ test.each([
 		await rm(cwd, { recursive: true, force: true });
 	}
 });
+test("SDK-only transport without liveness omits image capabilities and dispatch but preserves direct prompts", async () => {
+	const cwd = await mkdtemp(path.join(os.tmpdir(), "gjc-sdk-no-image-liveness-"));
+	let harness: InvocationHarness | undefined;
+	try {
+		const sent: unknown[] = [];
+		harness = await invocationHarness("sdk-no-image-liveness", cwd, {
+			isConnectionOpen: null,
+			sendUserMessage: async (content, options) => {
+				sent.push(content);
+				await options?.onPreflightAcceptCommit?.();
+			},
+		});
+		const capabilities = await harness.query("runtime.capabilities", {});
+		expect(capabilities.ok).toBe(true);
+		const operations = (capabilities as unknown as { page: { items: Array<{ operations: string[] }> } }).page
+			.items[0]!.operations;
+		expect(operations).toContain("turn.prompt");
+		expect(operations.filter(operation => operation.startsWith("turn.image."))).toEqual([]);
+		for (const operation of ["turn.image.begin", "turn.image.append", "turn.image.finish", "turn.image.discard"]) {
+			expect(await harness.control(operation, {})).toMatchObject({
+				ok: false,
+				error: { code: "operation_not_session_owned" },
+			});
+		}
+		expect(
+			await harness.control("turn.prompt", { text: "Unsupported", stagedImages: [{ id: "missing" }] }),
+		).toMatchObject({ ok: false, error: { code: "operation_prohibited" } });
+		expect(sent).toEqual([]);
+		expect(await harness.control("turn.prompt", { text: "Plain text" })).toMatchObject({ ok: true });
+		const data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+		expect(
+			await harness.control("turn.prompt", {
+				text: "Direct image",
+				images: [{ type: "image", mimeType: "image/png", data }],
+			}),
+		).toMatchObject({ ok: true });
+		expect(sent).toEqual([
+			"Plain text",
+			[
+				{ type: "text", text: "Direct image" },
+				{ type: "image", mimeType: "image/png", data },
+			],
+		]);
+	} finally {
+		await harness?.stop();
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("SDK-only transport with liveness advertises image controls but rejects a closed staging owner", async () => {
+	const cwd = await mkdtemp(path.join(os.tmpdir(), "gjc-sdk-closed-image-owner-"));
+	let harness: InvocationHarness | undefined;
+	try {
+		harness = await invocationHarness("sdk-closed-image-owner", cwd, {
+			isConnectionOpen: connectionId => connectionId !== "closed",
+		});
+		const capabilities = await harness.query("runtime.capabilities", {});
+		expect(capabilities.ok).toBe(true);
+		const operations = (capabilities as unknown as { page: { items: Array<{ operations: string[] }> } }).page
+			.items[0]!.operations;
+		for (const operation of ["turn.image.begin", "turn.image.append", "turn.image.finish", "turn.image.discard"])
+			expect(operations).toContain(operation);
+		expect(
+			await harness.controlAs("closed", "turn.image.begin", {
+				mimeType: "image/png",
+				byteLength: 5,
+				sha256: createHash("sha256").update("image").digest("hex"),
+			}),
+		).toMatchObject({ ok: false, error: { code: "resource_gone" } });
+	} finally {
+		await harness?.stop();
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
 test("SDK-only host retains accepted staged bytes until terminal and releases rejected images", async () => {
 	const cwd = await mkdtemp(path.join(os.tmpdir(), "gjc-sdk-only-staged-image-"));
 	const originalRedeem = PromptImageUploadStore.prototype.redeem;
@@ -5338,7 +5415,11 @@ test("SDK-only host retains accepted staged bytes until terminal and releases re
 		const accepted = await harness.control("turn.prompt", { text: "Read image", stagedImages: [{ id }] });
 		expect(accepted).toMatchObject({ ok: true, result: { accepted: true } });
 		expect(releases).toEqual([]);
-		expect((sent[0] as Array<{ type: string; data?: string }>)[1]?.data).toBe(bytes.toString("base64"));
+		expect((sent[0] as Array<{ type: string; data?: string; mimeType?: string }>)[1]).toEqual({
+			type: "image",
+			mimeType: "image/png",
+			data: bytes.toString("base64"),
+		});
 		const rejectedId = await stage();
 		expect(
 			await harness.control("turn.prompt", {
