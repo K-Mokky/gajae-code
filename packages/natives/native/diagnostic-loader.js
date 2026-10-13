@@ -184,7 +184,15 @@ function readTrustedLocalJson(file) {
 		if ((stat.mode & 0o022) !== 0) return null;
 		if (stat.uid !== process.geteuid?.() && stat.uid !== 0) return null;
 		if (inspectAclOnDescriptor(fd) !== "absent") return null;
-		const value = JSON.parse(fs.readFileSync(fd, "utf8"));
+		const bytes = Buffer.allocUnsafe(stat.size);
+		let offset = 0;
+		while (offset < bytes.length) {
+			const read = fs.readSync(fd, bytes, offset, bytes.length - offset, offset);
+			if (read === 0) return null;
+			offset += read;
+		}
+		if (fs.fstatSync(fd).size !== stat.size) return null;
+		const value = JSON.parse(bytes.toString("utf8"));
 		return typeof value === "object" && value !== null && !Array.isArray(value) ? value : null;
 	} catch {
 		return null;
