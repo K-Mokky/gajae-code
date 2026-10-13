@@ -232,10 +232,14 @@ export class PromptImageUploadStore {
 			} catch {
 				invalid("Image cannot be decoded.");
 			}
-			// The transport can disconnect while decoding. A removed lease cannot be resurrected.
+			// The transport can disconnect while decoding; never renew a removed lease or dead owner.
 			this.#reapExpired();
 			if (this.#uploads.get(input.id as string) !== upload)
 				throw new TypedControlError("resource_gone", "Image upload expired.");
+			if (!this.#isConnectionOpen(upload.owner)) {
+				this.#remove(input.id as string);
+				throw new TypedControlError("resource_gone", "Image upload connection is closed.");
+			}
 			const releasedBytes = upload.reservedBytes - upload.length;
 			this.#uploadBytes -= releasedBytes;
 			processBytes -= releasedBytes;
