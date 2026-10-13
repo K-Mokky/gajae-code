@@ -4,6 +4,7 @@ import {
 	getEnvApiKeyEnvName,
 	getEnvApiKeyEnvNames,
 	listProvidersWithEnvKey,
+	resolveOAuthStorageProvider,
 } from "@gajae-code/ai/core";
 import { sanitizeDisplayLine } from "@gajae-code/utils";
 import type { ModelRegistry } from "../../config/model-registry";
@@ -58,6 +59,7 @@ function collectSources(
 	owner: object,
 ): CredentialSource[] {
 	const sources: CredentialSource[] = [];
+	const envProvider = resolveOAuthStorageProvider(provider);
 	for (const entry of entries) {
 		if (entry.credential.type === "oauth") addSource(sources, { kind: "oauth", label: oauthLabel(entry) });
 		else addSource(sources, { kind: "api_key", label: `API key (stored credential id:${entry.id})` });
@@ -78,7 +80,7 @@ function collectSources(
 			label: envName ? `API key (env ${envName})` : "API key (models.yml)",
 		});
 	}
-	for (const name of getEnvApiKeyEnvNames(provider)) {
+	for (const name of getEnvApiKeyEnvNames(envProvider)) {
 		addSource(sources, { kind: "api_key", label: environmentCredentialLabel(name) });
 	}
 	return sources;
@@ -132,9 +134,10 @@ function activeSource(
 	);
 	if (storedKey) return { kind: "api_key", label: `API key (stored credential id:${storedKey.id})` };
 
-	const envName = getEnvApiKeyEnvName(provider);
+	const envProvider = resolveOAuthStorageProvider(provider);
+	const envName = getEnvApiKeyEnvName(envProvider);
 	if (envName) return { kind: "api_key", label: environmentCredentialLabel(envName) };
-	if (getEnvApiKey(provider)) return { kind: "api_key", label: "API key (environment credentials)" };
+	if (getEnvApiKey(envProvider)) return { kind: "api_key", label: "API key (environment credentials)" };
 	return { kind: "api_key", label: "API key (configured)" };
 }
 
