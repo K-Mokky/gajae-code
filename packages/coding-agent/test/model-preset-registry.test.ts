@@ -691,6 +691,40 @@ describe("signed model preset registry", () => {
 		}
 	});
 
+	test("drops provider timeouts when preset metadata is rebound to Anthropic transport", async () => {
+		const data = await fixture();
+		await expect(
+			accept(
+				data,
+				signedRegistry(data.privateKey, 1, [], [{ ...registryPreset("gpt-4o-mini"), provider: "openai" }]),
+			),
+		).resolves.toMatchObject({ status: "updated", revision: 1 });
+		await Bun.write(
+			path.join(data.agentDir, "models.yml"),
+			`providers:
+  openai:
+    baseUrl: https://openai-proxy.example/v1
+    api: anthropic-messages
+    auth: none
+    streamIdleTimeoutMs: 360000
+`,
+		);
+		const authStorage = await AuthStorage.create(path.join(data.agentDir, "openai-anthropic-timeout-auth.db"));
+		try {
+			const modelRegistry = data.run(
+				() =>
+					new ModelRegistry(authStorage, path.join(data.agentDir, "models.yml"), undefined, {
+						automaticRefresh: false,
+					}),
+			);
+			expect(modelRegistry.getError()).toBeUndefined();
+			expect(modelRegistry.find("openai", "gpt-4o-mini")).toMatchObject({ api: "anthropic-messages" });
+			expect(modelRegistry.find("openai", "gpt-4o-mini")).not.toHaveProperty("streamIdleTimeoutMs");
+		} finally {
+			authStorage.close();
+		}
+	});
+
 	test("applies authHeader credentials to registry-only models", async () => {
 		const data = await fixture();
 		await expect(

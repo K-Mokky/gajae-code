@@ -701,10 +701,26 @@ function validateProviderConfiguration(
 	for (const [modelId, rawOverride] of Object.entries(config.modelOverrides ?? {})) {
 		const override = rawOverride as ModelOverride;
 		const configuredModel = models.find(model => model.id.toLowerCase() === modelId.toLowerCase());
+		const discoveryProviderApi =
+			(config.api as Api | undefined) ??
+			dominantOpenAIFamilyModelApi(models) ??
+			(config.openaiCompat ? "openai-completions" : undefined);
+		const implicitDiscoveryBaseUrl = config.baseUrl ?? resolveProviderBaseUrlFromEnv(providerName);
+		const implicitDiscovery: ProviderDiscovery | undefined =
+			!config.discovery &&
+			(config.openaiCompat !== undefined ||
+				(providerName !== "vllm" &&
+					providerName !== "sglang" &&
+					discoveryProviderApi !== undefined &&
+					isOpenAIFamilyApi(discoveryProviderApi) &&
+					implicitDiscoveryBaseUrl !== undefined))
+				? { type: "openai-models-list" }
+				: undefined;
+		const effectiveDiscovery = config.discovery ?? implicitDiscovery;
 		const discoveryApi =
-			configuredModel || !config.discovery || !configuredApi
+			configuredModel || !effectiveDiscovery || !discoveryProviderApi
 				? undefined
-				: resolveModelApiOverrideFromDiscovery(configuredApi, config.discovery, modelId);
+				: resolveModelApiOverrideFromDiscovery(discoveryProviderApi, effectiveDiscovery, modelId);
 		const effectiveApi =
 			configuredModel?.api ??
 			(configuredModel ? config.api : undefined) ??
@@ -3525,14 +3541,23 @@ export class ModelRegistry {
 				continue;
 			}
 			const existing = merged[existingIndex]!;
+			const { streamIdleTimeoutMs: existingStreamIdleTimeoutMs, ...existingWithoutStreamIdleTimeout } = existing;
 			const effectiveApi = explicitTransport?.api ?? existing.api;
 			const registryApiMatchesEffectiveTransport = registryModel.api === effectiveApi;
 			const registryMetadata = registryApiMatchesEffectiveTransport
 				? registryModel
 				: registryModelMetadataWithoutApiSpecificFields(registryModel);
+			const {
+				streamIdleTimeoutMs: registryMetadataStreamIdleTimeoutMs,
+				...registryMetadataWithoutStreamIdleTimeout
+			} = registryMetadata;
+			const streamIdleTimeoutMs = isRequestTransformApi(effectiveApi)
+				? (registryMetadataStreamIdleTimeoutMs ?? existingStreamIdleTimeoutMs)
+				: undefined;
 			merged[existingIndex] = {
-				...existing,
-				...registryMetadata,
+				...existingWithoutStreamIdleTimeout,
+				...registryMetadataWithoutStreamIdleTimeout,
+				...(streamIdleTimeoutMs !== undefined ? { streamIdleTimeoutMs } : {}),
 				api: explicitTransport?.api ?? existing.api,
 				baseUrl: existing.baseUrl,
 				headers: existing.headers,

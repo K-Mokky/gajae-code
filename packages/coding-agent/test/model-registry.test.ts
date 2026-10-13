@@ -6832,6 +6832,24 @@ describe("ModelRegistry", () => {
 		);
 	});
 
+	test("validates model timeout overrides against implicit discovery API routing", () => {
+		writeRawModelsConfig({
+			providers: {
+				proxy: {
+					baseUrl: "https://proxy.example.com/v1",
+					apiKey: "TEST_KEY",
+					api: "openai-completions",
+					modelOverrides: { "claude-opus-5": { streamIdleTimeoutMs: 300_000 } },
+				},
+			},
+		});
+
+		const registry = new ModelRegistry(authStorage, modelsJsonPath);
+		expect(String(registry.getError()?.message)).toContain(
+			'modelOverrides "streamIdleTimeoutMs" is only supported with openai-completions or openai-responses APIs',
+		);
+	});
+
 	test("validates discovery API prefixes case-insensitively for modelOverrides", () => {
 		writeRawModelsConfig({
 			providers: {
