@@ -6745,10 +6745,10 @@ export function createSdkSessionRuntimeExtension(api: ExtensionAPI, options: Cre
 			await Promise.race([settled, timeout]);
 		};
 		let runtime: SessionSdkSessionRuntime;
-		// Frame observation is not authoritative socket membership. Unsupported
-		// transports omit staging from both advertisement and dispatch.
+		// Staging requires authoritative membership and disconnect notification so
+		// abandoned owners cannot retain upload slots until their leases expire.
 		const imageUploads =
-			typeof transport.isConnectionOpen === "function"
+			typeof transport.isConnectionOpen === "function" && typeof transport.onConnectionClose === "function"
 				? new PromptImageUploadStore(connectionId => transport.isConnectionOpen?.(connectionId) === true)
 				: undefined;
 		currentImageUploads = imageUploads;

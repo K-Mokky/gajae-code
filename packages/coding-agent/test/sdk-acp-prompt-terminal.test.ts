@@ -1095,7 +1095,7 @@ for (const operation of ["turn.image.begin", "turn.image.append", "turn.image.fi
 	}
 }
 
-test("ACP staged envelope overflow cannot leave a user echo", async () => {
+test("ACP oversized staged text rejects before image uploads and user echo", async () => {
 	const fixture = await createFixture({ acceptStagedImages: true });
 	const cancel = vi.spyOn(AcpSdkAdapter.prototype, "cancel");
 	try {
@@ -1114,6 +1114,7 @@ test("ACP staged envelope overflow cannot leave a user echo", async () => {
 				"oversize staged envelope",
 			),
 		).rejects.toMatchObject({ code: "invalid_input" });
+		expect(fixture.imageUploadIds).toHaveLength(0);
 		expect(fixture.updates.filter(update => update.update.sessionUpdate === "user_message_chunk")).toHaveLength(0);
 		expect(fixture.promptDeliveryCount()).toBe(0);
 		expect(cancel).not.toHaveBeenCalled();
