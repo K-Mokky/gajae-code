@@ -28,7 +28,9 @@ const envNames = [
 	"GOOGLE_CLOUD_API_KEY",
 	"GOOGLE_APPLICATION_CREDENTIALS",
 	"GOOGLE_CLOUD_PROJECT",
+	"GCLOUD_PROJECT",
 	"GOOGLE_CLOUD_LOCATION",
+	"GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES",
 	"HOME",
 ] as const;
 const originals = new Map(envNames.map(name => [name, Bun.env[name]]));
@@ -185,6 +187,63 @@ describe("environment API-key source names", () => {
 		Bun.env.GOOGLE_CLOUD_PROJECT = "test-project";
 		Bun.env.GOOGLE_CLOUD_LOCATION = "us-central1";
 
+		expect(await getEnvApiKeyCredentialSource("google-vertex")).toEqual({
+			kind: "google-adc",
+			source: "explicit-file",
+		});
+	});
+
+	it("requires trusted project and location values before reporting Vertex ADC", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-vertex-adc-routing-"));
+		tempDirs.push(dir);
+		const credentialPath = path.join(dir, "adc.json");
+		await Bun.write(
+			credentialPath,
+			JSON.stringify({
+				type: "authorized_user",
+				client_id: "test-client",
+				client_secret: "test-client-secret",
+				refresh_token: "test-refresh-token",
+			}),
+		);
+		delete Bun.env.GOOGLE_CLOUD_API_KEY;
+		Bun.env.GOOGLE_APPLICATION_CREDENTIALS = credentialPath;
+		delete Bun.env.GOOGLE_CLOUD_PROJECT;
+		delete Bun.env.GCLOUD_PROJECT;
+		delete Bun.env.GOOGLE_CLOUD_LOCATION;
+
+		expect(await getEnvApiKeyCredentialSource("google-vertex")).toBeUndefined();
+
+		Bun.env.GOOGLE_CLOUD_PROJECT = "trusted-test-project";
+		Bun.env.GOOGLE_CLOUD_LOCATION = "us-central1";
+		expect(await getEnvApiKeyCredentialSource("google-vertex")).toEqual({
+			kind: "google-adc",
+			source: "explicit-file",
+		});
+	});
+
+	it("does not report executable Vertex ADC until its opt-in is enabled", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-vertex-adc-executable-"));
+		tempDirs.push(dir);
+		const credentialPath = path.join(dir, "adc.json");
+		await Bun.write(
+			credentialPath,
+			JSON.stringify({
+				type: "external_account",
+				audience: "//iam.googleapis.com/projects/test/locations/global/workloadIdentityPools/test/providers/test",
+				subject_token_type: "urn:ietf:params:oauth:token-type:jwt",
+				credential_source: { executable: { command: "test-credential-command" } },
+			}),
+		);
+		delete Bun.env.GOOGLE_CLOUD_API_KEY;
+		delete Bun.env.GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES;
+		Bun.env.GOOGLE_APPLICATION_CREDENTIALS = credentialPath;
+		Bun.env.GOOGLE_CLOUD_PROJECT = "test-project";
+		Bun.env.GOOGLE_CLOUD_LOCATION = "us-central1";
+
+		expect(await getEnvApiKeyCredentialSources("google-vertex")).toEqual([]);
+
+		Bun.env.GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES = "1";
 		expect(await getEnvApiKeyCredentialSource("google-vertex")).toEqual({
 			kind: "google-adc",
 			source: "explicit-file",

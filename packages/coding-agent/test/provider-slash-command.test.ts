@@ -151,6 +151,76 @@ describe("provider slash command", () => {
 		}
 	});
 
+	it("reports Bedrock AWS credentials instead of ignored stored or runtime API keys", async () => {
+		tempAgentDir = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-provider-slash-"));
+		setAgentDir(tempAgentDir);
+		const envNames = [
+			"AWS_BEARER_TOKEN_BEDROCK",
+			"AWS_ACCESS_KEY_ID",
+			"AWS_SECRET_ACCESS_KEY",
+			"AWS_SESSION_TOKEN",
+			"AWS_PROFILE",
+			"AWS_SHARED_CREDENTIALS_FILE",
+			"AWS_CONFIG_FILE",
+		] as const;
+		const originalEnv = new Map(envNames.map(name => [name, Bun.env[name]]));
+		const credentialsPath = path.join(tempAgentDir, "aws-credentials");
+		const configPath = path.join(tempAgentDir, "aws-config");
+		await Bun.write(credentialsPath, "");
+		await Bun.write(configPath, "");
+		delete Bun.env.AWS_BEARER_TOKEN_BEDROCK;
+		delete Bun.env.AWS_ACCESS_KEY_ID;
+		delete Bun.env.AWS_SECRET_ACCESS_KEY;
+		delete Bun.env.AWS_SESSION_TOKEN;
+		Bun.env.AWS_PROFILE = "gjc-provider-status-missing-profile";
+		Bun.env.AWS_SHARED_CREDENTIALS_FILE = credentialsPath;
+		Bun.env.AWS_CONFIG_FILE = configPath;
+		try {
+			const authStorage = await AuthStorage.create(path.join(tempAgentDir, "auth.db"));
+			authStorages.push(authStorage);
+			await authStorage.set("amazon-bedrock", {
+				type: "api_key",
+				key: "stored-bedrock-api-key-secret",
+			});
+			authStorage.setRuntimeApiKey("amazon-bedrock", "runtime-bedrock-api-key-secret");
+			const registry = new ModelRegistry(authStorage, path.join(tempAgentDir, "models.yml"));
+			modelRegistries.push(registry);
+			const command = BUILTIN_SLASH_COMMANDS_INTERNAL.find(entry => entry.name === "provider");
+			const status = async (): Promise<string> => {
+				const outputs: string[] = [];
+				await command?.handle?.({ name: "provider", args: "status", text: "/provider status" }, {
+					session: { modelRegistry: registry },
+					output: (text: string) => outputs.push(text),
+				} as unknown as SlashCommandRuntime);
+				return outputs.join("\n");
+			};
+
+			const withoutAwsCredentials = await status();
+			expect(withoutAwsCredentials).toContain("amazon-bedrock: AWS credentials unavailable");
+			expect(withoutAwsCredentials).not.toContain("API key (runtime override)");
+			expect(withoutAwsCredentials).not.toContain("API key (stored credential");
+			expect(withoutAwsCredentials).not.toContain("stored-bedrock-api-key-secret");
+			expect(withoutAwsCredentials).not.toContain("runtime-bedrock-api-key-secret");
+
+			Bun.env.AWS_ACCESS_KEY_ID = "aws-access-key-test";
+			Bun.env.AWS_SECRET_ACCESS_KEY = "aws-secret-key-test";
+			const withAwsCredentials = await status();
+			expect(withAwsCredentials).toContain("amazon-bedrock: AWS environment credentials");
+			expect(withAwsCredentials).not.toContain("API key (runtime override)");
+			expect(withAwsCredentials).not.toContain("API key (stored credential");
+			expect(withAwsCredentials).not.toContain("stored-bedrock-api-key-secret");
+			expect(withAwsCredentials).not.toContain("runtime-bedrock-api-key-secret");
+			expect(withAwsCredentials).not.toContain("aws-access-key-test");
+			expect(withAwsCredentials).not.toContain("aws-secret-key-test");
+		} finally {
+			for (const name of envNames) {
+				const original = originalEnv.get(name);
+				if (original === undefined) delete Bun.env[name];
+				else Bun.env[name] = original;
+			}
+		}
+	});
+
 	it("shows credential status from the TUI provider command", async () => {
 		const registry = {
 			authStorage: {

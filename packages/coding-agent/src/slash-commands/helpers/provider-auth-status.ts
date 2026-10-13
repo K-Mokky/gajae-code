@@ -151,6 +151,12 @@ function collectSources(
 	environmentSources: EnvApiKeyCredentialSource[],
 ): CredentialSource[] {
 	const sources: CredentialSource[] = [];
+	if (provider === "amazon-bedrock") {
+		for (const source of environmentSources) {
+			addSource(sources, { kind: "api_key", layer: "environment", label: environmentSourceLabel(source) });
+		}
+		return sources;
+	}
 	const authStorage = registry.authStorage;
 	for (const entry of entries) {
 		if (entry.credential.type === "oauth") {
@@ -209,6 +215,12 @@ function activeSource(
 	activeType: "api_key" | "oauth",
 	environmentSources: EnvApiKeyCredentialSource[],
 ): CredentialSource {
+	if (provider === "amazon-bedrock") {
+		const source = environmentSources[0];
+		return source
+			? { kind: "api_key", layer: "environment", label: environmentSourceLabel(source) }
+			: { kind: "api_key", layer: "pending", label: "AWS credentials unavailable" };
+	}
 	const { authStorage } = session.modelRegistry;
 	const sessionId = session.credentialSessionId;
 	if (activeType === "oauth") {
@@ -328,7 +340,9 @@ export async function buildProviderAuthStatusText(session: ProviderAuthStatusSes
 			session.credentialSessionId,
 		);
 		let active: { kind: "api_key" | "oauth"; layer: string; label: string } | undefined;
-		if (activeType === "oauth" || activeType === "api_key") {
+		if (provider === "amazon-bedrock") {
+			active = activeSource(provider, entries, session, owner, "api_key", environmentSources);
+		} else if (activeType === "oauth" || activeType === "api_key") {
 			active = activeSource(provider, entries, session, owner, activeType, environmentSources);
 		} else if (environmentSources[0]) {
 			active = {
@@ -346,7 +360,7 @@ export async function buildProviderAuthStatusText(session: ProviderAuthStatusSes
 			active?.layer === "runtime-override" ||
 			active?.layer === "runtime-provider" ||
 			configOverridePrecedesUnavailablePin;
-		if (sessionCredentialUnavailable && !overridePrecedesUnavailablePin) {
+		if (provider !== "amazon-bedrock" && sessionCredentialUnavailable && !overridePrecedesUnavailablePin) {
 			active = { kind: "api_key", layer: "pending", label: "selected credential unavailable" };
 		}
 		lines.push(

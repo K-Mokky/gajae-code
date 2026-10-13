@@ -293,7 +293,10 @@ export async function getEnvApiKeyCredentialSources(
 	);
 
 	if (provider === "google-vertex") {
-		if (($env.GOOGLE_CLOUD_PROJECT || $env.GCLOUD_PROJECT) && $env.GOOGLE_CLOUD_LOCATION) {
+		if (
+			($credentialEnv("GOOGLE_CLOUD_PROJECT") || $credentialEnv("GCLOUD_PROJECT")) &&
+			$credentialEnv("GOOGLE_CLOUD_LOCATION")
+		) {
 			const source = await getVertexCredentialSource({ fetch: options?.fetch });
 			if (source) sources.push({ kind: "google-adc", source });
 		}

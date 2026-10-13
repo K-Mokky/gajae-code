@@ -197,6 +197,14 @@ function isSupportedAdcFileCredentials(value: unknown): value is AdcFileCredenti
 	}
 }
 
+function isAvailableAdcFileCredentialSource(credentials: AdcFileCredentials): boolean {
+	return (
+		credentials.type !== "external_account" ||
+		!("executable" in credentials.credential_source) ||
+		$credentialEnv("GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES") === "1"
+	);
+}
+
 /** Test seam: the ADC credentials file path as resolved from trusted env. */
 export function resolveAdcCredentialsPathForTest(): string | undefined {
 	return $credentialEnv("GOOGLE_APPLICATION_CREDENTIALS");
@@ -374,7 +382,9 @@ export async function getVertexCredentialSource(options?: {
 	} catch {
 		return undefined;
 	}
-	if (adc) return classifyCredentialSource(adc.source);
+	if (adc) {
+		return isAvailableAdcFileCredentialSource(adc.creds) ? classifyCredentialSource(adc.source) : undefined;
+	}
 
 	const fetchImpl = options?.fetch ?? globalThis.fetch.bind(globalThis);
 	return (await hasMetadataServer(fetchImpl)) ? "metadata-server" : undefined;
