@@ -81,6 +81,28 @@ export async function recordDiagnosticArtifactDigest(options: {
 		: {};
 	const { version } = (await Bun.file(packageJsonPath).json()) as { version: string };
 	const artifacts = existing.version === version ? { ...(existing.artifacts ?? {}) } : {};
+	// Preserve pre-existing local variants during manifest migration: if bootstrapping a new local
+	// manifest (artifacts is empty), scan for other local-profile variants on disk and include them.
+	// This ensures that when the version changes and only one variant rebuilds first, the manifest
+	// still tracks all present local addons, preventing verification failures when embed-native
+	// later checks for addons that exist on disk but aren't in the manifest.
+	if (localBuild && Object.keys(artifacts).length === 0) {
+		const entries = await fs.readdir(nativeDir);
+		for (const entry of entries) {
+			if (!entry.endsWith(".node")) continue;
+			const variantPath = path.join(nativeDir, entry);
+			const sidecarPath = `${variantPath}.build.json`;
+			const sidecar = (await Bun.file(sidecarPath).exists())
+				? ((await Bun.file(sidecarPath).json()) as { profile?: string })
+				: undefined;
+			if (sidecar?.profile === "local" && entry !== path.basename(addonPath)) {
+				const variantDigest = new Bun.CryptoHasher("sha256")
+					.update(await Bun.file(variantPath).bytes())
+					.digest("hex");
+				artifacts[entry] = variantDigest;
+			}
+		}
+	}
 	artifacts[path.basename(addonPath)] = digest;
 	await Bun.write(
 		manifestPath,

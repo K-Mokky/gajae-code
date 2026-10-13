@@ -97,6 +97,56 @@ test.each(["ci", "dist"] as const)("a %s native build updates the trusted manife
 	});
 });
 
+test("bootstrapping a new local manifest includes pre-existing local variants on disk", async () => {
+	const nativeDir = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-native-migration-"));
+	tempDirs.push(nativeDir);
+	const packageJsonPath = path.join(nativeDir, "package.json");
+	const modernAddonPath = path.join(nativeDir, "pi_natives.linux-x64-modern.node");
+	const baselineAddonPath = path.join(nativeDir, "pi_natives.linux-x64-baseline.node");
+
+	await Bun.write(packageJsonPath, JSON.stringify({ version: "2.0.0" }));
+	await Bun.write(modernAddonPath, "modern addon bytes");
+	await Bun.write(baselineAddonPath, "baseline addon bytes");
+	await Bun.write(
+		`${modernAddonPath}.build.json`,
+		JSON.stringify({ profile: "local" }),
+	);
+	await Bun.write(
+		`${baselineAddonPath}.build.json`,
+		JSON.stringify({ profile: "local" }),
+	);
+
+	// Record the modern addon; the local manifest doesn't exist yet.
+	await recordDiagnosticArtifactDigest({
+		addonPath: modernAddonPath,
+		nativeDir,
+		packageJsonPath,
+		profile: "local",
+	});
+
+	// Verify the local manifest includes both variants.
+	const localManifest = (await Bun.file(path.join(nativeDir, "diagnostic-artifact.local.json")).json()) as {
+		schema: string;
+		version: string;
+		artifacts: Record<string, string>;
+	};
+	const modernDigest = new Bun.CryptoHasher("sha256")
+		.update(await Bun.file(modernAddonPath).bytes())
+		.digest("hex");
+	const baselineDigest = new Bun.CryptoHasher("sha256")
+		.update(await Bun.file(baselineAddonPath).bytes())
+		.digest("hex");
+
+	expect(localManifest).toEqual({
+		schema: "gjc.diagnostic-artifact",
+		version: "2.0.0",
+		artifacts: {
+			"pi_natives.linux-x64-modern.node": modernDigest,
+			"pi_natives.linux-x64-baseline.node": baselineDigest,
+		},
+	});
+});
+
 test("the local artifact manifest is ignored by git", () => {
 	const localManifestPath = "packages/natives/native/diagnostic-artifact.local.json";
 	const result = Bun.spawnSync(["git", "check-ignore", "--no-index", "--quiet", localManifestPath], {
