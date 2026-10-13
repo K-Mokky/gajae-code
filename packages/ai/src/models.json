@@ -16628,6 +16628,7 @@
         "supportsDeveloperRole": false,
         "supportsReasoningEffort": false,
         "supportsStore": false,
+        "supportsServiceTier": true,
         "supportsUltrafastTier": true
       },
       "contextWindow": 1050000,
@@ -16713,6 +16714,7 @@
         "supportsDeveloperRole": false,
         "supportsReasoningEffort": false,
         "supportsStore": false,
+        "supportsServiceTier": true,
         "supportsUltrafastTier": true
       },
       "contextWindow": 1050000,
@@ -69331,7 +69333,9 @@
         "minLevel": "low",
         "mode": "effort"
       },
-      "compat": {}
+      "compat": {
+        "supportsUltrafastTier": true
+      }
     },
     "gpt-6-luna": {
       "api": "openai-codex-responses",
@@ -69437,7 +69441,9 @@
         "minLevel": "low",
         "mode": "effort"
       },
-      "compat": {}
+      "compat": {
+        "supportsUltrafastTier": true
+      }
     },
     "gpt-daybreak-blue-latest": {
       "api": "openai-codex-responses",
@@ -72160,6 +72166,7 @@
         "mode": "effort"
       },
       "compat": {
+        "supportsServiceTier": true,
         "supportsUltrafastTier": true
       }
     },
@@ -72238,6 +72245,7 @@
         "mode": "effort"
       },
       "compat": {
+        "supportsServiceTier": true,
         "supportsUltrafastTier": true
       }
     },

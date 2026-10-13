@@ -116,6 +116,31 @@ export function injectCodexGpt6Models(models: Model[]): void {
 	}
 }
 
+const ULTRAFAST_TIER_MODEL_KEYS = new Set([
+	"openai/gpt-6-astra",
+	"openai/gpt-6.1-sol",
+	"openai-codex/gpt-6-astra",
+	"openai-codex/gpt-6.1-sol",
+	"github-copilot/gpt-6-astra",
+	"github-copilot/gpt-6.1-sol",
+	"opencode-zen/gpt-6-astra",
+	"opencode-zen/gpt-6.1-sol",
+]);
+
+const ULTRAFAST_COMPATIBLE_PROVIDERS = new Set(["github-copilot", "opencode-zen"]);
+
+/** Preserve reviewed GPT-6 tier capabilities across dynamic catalog regeneration. */
+export function applyUltrafastTierModelPolicies(models: Model[]): void {
+	for (const model of models) {
+		if (!ULTRAFAST_TIER_MODEL_KEYS.has(`${model.provider}/${model.id}`)) continue;
+		model.compat = {
+			...model.compat,
+			...(ULTRAFAST_COMPATIBLE_PROVIDERS.has(model.provider) ? { supportsServiceTier: true } : {}),
+			supportsUltrafastTier: true,
+		};
+	}
+}
+
 /**
  * Dedicated image generation models registered under openai and openai-codex so
  * the image generation tool can route through a dedicated model instead of the
@@ -901,6 +926,7 @@ async function generateModels() {
 	injectMuseSparkModels(allModels);
 	linkOpenAIPromotionTargets(allModels);
 	injectImageGenerationModels(allModels);
+	applyUltrafastTierModelPolicies(allModels);
 
 	// Group by provider and sort each provider's models
 	const providers: Record<string, Record<string, Model>> = {};

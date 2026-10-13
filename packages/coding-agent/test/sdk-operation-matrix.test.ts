@@ -250,6 +250,21 @@ describe("SDK operation matrix", () => {
 			expect(JSON.stringify(secretResult)).not.toContain(secret);
 		}
 	});
+	it("rejects ultrafast service-tier controls on chat before SDK send", async () => {
+		for (const transport of ["telegram", "discord", "slack"] as const) {
+			let sends = 0;
+			const result = await sendAuthorizedChatOperation(
+				transport,
+				{ kind: "control", operation: "service_tier.set", input: { tier: "ultrafast" } },
+				async () => {
+					sends++;
+					return "sent";
+				},
+			);
+			expect(result).toMatchObject({ ok: false, error: { code: "invalid_input" } });
+			expect(sends).toBe(0);
+		}
+	});
 	it("removes Broker lifecycle controls from host surfaces before mutation", async () => {
 		const lifecycleOperations = [
 			"session.new",

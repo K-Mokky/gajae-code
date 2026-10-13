@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { Settings } from "../src/config/settings";
+import { SETTINGS_SCHEMA } from "../src/config/settings-schema";
 import { validateAdapterControl, validateAdapterSecretFields } from "../src/sdk/protocol/adapter-validation";
 
 describe("validateAdapterSecretFields - ultrafast tier restriction", () => {
@@ -131,5 +133,23 @@ describe("validateAdapterControl - service_tier.set validation", () => {
 			tier: "flex",
 		});
 		expect(result).toBeUndefined();
+	});
+
+	test("allows ultrafast only on the trusted local control route", () => {
+		const result = validateAdapterControl("service_tier.set", { tier: "ultrafast" }, { allowUltrafastTier: true });
+		expect(result).toBeUndefined();
+	});
+});
+
+describe("ultrafast service tier settings", () => {
+	test("global and task settings accept and advertise ultrafast", () => {
+		for (const path of ["serviceTier", "task.serviceTier"] as const) {
+			const setting = SETTINGS_SCHEMA[path];
+			expect(setting.values).toContain("ultrafast");
+			expect(setting.ui.options).toContainEqual(expect.objectContaining({ value: "ultrafast", label: "Ultrafast" }));
+		}
+
+		expect(Settings.isolated({ serviceTier: "ultrafast" }).get("serviceTier")).toBe("ultrafast");
+		expect(Settings.isolated({ "task.serviceTier": "ultrafast" }).get("task.serviceTier")).toBe("ultrafast");
 	});
 });
