@@ -78,6 +78,37 @@ describe("Markdown asynchronous SVG figures", () => {
 		second.dispose();
 	});
 
+	it("disposes a previous figure when the resolver switches to a stable fallback", () => {
+		const figures: DeferredFigure[] = [];
+		let available = true;
+		const theme: MarkdownTheme = {
+			...figureTheme(figures),
+			resolveSvgFigure: (source, context) => {
+				if (!available) return null;
+				const figure =
+					context.previous instanceof DeferredFigure
+						? context.previous
+						: new DeferredFigure(source, context.onChange);
+				figures.push(figure);
+				return figure;
+			},
+		};
+		const markdown = new Markdown("```svg\n<svg/>\n```", 0, 0, theme);
+		try {
+			markdown.render(80);
+			const previous = figures[0];
+			expect(previous?.disposed).toBe(false);
+
+			available = false;
+			markdown.invalidate();
+			const fallback = Bun.stripANSI(markdown.render(80).join("\n"));
+			expect(fallback).toContain("<svg/>");
+			expect(previous?.disposed).toBe(true);
+		} finally {
+			markdown.dispose();
+		}
+	});
+
 	it("retries SVG fences when the resolver returns undefined", () => {
 		const source = "```svg\n<svg/>\n```";
 		let resolverCalls = 0;
@@ -106,7 +137,7 @@ describe("Markdown asynchronous SVG figures", () => {
 		);
 		markdown.setStreaming(true);
 		markdown.render(80);
-		expect(contexts[0]).toMatchObject({ streaming: true, closed: true });
+		expect(contexts[0]).toMatchObject({ streaming: true, closed: true, width: 80 });
 
 		markdown.setText("```svg\n<svg/>", { streaming: true });
 		markdown.render(80);

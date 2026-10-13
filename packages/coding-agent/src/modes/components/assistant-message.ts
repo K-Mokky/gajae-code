@@ -41,6 +41,7 @@ function getAssistantMarkdownTheme(): MarkdownTheme {
 	cachedAssistantMarkdownTheme = {
 		...base,
 		resolveSvgFigure: (source, context) => {
+			if (!settings.get("terminal.showImages")) return null;
 			const graphicsSuppressed =
 				isTerminalGraphicsFallbackActive() &&
 				!(TERMINAL.imageProtocol === ImageProtocol.Kitty && isCursorNeutralImagePermittedInFallback());
@@ -56,6 +57,12 @@ function getAssistantMarkdownTheme(): MarkdownTheme {
 					onChange: context.onChange,
 				});
 			figure.update(source, context.closed || !context.streaming, palette);
+			if (figure.retryable) {
+				// A failed preview remains a code block, but must observe layout changes
+				// so a smaller terminal canvas can retry the same source.
+				figure.render(context.width);
+				return undefined;
+			}
 			return figure.failed ? null : figure;
 		},
 	};
@@ -127,6 +134,7 @@ export class AssistantMessageComponent extends Container {
 	#convertedKittyImages = new Map<string, ImageContent & { source: string }>();
 	#kittyConversionsInFlight = new Map<string, string>();
 	#toolImageGenerations = new Map<string, number>();
+	#unsubscribeSettings?: () => void;
 
 	#responseHeader = new Text(theme.bold(theme.fg("statusLineModel", "gajae")), 1, 0);
 	#contentBlocksCache = new WeakMap<object, { source: string; component: Component }>();
@@ -168,6 +176,15 @@ export class AssistantMessageComponent extends Container {
 		}
 		this.#visibleSignature = this.#visibleContentSignature();
 		this.#visibleSignatureInitialized = true;
+		this.#unsubscribeSettings = settings.onChanged(path => {
+			if (path !== "terminal.showImages") return;
+			for (const block of this.#lastMessage?.content ?? []) {
+				if (block.type !== "text") continue;
+				const cached = this.#contentBlocksCache.get(block);
+				if (cached?.component instanceof Markdown) cached.component.invalidate();
+			}
+			this.#requestRepaint?.();
+		});
 	}
 
 	#visibleContentSignature(): string {
@@ -661,6 +678,8 @@ export class AssistantMessageComponent extends Container {
 	override dispose(): void {
 		if (this.#disposed) return;
 		this.#disposed = true;
+		this.#unsubscribeSettings?.();
+		this.#unsubscribeSettings = undefined;
 		this.#toolImageGenerations.clear();
 		this.#kittyConversionsInFlight.clear();
 		this.#convertedKittyImages.clear();

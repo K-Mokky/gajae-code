@@ -175,9 +175,18 @@ export class SvgFigure implements Component {
 	}
 
 	dispose(): void {
+		if (this.#disposed) return;
 		this.#disposed = true;
 		clearTimeout(this.#timer);
 		this.#timer = undefined;
+		this.#source = "";
+		this.#attempt = undefined;
+		this.#raster = undefined;
+		this.#failed = undefined;
+		this.#failedLayoutDependent = false;
+		this.#layout = undefined;
+		this.#width = undefined;
+		this.#image = undefined;
 	}
 
 	debugState(): Record<string, unknown> {
@@ -357,5 +366,10 @@ export class SvgFigure implements Component {
 
 	get failed(): boolean {
 		return this.#failed === this.#source;
+	}
+
+	/** Whether this failure may recover when terminal raster limits change. */
+	get retryable(): boolean {
+		return this.failed && this.#failedLayoutDependent;
 	}
 }

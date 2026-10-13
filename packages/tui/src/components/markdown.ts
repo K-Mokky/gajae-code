@@ -423,9 +423,9 @@ export interface MarkdownTheme {
 	resolveMermaidAscii?: (source: string) => string | null;
 	/**
 	 * Resolve an SVG figure component by fenced block source text. Components
-	 * are retained by fence order for the lifetime of this Markdown instance.
-	 * Return null for a stable fenced-code fallback; return undefined when a
-	 * declined fence should be retried on the next render.
+	 * are retained by fence order. Return null for a stable fenced-code fallback
+	 * that disposes a previous component; return undefined for a fallback that
+	 * preserves the previous component and should be retried on the next render.
 	 */
 	resolveSvgFigure?: (source: string, context: SvgFigureResolveContext) => Component | null | undefined;
 	symbols: SymbolTheme;
@@ -438,6 +438,8 @@ export interface SvgFigureResolveContext {
 	closed: boolean;
 	/** Request a repaint after the figure's asynchronous output changes. */
 	onChange: () => void;
+	/** Available render width in terminal cells. */
+	width: number;
 	/** The component previously resolved for this fence position, if any. */
 	previous?: Component;
 }
@@ -612,12 +614,13 @@ export class Markdown implements Component {
 		}
 	}
 
-	#resolveDynamicFigure(source: string, closed: boolean): Component | undefined {
+	#resolveDynamicFigure(source: string, closed: boolean, width: number): Component | undefined {
 		const index = this.#nextDynamicFigureIndex++;
 		const previous = this.#dynamicFigures.get(index);
 		const component = this.#theme.resolveSvgFigure?.(source, {
 			streaming: this.#streaming,
 			closed,
+			width,
 			onChange: () => {
 				if (this.#disposed) return;
 				this.invalidate();
@@ -631,11 +634,15 @@ export class Markdown implements Component {
 			this.#hasActiveDynamicSvgFigures = true;
 			return component;
 		}
-		if (component === undefined) this.#hasRetryableSvgFigureFallback = true;
-		// Retain a failed resolver component so its owner can retry it when the
-		// source at this fence position changes instead of rasterizing the same
-		// final failure on every redraw.
-		if (previous) this.#dynamicFigures.set(index, previous);
+		if (component === undefined) {
+			this.#hasRetryableSvgFigureFallback = true;
+			if (previous) this.#dynamicFigures.set(index, previous);
+		} else if (previous) {
+			// A stable fallback no longer needs the component or any raster data it
+			// retains. A future source change can create a fresh component.
+			this.#dynamicFigures.delete(index);
+			previous.dispose?.();
+		}
 		return undefined;
 	}
 
@@ -1377,7 +1384,7 @@ export class Markdown implements Component {
 				// string in token.lang, so match its normalized language token.
 				const language = token.lang?.trim().split(/[ \t]/, 1)[0]?.toLowerCase();
 				if (allowSvgFigure && language === "svg" && this.#theme.resolveSvgFigure) {
-					const figure = this.#resolveDynamicFigure(token.text, isClosedSvgFence(token.raw));
+					const figure = this.#resolveDynamicFigure(token.text, isClosedSvgFence(token.raw), width);
 					if (figure) {
 						// SVG figures are components that render directly
 						const figureLines = figure.render(width);

@@ -1,11 +1,18 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import type { AssistantMessage } from "@gajae-code/ai";
-import { resetSettingsForTest, Settings } from "@gajae-code/coding-agent/config/settings";
+import { resetSettingsForTest, Settings, settings } from "@gajae-code/coding-agent/config/settings";
 import { AssistantMessageComponent } from "@gajae-code/coding-agent/modes/components/assistant-message";
 import { clearMermaidCache } from "@gajae-code/coding-agent/modes/theme/mermaid-cache";
 import { initTheme } from "@gajae-code/coding-agent/modes/theme/theme";
-import { ImageProtocol, setTerminalImageProtocol, TERMINAL, withTerminalGraphicsFallback } from "@gajae-code/tui";
+import {
+	getCellDimensions,
+	ImageProtocol,
+	setCellDimensions,
+	setTerminalImageProtocol,
+	TERMINAL,
+	withTerminalGraphicsFallback,
+} from "@gajae-code/tui";
 
 const originalImageProtocol = TERMINAL.imageProtocol;
 
@@ -143,6 +150,76 @@ describe("AssistantMessageComponent SVG markdown", () => {
 			expect(rendered).not.toContain("<svg");
 		} finally {
 			component.dispose();
+			setTerminalImageProtocol(originalProtocol);
+		}
+	});
+
+	it("honors terminal.showImages when changed after an SVG message is created", async () => {
+		const originalProtocol = TERMINAL.imageProtocol;
+		setTerminalImageProtocol(ImageProtocol.Kitty);
+		settings.set("terminal.showImages", false);
+		let rasterized = Promise.withResolvers<void>();
+		let awaitRasterization = false;
+		const component = new AssistantMessageComponent(
+			createAssistantMessage('```svg\n<svg width="10" height="10"><rect width="10" height="10"/></svg>\n```'),
+			false,
+			() => {
+				if (awaitRasterization && settings.get("terminal.showImages")) rasterized.resolve();
+			},
+		);
+		try {
+			const hidden = Bun.stripANSI(component.render(120).join("\n"));
+			expect(hidden).toContain("```svg");
+			expect(hidden).toContain("<svg");
+			expect(hidden).not.toContain("\x1b_G");
+
+			settings.set("terminal.showImages", true);
+			rasterized = Promise.withResolvers<void>();
+			awaitRasterization = true;
+			expect(component.render(120).join("\n")).not.toContain("```svg");
+			await rasterized.promise;
+			awaitRasterization = false;
+			expect(component.render(120).join("\n")).toContain("\x1b_G");
+
+			settings.set("terminal.showImages", false);
+			const disabledAgain = Bun.stripANSI(component.render(120).join("\n"));
+			expect(disabledAgain).toContain("```svg");
+			expect(disabledAgain).toContain("<svg");
+		} finally {
+			component.dispose();
+			setTerminalImageProtocol(originalProtocol);
+		}
+	});
+
+	it("retries a layout-dependent SVG failure after the terminal canvas shrinks", async () => {
+		const originalProtocol = TERMINAL.imageProtocol;
+		const originalCellDimensions = getCellDimensions();
+		setTerminalImageProtocol(ImageProtocol.Kitty);
+		settings.set("terminal.showImages", true);
+		setCellDimensions({ widthPx: 5000, heightPx: 5000 });
+		const failed = Promise.withResolvers<void>();
+		const rasterized = Promise.withResolvers<void>();
+		let updates = 0;
+		const component = new AssistantMessageComponent(
+			createAssistantMessage('```svg\n<svg width="10" height="10"><rect width="10" height="10"/></svg>\n```'),
+			false,
+			() => {
+				if (++updates === 1) failed.resolve();
+				else rasterized.resolve();
+			},
+		);
+		try {
+			component.render(120);
+			await failed.promise;
+			expect(Bun.stripANSI(component.render(120).join("\n"))).toContain("```svg");
+
+			setCellDimensions({ widthPx: 9, heightPx: 18 });
+			component.render(120);
+			await rasterized.promise;
+			expect(component.render(120).join("\n")).toContain("\x1b_G");
+		} finally {
+			component.dispose();
+			setCellDimensions(originalCellDimensions);
 			setTerminalImageProtocol(originalProtocol);
 		}
 	});
