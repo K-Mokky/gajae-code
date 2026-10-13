@@ -1323,7 +1323,8 @@ async function waitForBrokerDiscoveryOwnerGone(
 	deadline: number,
 ): Promise<void> {
 	for (;;) {
-		const current = await readBrokerDiscoveryBeforeDeadline(agentDir, undefined, deadline);
+		// Heartbeat expiry is not proof that this owner removed its publication.
+		const current = await readBrokerDiscoveryBeforeDeadline(agentDir, Number.POSITIVE_INFINITY, deadline);
 		if (!current || !sameBrokerOwner(current, discovery)) return;
 		const remainingMs = deadline - ensureBrokerTiming.now();
 		if (remainingMs <= 0) throw new Error(`SDK broker ${discovery.pid} retained discovery during retirement.`);

@@ -560,7 +560,7 @@ it("spends the parent discovery budget one composition leg at a time", async () 
 	}
 }, 15_000);
 
-it("bounds same-process retirement reads and preserves both fail-closed errors", async () => {
+it("bounds same-process retirement reads without heartbeat expiry and preserves both errors", async () => {
 	const dir = await temp();
 	const incarnation = brokerProcessIncarnation(process.pid);
 	if (!incarnation) throw new Error("test process incarnation unavailable");
@@ -579,10 +579,15 @@ it("bounds same-process retirement reads and preserves both fail-closed errors",
 		heartbeatAt: Date.now(),
 	};
 	const stalledRead = Promise.withResolvers<BrokerDiscovery | null>();
+	const requestedTtls: Array<number | undefined> = [];
 	let reads = 0;
-	const readSpy = spyOn(brokerDiscovery, "readBrokerDiscovery").mockImplementation(() => {
+	const readSpy = spyOn(brokerDiscovery, "readBrokerDiscovery").mockImplementation((_agentDir, ttlMs) => {
 		reads += 1;
-		return reads < 4 ? Promise.resolve(stale) : stalledRead.promise;
+		requestedTtls.push(ttlMs);
+		if (reads < 4) return Promise.resolve(stale);
+		// A normal TTL read now hides the still-published owner as expired; the
+		// retirement check must use the raw identity and remain deadline-bounded.
+		return ttlMs === Number.POSITIVE_INFINITY ? stalledRead.promise : Promise.resolve(null);
 	});
 	try {
 		const failure = await reconcileBrokerGenerationForStartup({ agentDir: dir }, Date.now() + 1_000).then(
@@ -597,6 +602,7 @@ it("bounds same-process retirement reads and preserves both fail-closed errors",
 		if (!(failure.errors[1] instanceof Error)) throw new Error("expected bounded discovery read failure");
 		expect(failure.errors[1].message).toBe("Timed out reading SDK broker discovery.");
 		expect(reads).toBe(4);
+		expect(requestedTtls.at(-1)).toBe(Number.POSITIVE_INFINITY);
 	} finally {
 		readSpy.mockRestore();
 		stalledRead.resolve(null);
