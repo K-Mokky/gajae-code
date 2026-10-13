@@ -3230,8 +3230,8 @@ describe("AskTool deep-interview recorder persistence", () => {
 				transcript_boundary: { byte_length: 1, device: "1", inode: "1", leaf_id: null },
 			} as DeepInterviewExecutionApprovalRecord,
 		});
-		spyOn(stateRuntime, "revokeDeepInterviewExecutionApproval").mockResolvedValue();
-		spyOn(stateRuntime, "revokeNonCrystalExecutionApproval").mockResolvedValue();
+		const revokeCrystal = spyOn(stateRuntime, "revokeDeepInterviewExecutionApproval").mockResolvedValue();
+		const revokeOrdinary = spyOn(stateRuntime, "revokeNonCrystalExecutionApproval").mockResolvedValue();
 		const tool = new AskTool(
 			createSession({
 				settings: Settings.isolated({ "ask.timeout": 0.001 }),
@@ -3271,6 +3271,8 @@ describe("AskTool deep-interview recorder persistence", () => {
 		// a timeout is not consent and must not mint a durable execution approval.
 		expect(result.details?.selectedOptions).toEqual([]);
 		expect(record).not.toHaveBeenCalled();
+		expect(revokeCrystal).not.toHaveBeenCalled();
+		expect(revokeOrdinary).not.toHaveBeenCalled();
 	});
 	it("does not auto-select an execution gate on ask timeout", async () => {
 		const tool = new AskTool(

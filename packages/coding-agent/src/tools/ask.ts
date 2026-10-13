@@ -1675,14 +1675,15 @@ export class AskTool implements AgentTool<AskParametersSchema, AskToolDetails> {
 			) {
 				await this.#recordDeepInterviewRound(q, selectedOptions, customInput);
 			}
-			await this.#recordDeepInterviewExecutionApproval(
-				q,
-				selectedOptions,
-				customInput,
-				_toolCallId,
-				executionGateId,
-				executionPresentation,
-			);
+			if (!(timedOut && q.workflowGate?.stage === "ralplan" && q.workflowGate.kind === "approval"))
+				await this.#recordDeepInterviewExecutionApproval(
+					q,
+					selectedOptions,
+					customInput,
+					_toolCallId,
+					executionGateId,
+					executionPresentation,
+				);
 			const details: AskToolDetails = {
 				question: q.question,
 				options: optionLabels,
