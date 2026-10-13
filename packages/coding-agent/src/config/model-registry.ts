@@ -6068,32 +6068,42 @@ export class ModelRegistry {
 	/** Configured API-key sources in models.yml precedence order, excluding absent environment values. */
 	getProviderConfigApiKeySources(
 		provider: string,
-	): Array<{ kind: "environment"; name: string } | { kind: "models-yml" }> {
+	): Array<{ kind: "environment"; name: string; provider: string } | { kind: "models-yml"; provider: string }> {
 		const normalizedProvider = resolveOAuthStorageProvider(provider);
 		const configuredProviders = this.#acceptedConfigValue?.providers;
-		const configured =
-			configuredProviders?.[provider] ??
-			Object.entries(configuredProviders ?? {}).find(
-				([configuredProvider]) => resolveOAuthStorageProvider(configuredProvider) === normalizedProvider,
-			)?.[1];
-		const sources: Array<{ kind: "environment"; name: string } | { kind: "models-yml" }> = [];
-		const addSource = (apiKey: string | undefined, apiKeyEnv: string | undefined): void => {
+		const configuredAliases = Object.entries(configuredProviders ?? {}).filter(
+			([configuredProvider]) => resolveOAuthStorageProvider(configuredProvider) === normalizedProvider,
+		);
+		const sources: Array<
+			{ kind: "environment"; name: string; provider: string } | { kind: "models-yml"; provider: string }
+		> = [];
+		const addSource = (
+			configuredProvider: string,
+			apiKey: string | undefined,
+			apiKeyEnv: string | undefined,
+		): void => {
 			if (apiKey) {
-				if (Bun.env[apiKey]) sources.push({ kind: "environment", name: apiKey });
-				else sources.push({ kind: "models-yml" });
+				if (Bun.env[apiKey]) sources.push({ kind: "environment", name: apiKey, provider: configuredProvider });
+				else sources.push({ kind: "models-yml", provider: configuredProvider });
 				return;
 			}
 			if (apiKeyEnv && $rotatingCredentialEnv(apiKeyEnv)) {
-				sources.push({ kind: "environment", name: apiKeyEnv });
+				sources.push({ kind: "environment", name: apiKeyEnv, provider: configuredProvider });
 			}
 		};
-		addSource(configured?.apiKey, configured?.apiKeyEnv);
-		addSource(configured?.openaiCompat?.apiKey, configured?.openaiCompat?.apiKeyEnv);
+		for (const [configuredProvider, configured] of configuredAliases) {
+			addSource(configuredProvider, configured.apiKey, configured.apiKeyEnv);
+			addSource(configuredProvider, configured.openaiCompat?.apiKey, configured.openaiCompat?.apiKeyEnv);
+		}
 		return sources.filter(
 			(source, index) =>
-				(source.kind === "environment"
-					? sources.findIndex(candidate => candidate.kind === "environment" && candidate.name === source.name)
-					: sources.findIndex(candidate => candidate.kind === "models-yml")) === index,
+				source.kind === "models-yml" ||
+				sources.findIndex(
+					candidate =>
+						candidate.kind === "environment" &&
+						candidate.name === source.name &&
+						candidate.provider === source.provider,
+				) === index,
 		);
 	}
 

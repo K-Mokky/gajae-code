@@ -15,7 +15,6 @@
  */
 
 import { Buffer } from "node:buffer";
-import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { $credentialEnv, $envpos, getTrustedHomeDir, isEnoent, logger } from "@gajae-code/utils";
@@ -212,7 +211,7 @@ async function isAvailableAdcFileCredentialSource(credentials: AdcFileCredential
 	if ("file" in source) {
 		try {
 			if (!(await fs.stat(source.file)).isFile()) return false;
-			await fs.access(source.file, fsSync.constants.R_OK);
+			extractSubjectToken(await fs.readFile(source.file, "utf8"), source.format, `file ${source.file}`);
 			return true;
 		} catch {
 			return false;

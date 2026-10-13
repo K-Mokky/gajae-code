@@ -36,6 +36,7 @@ import {
 import type { BedrockOptions } from "./providers/amazon-bedrock";
 import type { AnthropicOptions } from "./providers/anthropic";
 import {
+	hasAwsInstanceProfileCredentialSource,
 	hasResolvableAwsProfileSource,
 	isValidBedrockBearerToken,
 	readAwsStaticEnvironmentCredentials,
@@ -121,7 +122,7 @@ type KeyResolver = string | (() => string | undefined);
 export type EnvApiKeyCredentialSource =
 	| { kind: "environment"; name: string }
 	| { kind: "google-adc"; source: "explicit-file" | "default-file" | "metadata-server" }
-	| { kind: "aws"; source: "bearer-token" | "environment-credentials" | "profile" }
+	| { kind: "aws"; source: "bearer-token" | "environment-credentials" | "profile" | "instance-profile" }
 	| { kind: "unknown" };
 
 const serviceProviderMap: Record<string, KeyResolver> = {
@@ -289,7 +290,10 @@ export async function getEnvApiKeyCredentialSources(
 	options?: { fetch?: FetchImpl },
 ): Promise<EnvApiKeyCredentialSource[]> {
 	const sources: EnvApiKeyCredentialSource[] = getEnvApiKeyEnvNames(provider).map(
-		(name): EnvApiKeyCredentialSource => ({ kind: "environment", name }),
+		(name): EnvApiKeyCredentialSource =>
+			provider === "amazon-bedrock" && name === "AWS_BEARER_TOKEN_BEDROCK"
+				? { kind: "aws", source: "bearer-token" }
+				: { kind: "environment", name },
 	);
 
 	if (provider === "google-vertex") {
@@ -299,11 +303,16 @@ export async function getEnvApiKeyCredentialSources(
 			const source = await getVertexCredentialSource({ fetch: options?.fetch });
 			if (source) sources.push({ kind: "google-adc", source });
 		}
-	} else if (provider === "amazon-bedrock" && getEnvApiKey(provider) !== undefined) {
+	} else if (provider === "amazon-bedrock") {
+		const bearerToken = $credentialEnv("AWS_BEARER_TOKEN_BEDROCK");
+		if (bearerToken && !isValidBedrockBearerToken(bearerToken)) return sources;
 		if (readAwsStaticEnvironmentCredentials()) {
 			sources.push({ kind: "aws", source: "environment-credentials" });
 		}
 		if (hasResolvableAwsProfileSource()) sources.push({ kind: "aws", source: "profile" });
+		if (await hasAwsInstanceProfileCredentialSource({ fetch: options?.fetch })) {
+			sources.push({ kind: "aws", source: "instance-profile" });
+		}
 	}
 
 	return sources;

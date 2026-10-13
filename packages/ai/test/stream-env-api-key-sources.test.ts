@@ -23,6 +23,7 @@ const envNames = [
 	"AWS_PROFILE",
 	"AWS_SHARED_CREDENTIALS_FILE",
 	"AWS_CONFIG_FILE",
+	"AWS_EC2_METADATA_DISABLED",
 	"KIRO_API_KEY",
 	"AWS_BEARER_TOKEN_KIRO",
 	"GOOGLE_CLOUD_API_KEY",
@@ -69,6 +70,7 @@ describe("environment API-key source names", () => {
 
 	it("distinguishes AWS environment credentials from an API key", async () => {
 		delete Bun.env.AWS_BEARER_TOKEN_BEDROCK;
+		Bun.env.AWS_EC2_METADATA_DISABLED = "true";
 		Bun.env.AWS_ACCESS_KEY_ID = "aws-access-key-test";
 		Bun.env.AWS_SECRET_ACCESS_KEY = "aws-secret-key-test";
 
@@ -82,6 +84,7 @@ describe("environment API-key source names", () => {
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-bedrock-sources-"));
 		tempDirs.push(dir);
 		Bun.env.AWS_BEARER_TOKEN_BEDROCK = "bedrock-bearer-test";
+		Bun.env.AWS_EC2_METADATA_DISABLED = "true";
 		Bun.env.AWS_ACCESS_KEY_ID = "aws-access-key-test";
 		Bun.env.AWS_SECRET_ACCESS_KEY = "aws-secret-key-test";
 		Bun.env.AWS_PROFILE = "work";
@@ -95,11 +98,59 @@ describe("environment API-key source names", () => {
 
 		const sources = await getEnvApiKeyCredentialSources("amazon-bedrock");
 		expect(sources).toEqual([
-			{ kind: "environment", name: "AWS_BEARER_TOKEN_BEDROCK" },
+			{ kind: "aws", source: "bearer-token" },
 			{ kind: "aws", source: "environment-credentials" },
 			{ kind: "aws", source: "profile" },
 		]);
 		expect(await getEnvApiKeyCredentialSource("amazon-bedrock")).toEqual(sources[0]);
+	});
+
+	it("detects IMDSv2 instance-profile credentials without fetching the role secret", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-bedrock-imds-source-"));
+		tempDirs.push(dir);
+		const credentialsPath = path.join(dir, "credentials");
+		const configPath = path.join(dir, "config");
+		await Bun.write(credentialsPath, "");
+		await Bun.write(configPath, "");
+		delete Bun.env.AWS_BEARER_TOKEN_BEDROCK;
+		delete Bun.env.AWS_ACCESS_KEY_ID;
+		delete Bun.env.AWS_SECRET_ACCESS_KEY;
+		delete Bun.env.AWS_SESSION_TOKEN;
+		Bun.env.AWS_PROFILE = "gjc-missing-profile";
+		Bun.env.AWS_SHARED_CREDENTIALS_FILE = credentialsPath;
+		Bun.env.AWS_CONFIG_FILE = configPath;
+		const requests: Array<{ url: string; method: string | undefined; token: string | null }> = [];
+		const fetch = async (input: Parameters<typeof globalThis.fetch>[0], init?: RequestInit): Promise<Response> => {
+			const url = input instanceof URL ? input.href : String(input);
+			const method = init?.method;
+			const headers = new Headers(init?.headers);
+			requests.push({ url, method, token: headers.get("x-aws-ec2-metadata-token") });
+			if (url.endsWith("/latest/api/token")) return new Response("imds-session-token");
+			if (url.endsWith("/latest/meta-data/iam/security-credentials/")) {
+				return new Response("instance-profile-role");
+			}
+			throw new Error(`unexpected AWS metadata request: ${url}`);
+		};
+
+		Bun.env.AWS_EC2_METADATA_DISABLED = "true";
+		expect(await getEnvApiKeyCredentialSources("amazon-bedrock", { fetch })).toEqual([]);
+		expect(requests).toEqual([]);
+
+		Bun.env.AWS_EC2_METADATA_DISABLED = "false";
+		const sources = await getEnvApiKeyCredentialSources("amazon-bedrock", { fetch });
+		expect(sources).toEqual([{ kind: "aws", source: "instance-profile" }]);
+		expect(requests).toEqual([
+			{
+				url: "http://169.254.169.254/latest/api/token",
+				method: "PUT",
+				token: null,
+			},
+			{
+				url: "http://169.254.169.254/latest/meta-data/iam/security-credentials/",
+				method: undefined,
+				token: "imds-session-token",
+			},
+		]);
 	});
 
 	it("omits Kiro environment variables rejected by the provider resolver", async () => {
@@ -114,10 +165,21 @@ describe("environment API-key source names", () => {
 	});
 
 	it("omits a Bedrock bearer token rejected by its provider resolver", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-bedrock-invalid-bearer-"));
+		tempDirs.push(dir);
 		Bun.env.AWS_BEARER_TOKEN_BEDROCK = "\x01invalid-bedrock-token";
+		Bun.env.AWS_ACCESS_KEY_ID = "aws-access-key-test";
+		Bun.env.AWS_SECRET_ACCESS_KEY = "aws-secret-key-test";
+		Bun.env.AWS_EC2_METADATA_DISABLED = "true";
+		Bun.env.AWS_PROFILE = "gjc-missing-profile";
+		Bun.env.AWS_SHARED_CREDENTIALS_FILE = path.join(dir, "credentials");
+		Bun.env.AWS_CONFIG_FILE = path.join(dir, "config");
+		await Bun.write(Bun.env.AWS_SHARED_CREDENTIALS_FILE, "");
+		await Bun.write(Bun.env.AWS_CONFIG_FILE, "");
 
 		expect(getEnvApiKeyEnvNames("amazon-bedrock")).toEqual([]);
 		expect(await getEnvApiKeyCredentialSource("amazon-bedrock")).toBeUndefined();
+		expect(await getEnvApiKeyCredentialSources("amazon-bedrock")).toEqual([]);
 	});
 
 	it("tracks explicit Vertex ADC file creation and removal without stale cached presence", async () => {
@@ -253,7 +315,7 @@ describe("environment API-key source names", () => {
 		});
 	});
 
-	it("omits external-account ADC until its subject-token file is readable", async () => {
+	it("omits external-account ADC until its subject-token file contains a valid token", async () => {
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-vertex-adc-subject-file-"));
 		tempDirs.push(dir);
 		const credentialPath = path.join(dir, "adc.json");
@@ -264,7 +326,10 @@ describe("environment API-key source names", () => {
 				type: "external_account",
 				audience: "//iam.googleapis.com/projects/test/locations/global/workloadIdentityPools/test/providers/test",
 				subject_token_type: "urn:ietf:params:oauth:token-type:jwt",
-				credential_source: { file: subjectTokenPath },
+				credential_source: {
+					file: subjectTokenPath,
+					format: { type: "json", subject_token_field_name: "subject_token" },
+				},
 			}),
 		);
 		delete Bun.env.GOOGLE_CLOUD_API_KEY;
@@ -274,7 +339,12 @@ describe("environment API-key source names", () => {
 
 		expect(await getEnvApiKeyCredentialSource("google-vertex")).toBeUndefined();
 
-		await Bun.write(subjectTokenPath, "subject-token-value");
+		await Bun.write(subjectTokenPath, "");
+		expect(await getEnvApiKeyCredentialSource("google-vertex")).toBeUndefined();
+		await Bun.write(subjectTokenPath, JSON.stringify({}));
+		expect(await getEnvApiKeyCredentialSource("google-vertex")).toBeUndefined();
+
+		await Bun.write(subjectTokenPath, JSON.stringify({ subject_token: "subject-token-value" }));
 		expect(await getEnvApiKeyCredentialSource("google-vertex")).toEqual({
 			kind: "google-adc",
 			source: "explicit-file",

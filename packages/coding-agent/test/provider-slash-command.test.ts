@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -14,7 +14,12 @@ let tempAgentDir: string | undefined;
 const authStorages: AuthStorage[] = [];
 const modelRegistries: ModelRegistry[] = [];
 const originalAgentDir = getAgentDir();
+const originalAwsMetadataDisabled = Bun.env.AWS_EC2_METADATA_DISABLED;
 const TEST_PROVIDER_KEY_ENV = "GJC_PROVIDER_SLASH_TEST_KEY";
+
+beforeEach(() => {
+	Bun.env.AWS_EC2_METADATA_DISABLED = "true";
+});
 
 afterEach(async () => {
 	setAgentDir(originalAgentDir);
@@ -24,6 +29,8 @@ afterEach(async () => {
 		await fs.rm(tempAgentDir, { recursive: true, force: true });
 		tempAgentDir = undefined;
 	}
+	if (originalAwsMetadataDisabled === undefined) delete Bun.env.AWS_EC2_METADATA_DISABLED;
+	else Bun.env.AWS_EC2_METADATA_DISABLED = originalAwsMetadataDisabled;
 });
 
 describe("provider slash command", () => {
@@ -270,7 +277,96 @@ describe("provider slash command", () => {
 			expect(withAwsCredentials).not.toContain("runtime-bedrock-api-key-secret");
 			expect(withAwsCredentials).not.toContain("aws-access-key-test");
 			expect(withAwsCredentials).not.toContain("aws-secret-key-test");
+
+			Bun.env.AWS_BEARER_TOKEN_BEDROCK = "bedrock-bearer-secret";
+			const withBearerToken = await status();
+			expect(withBearerToken).toContain("amazon-bedrock: AWS bearer token (env AWS_BEARER_TOKEN_BEDROCK)");
+			expect(withBearerToken).toContain("shadowed: AWS environment credentials");
+			expect(withBearerToken).not.toContain("bedrock-bearer-secret");
 		} finally {
+			for (const name of envNames) {
+				const original = originalEnv.get(name);
+				if (original === undefined) delete Bun.env[name];
+				else Bun.env[name] = original;
+			}
+		}
+	});
+
+	it("reports an available Bedrock instance profile without retrieving role credentials", async () => {
+		tempAgentDir = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-provider-slash-imds-"));
+		setAgentDir(tempAgentDir);
+		const envNames = [
+			"AWS_EC2_METADATA_DISABLED",
+			"AWS_BEARER_TOKEN_BEDROCK",
+			"AWS_ACCESS_KEY_ID",
+			"AWS_SECRET_ACCESS_KEY",
+			"AWS_SESSION_TOKEN",
+			"AWS_PROFILE",
+			"AWS_SHARED_CREDENTIALS_FILE",
+			"AWS_CONFIG_FILE",
+			"GOOGLE_APPLICATION_CREDENTIALS",
+			"GOOGLE_CLOUD_API_KEY",
+			"GOOGLE_CLOUD_PROJECT",
+			"GOOGLE_CLOUD_LOCATION",
+		] as const;
+		const originalEnv = new Map(envNames.map(name => [name, Bun.env[name]]));
+		const credentialsPath = path.join(tempAgentDir, "aws-credentials");
+		const configPath = path.join(tempAgentDir, "aws-config");
+		await Bun.write(credentialsPath, "");
+		await Bun.write(configPath, "");
+		Bun.env.AWS_EC2_METADATA_DISABLED = "false";
+		Bun.env.AWS_PROFILE = "gjc-missing-profile";
+		Bun.env.AWS_SHARED_CREDENTIALS_FILE = credentialsPath;
+		Bun.env.AWS_CONFIG_FILE = configPath;
+		for (const name of [
+			"AWS_BEARER_TOKEN_BEDROCK",
+			"AWS_ACCESS_KEY_ID",
+			"AWS_SECRET_ACCESS_KEY",
+			"AWS_SESSION_TOKEN",
+			"GOOGLE_APPLICATION_CREDENTIALS",
+			"GOOGLE_CLOUD_API_KEY",
+			"GOOGLE_CLOUD_PROJECT",
+			"GOOGLE_CLOUD_LOCATION",
+		]) {
+			delete Bun.env[name];
+		}
+		const requests: string[] = [];
+		const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation((async (
+			input: Parameters<typeof fetch>[0],
+			init?: RequestInit,
+		) => {
+			const url = String(input);
+			requests.push(url);
+			if (url.endsWith("/latest/api/token")) {
+				expect(init?.method).toBe("PUT");
+				return new Response("metadata-session-token");
+			}
+			if (url.endsWith("/latest/meta-data/iam/security-credentials/")) {
+				expect(new Headers(init?.headers).get("x-aws-ec2-metadata-token")).toBe("metadata-session-token");
+				return new Response("instance-profile-role");
+			}
+			throw new Error(`unexpected metadata fetch: ${url}`);
+		}) as unknown as typeof fetch);
+		try {
+			const authStorage = await AuthStorage.create(path.join(tempAgentDir, "auth.db"));
+			authStorages.push(authStorage);
+			const registry = new ModelRegistry(authStorage, path.join(tempAgentDir, "models.yml"));
+			modelRegistries.push(registry);
+			const outputs: string[] = [];
+			const command = BUILTIN_SLASH_COMMANDS_INTERNAL.find(entry => entry.name === "provider");
+			await command?.handle?.({ name: "provider", args: "status", text: "/provider status" }, {
+				session: { modelRegistry: registry },
+				output: (text: string) => outputs.push(text),
+			} as unknown as SlashCommandRuntime);
+
+			expect(outputs.join("\n")).toContain("amazon-bedrock: AWS instance profile credentials");
+			expect(outputs.join("\n")).not.toContain("AWS credentials unavailable");
+			expect(requests).toEqual([
+				"http://169.254.169.254/latest/api/token",
+				"http://169.254.169.254/latest/meta-data/iam/security-credentials/",
+			]);
+		} finally {
+			fetchSpy.mockRestore();
 			for (const name of envNames) {
 				const original = originalEnv.get(name);
 				if (original === undefined) delete Bun.env[name];
@@ -964,6 +1060,51 @@ describe("provider slash command", () => {
 		}
 	});
 
+	it("reports distinct config environment sources across OAuth storage aliases", async () => {
+		tempAgentDir = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-provider-slash-aliases-"));
+		setAgentDir(tempAgentDir);
+		const envNames = ["GJC_CODEX_CANONICAL_KEY", "GJC_CODEX_DEVICE_KEY"] as const;
+		const originalEnv = new Map(envNames.map(name => [name, Bun.env[name]]));
+		Bun.env.GJC_CODEX_CANONICAL_KEY = "canonical-codex-secret";
+		Bun.env.GJC_CODEX_DEVICE_KEY = "device-codex-secret";
+		try {
+			const authStorage = await AuthStorage.create(path.join(tempAgentDir, "auth.db"));
+			authStorages.push(authStorage);
+			await Bun.write(
+				path.join(tempAgentDir, "models.yml"),
+				YAML.stringify({
+					providers: {
+						"openai-codex": { apiKeyEnv: "GJC_CODEX_CANONICAL_KEY" },
+						"openai-codex-device": { apiKeyEnv: "GJC_CODEX_DEVICE_KEY" },
+					},
+				}),
+			);
+			const registry = new ModelRegistry(authStorage, path.join(tempAgentDir, "models.yml"));
+			modelRegistries.push(registry);
+			await registry.refresh("offline");
+			const outputs: string[] = [];
+			const command = BUILTIN_SLASH_COMMANDS_INTERNAL.find(entry => entry.name === "provider");
+			await command?.handle?.({ name: "provider", args: "status", text: "/provider status" }, {
+				session: { modelRegistry: registry },
+				output: (text: string) => outputs.push(text),
+			} as unknown as SlashCommandRuntime);
+
+			const output = outputs.join("\n");
+			expect(output).toContain("openai-codex: API key (models.yml; source varies by provider alias)");
+			expect(output).toContain(
+				"configured sources: API key (env GJC_CODEX_CANONICAL_KEY), API key (env GJC_CODEX_DEVICE_KEY)",
+			);
+			expect(output).not.toContain("canonical-codex-secret");
+			expect(output).not.toContain("device-codex-secret");
+		} finally {
+			for (const name of envNames) {
+				const original = originalEnv.get(name);
+				if (original === undefined) delete Bun.env[name];
+				else Bun.env[name] = original;
+			}
+		}
+	});
+
 	it("wraps assembled shadowed credential lines to terminal width", async () => {
 		tempAgentDir = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-provider-slash-"));
 		setAgentDir(tempAgentDir);
@@ -1154,6 +1295,44 @@ describe("provider slash command", () => {
 			);
 		} finally {
 			fetchSpy.mockRestore();
+			for (const name of envNames) {
+				const original = originalEnv.get(name);
+				if (original === undefined) delete Bun.env[name];
+				else Bun.env[name] = original;
+			}
+		}
+	});
+
+	it("omits Google Vertex when the existing ADC file is invalid", async () => {
+		tempAgentDir = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-provider-slash-invalid-vertex-"));
+		setAgentDir(tempAgentDir);
+		const envNames = [
+			"GOOGLE_APPLICATION_CREDENTIALS",
+			"GOOGLE_CLOUD_API_KEY",
+			"GOOGLE_CLOUD_PROJECT",
+			"GOOGLE_CLOUD_LOCATION",
+		] as const;
+		const originalEnv = new Map(envNames.map(name => [name, Bun.env[name]]));
+		const credentialPath = path.join(tempAgentDir, "invalid-adc.json");
+		await Bun.write(credentialPath, JSON.stringify({ type: "unsupported" }));
+		Bun.env.GOOGLE_APPLICATION_CREDENTIALS = credentialPath;
+		Bun.env.GOOGLE_CLOUD_PROJECT = "status-project";
+		Bun.env.GOOGLE_CLOUD_LOCATION = "us-central1";
+		delete Bun.env.GOOGLE_CLOUD_API_KEY;
+		try {
+			const authStorage = await AuthStorage.create(path.join(tempAgentDir, "auth.db"));
+			authStorages.push(authStorage);
+			const registry = new ModelRegistry(authStorage, path.join(tempAgentDir, "models.yml"));
+			modelRegistries.push(registry);
+			const outputs: string[] = [];
+			const command = BUILTIN_SLASH_COMMANDS_INTERNAL.find(entry => entry.name === "provider");
+			await command?.handle?.({ name: "provider", args: "status", text: "/provider status" }, {
+				session: { modelRegistry: registry },
+				output: (text: string) => outputs.push(text),
+			} as unknown as SlashCommandRuntime);
+
+			expect(outputs.join("\n")).not.toContain("google-vertex:");
+		} finally {
 			for (const name of envNames) {
 				const original = originalEnv.get(name);
 				if (original === undefined) delete Bun.env[name];

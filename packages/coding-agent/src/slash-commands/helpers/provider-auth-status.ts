@@ -30,6 +30,10 @@ interface CredentialSource {
 	label: string;
 }
 
+type ConfigApiKeySource =
+	| { kind: "environment"; name: string; provider: string }
+	| { kind: "models-yml"; provider: string };
+
 const MAX_STATUS_VALUE_WIDTH = 120;
 
 function displayStatusValue(value: string): string {
@@ -75,10 +79,31 @@ function environmentSourceLabel(source: EnvApiKeyCredentialSource): string {
 				? "AWS bearer token (env AWS_BEARER_TOKEN_BEDROCK)"
 				: source.source === "environment-credentials"
 					? "AWS environment credentials"
-					: "AWS profile credentials";
+					: source.source === "profile"
+						? "AWS profile credentials"
+						: "AWS instance profile credentials";
 		case "unknown":
 			return "environment credentials";
 	}
+}
+
+function configSourceLabel(source: ConfigApiKeySource, includeProvider = false): string {
+	return source.kind === "environment"
+		? `API key (env ${displayEnvironmentName(source.name)})`
+		: includeProvider
+			? `API key (models.yml ${displayStatusValue(source.provider)})`
+			: "API key (models.yml)";
+}
+
+function configSourcesVaryByAlias(sources: ConfigApiKeySource[]): boolean {
+	const byProvider = new Map<string, Set<string>>();
+	for (const source of sources) {
+		const identities = byProvider.get(source.provider) ?? new Set<string>();
+		identities.add(source.kind === "environment" ? `environment:${source.name}` : `models-yml:${source.provider}`);
+		byProvider.set(source.provider, identities);
+	}
+	const signatures = new Set([...byProvider.values()].map(identities => [...identities].sort().join("\u0000")));
+	return signatures.size > 1;
 }
 
 function addSource(sources: CredentialSource[], source: CredentialSource): void {
@@ -196,10 +221,7 @@ function collectSources(
 		addSource(sources, {
 			kind: "api_key",
 			layer: "config",
-			label:
-				configSource.kind === "environment"
-					? `API key (env ${displayEnvironmentName(configSource.name)})`
-					: "API key (models.yml)",
+			label: configSourceLabel(configSource),
 		});
 	}
 	for (const source of environmentSources) {
@@ -279,10 +301,9 @@ function activeSource(
 		return {
 			kind: "api_key",
 			layer: "config",
-			label:
-				configSource.kind === "environment"
-					? `API key (env ${displayEnvironmentName(configSource.name)})`
-					: "API key (models.yml)",
+			label: configSourcesVaryByAlias(configSources)
+				? "API key (models.yml; source varies by provider alias)"
+				: configSourceLabel(configSource),
 		};
 	}
 	const selectedRowId = authStorage.getSelectedApiKeyCredentialRowId(provider, sessionId, { owner });
@@ -346,8 +367,7 @@ export async function buildProviderAuthStatusText(session: ProviderAuthStatusSes
 					? googleVertexSources.length > 0 ||
 						modelRegistry.getProviderConfigApiKeySources(provider).length > 0 ||
 						hasRuntimeProviderCredential(modelRegistry, provider) ||
-						authStorage.hasRuntimeApiKey(provider) ||
-						authStorage.hasAuth(provider, session.credentialSessionId, { owner })
+						authStorage.hasRuntimeApiKey(provider)
 					: bedrockRouteProviders.has(provider)
 						? bedrockCredentialSources.length > 0 ||
 							authStorage.hasAuth(provider, session.credentialSessionId, { owner })
@@ -359,6 +379,7 @@ export async function buildProviderAuthStatusText(session: ProviderAuthStatusSes
 	const lines = ["Provider credentials (active source per provider):"];
 	for (const provider of providers) {
 		const entries = snapshot.credentials.filter(entry => resolveOAuthStorageProvider(entry.provider) === provider);
+		const configSources = modelRegistry.getProviderConfigApiKeySources(provider);
 		const usesBedrockResolver = bedrockOnlyProviders.has(provider);
 		const hasBedrockRoute = bedrockRouteProviders.has(provider);
 		const environmentSources = googleVertexRouteProviders.has(provider)
@@ -402,6 +423,13 @@ export async function buildProviderAuthStatusText(session: ProviderAuthStatusSes
 				MAX_STATUS_VALUE_WIDTH,
 			),
 		);
+		const configSourceVariesByAlias = active?.layer === "config" && configSourcesVaryByAlias(configSources);
+		if (configSourceVariesByAlias) {
+			const configuredSources = [...new Set(configSources.map(source => configSourceLabel(source, true)))];
+			lines.push(
+				...wrapTextWithAnsi(`  configured sources: ${configuredSources.join(", ")}`, MAX_STATUS_VALUE_WIDTH),
+			);
+		}
 		if (hasBedrockRoute && !usesBedrockResolver) {
 			const bedrockRouteSource = bedrockCredentialSources[0];
 			const bedrockRouteLabel = bedrockRouteSource
@@ -414,6 +442,7 @@ export async function buildProviderAuthStatusText(session: ProviderAuthStatusSes
 				? sources
 						.filter(
 							source =>
+								!(configSourceVariesByAlias && source.layer === "config") &&
 								source.label !== active.label &&
 								!(active.layer === "stored" && source.layer === "stored" && source.kind === active.kind),
 						)
