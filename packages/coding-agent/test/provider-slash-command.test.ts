@@ -99,8 +99,14 @@ describe("provider slash command", () => {
 		setAgentDir(tempAgentDir);
 		const originalAnthropicKey = Bun.env.ANTHROPIC_API_KEY;
 		const originalOpenAiKey = Bun.env.OPENAI_API_KEY;
+		const originalAwsBearerToken = Bun.env.AWS_BEARER_TOKEN_BEDROCK;
+		const originalAwsAccessKey = Bun.env.AWS_ACCESS_KEY_ID;
+		const originalAwsSecretKey = Bun.env.AWS_SECRET_ACCESS_KEY;
 		delete Bun.env.ANTHROPIC_API_KEY;
 		Bun.env.OPENAI_API_KEY = "openai-secret-test-value";
+		delete Bun.env.AWS_BEARER_TOKEN_BEDROCK;
+		Bun.env.AWS_ACCESS_KEY_ID = "aws-access-key-test";
+		Bun.env.AWS_SECRET_ACCESS_KEY = "aws-secret-key-test";
 		try {
 			const authStorage = await AuthStorage.create(path.join(tempAgentDir, "auth.db"));
 			authStorages.push(authStorage);
@@ -124,14 +130,23 @@ describe("provider slash command", () => {
 			const output = outputs.join("\n");
 			expect(output).toContain("anthropic: OAuth (account account-oauth-only)");
 			expect(output).toContain("openai: API key (env OPENAI_API_KEY)");
+			expect(output).toContain("amazon-bedrock: AWS environment credentials");
 			expect(output).not.toMatch(/anthropic:\s+[^\n]*\n\s+shadowed:/);
 			expect(output).not.toContain("openai-secret-test-value");
+			expect(output).not.toContain("aws-access-key-test");
+			expect(output).not.toContain("aws-secret-key-test");
 			expect(output).not.toContain("oauth-secret-test-value");
 		} finally {
 			if (originalAnthropicKey === undefined) delete Bun.env.ANTHROPIC_API_KEY;
 			else Bun.env.ANTHROPIC_API_KEY = originalAnthropicKey;
 			if (originalOpenAiKey === undefined) delete Bun.env.OPENAI_API_KEY;
 			else Bun.env.OPENAI_API_KEY = originalOpenAiKey;
+			if (originalAwsBearerToken === undefined) delete Bun.env.AWS_BEARER_TOKEN_BEDROCK;
+			else Bun.env.AWS_BEARER_TOKEN_BEDROCK = originalAwsBearerToken;
+			if (originalAwsAccessKey === undefined) delete Bun.env.AWS_ACCESS_KEY_ID;
+			else Bun.env.AWS_ACCESS_KEY_ID = originalAwsAccessKey;
+			if (originalAwsSecretKey === undefined) delete Bun.env.AWS_SECRET_ACCESS_KEY;
+			else Bun.env.AWS_SECRET_ACCESS_KEY = originalAwsSecretKey;
 		}
 	});
 
@@ -189,14 +204,29 @@ describe("provider slash command", () => {
 			);
 			await registry.refresh("offline");
 
-			const outputs: string[] = [];
-			await add?.handle?.({ name: "provider", args: "status", text: "/provider status" }, {
-				session: { modelRegistry: registry },
-				output: (text: string) => outputs.push(text),
-			} as unknown as SlashCommandRuntime);
+			const status = async (): Promise<string> => {
+				const outputs: string[] = [];
+				await add?.handle?.({ name: "provider", args: "status", text: "/provider status" }, {
+					session: { modelRegistry: registry },
+					output: (text: string) => outputs.push(text),
+				} as unknown as SlashCommandRuntime);
+				return outputs.join("\n");
+			};
 
-			expect(outputs.join("\n")).toContain(`status-custom: API key (env ${TEST_PROVIDER_KEY_ENV})`);
-			expect(outputs.join("\n")).not.toContain("custom-provider-secret-test-value");
+			const envStatus = await status();
+			expect(envStatus).toContain(`status-custom: API key (env ${TEST_PROVIDER_KEY_ENV})`);
+			expect(envStatus).not.toContain("custom-provider-secret-test-value");
+
+			await authStorage.set("status-custom", { type: "api_key", key: "stored-custom-secret-test-value" });
+			const storedKey = authStorage
+				.exportSnapshot()
+				.credentials.find(entry => entry.provider === "status-custom" && entry.credential.type === "api_key");
+			if (!storedKey) throw new Error("expected the stored custom provider API key");
+			const storedStatus = await status();
+			expect(storedStatus).toContain(`status-custom: API key (stored credential id:${storedKey.id})`);
+			expect(storedStatus).toContain(`shadowed: API key (env ${TEST_PROVIDER_KEY_ENV})`);
+			expect(storedStatus).not.toContain("custom-provider-secret-test-value");
+			expect(storedStatus).not.toContain("stored-custom-secret-test-value");
 		} finally {
 			if (originalApiKey === undefined) delete Bun.env[TEST_PROVIDER_KEY_ENV];
 			else Bun.env[TEST_PROVIDER_KEY_ENV] = originalApiKey;

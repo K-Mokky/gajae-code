@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { getEnvApiKeyEnvName, getEnvApiKeyEnvNames } from "@gajae-code/ai/stream";
+import * as path from "node:path";
+import { getEnvApiKeyCredentialSource, getEnvApiKeyEnvName, getEnvApiKeyEnvNames } from "@gajae-code/ai/stream";
 
 const envNames = [
 	"ANTHROPIC_OAUTH_TOKEN",
@@ -7,6 +8,13 @@ const envNames = [
 	"ANTHROPIC_FOUNDRY_API_KEY",
 	"CLAUDE_CODE_USE_FOUNDRY",
 	"OPENAI_API_KEY",
+	"AWS_BEARER_TOKEN_BEDROCK",
+	"AWS_ACCESS_KEY_ID",
+	"AWS_SECRET_ACCESS_KEY",
+	"GOOGLE_CLOUD_API_KEY",
+	"GOOGLE_APPLICATION_CREDENTIALS",
+	"GOOGLE_CLOUD_PROJECT",
+	"GOOGLE_CLOUD_LOCATION",
 ] as const;
 const originals = new Map(envNames.map(name => [name, Bun.env[name]]));
 
@@ -27,7 +35,10 @@ describe("environment API-key source names", () => {
 
 		expect(getEnvApiKeyEnvNames("anthropic")).toEqual(["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"]);
 		expect(getEnvApiKeyEnvName("anthropic")).toBe("ANTHROPIC_OAUTH_TOKEN");
-		expect(getEnvApiKeyEnvName("anthropic")).not.toContain("secret");
+		expect(getEnvApiKeyCredentialSource("anthropic")).toEqual({
+			kind: "environment",
+			name: "ANTHROPIC_OAUTH_TOKEN",
+		});
 	});
 
 	it("resolves the source name for providers with a fixed environment fallback", () => {
@@ -35,5 +46,28 @@ describe("environment API-key source names", () => {
 
 		expect(getEnvApiKeyEnvNames("openai")).toEqual(["OPENAI_API_KEY"]);
 		expect(getEnvApiKeyEnvName("openai")).toBe("OPENAI_API_KEY");
+	});
+
+	it("distinguishes AWS environment credentials from an API key", () => {
+		delete Bun.env.AWS_BEARER_TOKEN_BEDROCK;
+		Bun.env.AWS_ACCESS_KEY_ID = "aws-access-key-test";
+		Bun.env.AWS_SECRET_ACCESS_KEY = "aws-secret-key-test";
+
+		expect(getEnvApiKeyCredentialSource("amazon-bedrock")).toEqual({
+			kind: "aws",
+			source: "environment-credentials",
+		});
+	});
+
+	it("identifies Vertex ADC without exposing the credential file path", () => {
+		delete Bun.env.GOOGLE_CLOUD_API_KEY;
+		Bun.env.GOOGLE_APPLICATION_CREDENTIALS = path.join(process.cwd(), "package.json");
+		Bun.env.GOOGLE_CLOUD_PROJECT = "test-project";
+		Bun.env.GOOGLE_CLOUD_LOCATION = "us-central1";
+
+		expect(getEnvApiKeyCredentialSource("google-vertex")).toEqual({
+			kind: "google-adc",
+			source: "explicit-file",
+		});
 	});
 });

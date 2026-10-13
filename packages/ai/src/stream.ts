@@ -126,6 +126,12 @@ function hasVertexAdcCredentials(): boolean {
 
 type KeyResolver = string | (() => string | undefined);
 
+export type EnvApiKeyCredentialSource =
+	| { kind: "environment"; name: string }
+	| { kind: "google-adc"; source: "explicit-file" | "default-file" }
+	| { kind: "aws"; source: "bearer-token" | "environment-credentials" | "profile" }
+	| { kind: "unknown" };
+
 const serviceProviderMap: Record<string, KeyResolver> = {
 	"alibaba-token-plan": "ALIBABA_TOKEN_PLAN_API_KEY",
 	openai: () => $credentialEnv("OPENAI_API_KEY"),
@@ -267,11 +273,32 @@ export function getEnvApiKeyEnvNames(provider: string): string[] {
 	return names.filter(name => $credentialEnv(name) !== undefined);
 }
 
+/** Describe the source selected by the provider environment resolver without exposing its value. */
+export function getEnvApiKeyCredentialSource(provider: string): EnvApiKeyCredentialSource | undefined {
+	const apiKey = getEnvApiKey(provider);
+	if (apiKey === undefined) return undefined;
+	const envName = getEnvApiKeyEnvNames(provider).find(name => $credentialEnv(name) === apiKey);
+	if (envName) return { kind: "environment", name: envName };
+	if (apiKey !== "<authenticated>") return { kind: "unknown" };
+	if (provider === "google-vertex") {
+		return {
+			kind: "google-adc",
+			source: $credentialEnv("GOOGLE_APPLICATION_CREDENTIALS") ? "explicit-file" : "default-file",
+		};
+	}
+	if (provider === "amazon-bedrock") {
+		const bearerToken = $credentialEnv("AWS_BEARER_TOKEN_BEDROCK");
+		if (bearerToken && isValidBedrockBearerToken(bearerToken)) return { kind: "aws", source: "bearer-token" };
+		if (readAwsStaticEnvironmentCredentials()) return { kind: "aws", source: "environment-credentials" };
+		if (hasResolvableAwsProfileSource()) return { kind: "aws", source: "profile" };
+	}
+	return { kind: "unknown" };
+}
+
 /** Name of the environment variable whose value is selected by `getEnvApiKey`, when identifiable. */
 export function getEnvApiKeyEnvName(provider: string): string | undefined {
-	const apiKey = getEnvApiKey(provider);
-	if (apiKey === undefined || apiKey === "<authenticated>") return undefined;
-	return getEnvApiKeyEnvNames(provider).find(name => $credentialEnv(name) === apiKey);
+	const source = getEnvApiKeyCredentialSource(provider);
+	return source?.kind === "environment" ? source.name : undefined;
 }
 
 /**

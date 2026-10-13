@@ -1,7 +1,7 @@
 import {
 	type AuthCredentialSnapshotEntry,
-	getEnvApiKey,
-	getEnvApiKeyEnvName,
+	type EnvApiKeyCredentialSource,
+	getEnvApiKeyCredentialSource,
 	getEnvApiKeyEnvNames,
 	listProvidersWithEnvKey,
 	resolveOAuthStorageProvider,
@@ -46,6 +46,25 @@ function environmentCredentialLabel(name: string): string {
 	return `environment credential (env ${name})`;
 }
 
+function environmentSourceLabel(source: EnvApiKeyCredentialSource): string {
+	switch (source.kind) {
+		case "environment":
+			return environmentCredentialLabel(source.name);
+		case "google-adc":
+			return source.source === "explicit-file"
+				? "Google ADC (env GOOGLE_APPLICATION_CREDENTIALS)"
+				: "Google ADC (default credentials file)";
+		case "aws":
+			return source.source === "bearer-token"
+				? "AWS bearer token (env AWS_BEARER_TOKEN_BEDROCK)"
+				: source.source === "environment-credentials"
+					? "AWS environment credentials"
+					: "AWS profile credentials";
+		case "unknown":
+			return "environment credentials";
+	}
+}
+
 function addSource(sources: CredentialSource[], source: CredentialSource): void {
 	if (!sources.some(existing => existing.kind === source.kind && existing.label === source.label)) {
 		sources.push(source);
@@ -80,8 +99,16 @@ function collectSources(
 			label: envName ? `API key (env ${envName})` : "API key (models.yml)",
 		});
 	}
+	const selectedEnvSource = getEnvApiKeyCredentialSource(envProvider);
 	for (const name of getEnvApiKeyEnvNames(envProvider)) {
-		addSource(sources, { kind: "api_key", label: environmentCredentialLabel(name) });
+		const label =
+			selectedEnvSource?.kind === "aws" && selectedEnvSource.source === "bearer-token"
+				? environmentSourceLabel(selectedEnvSource)
+				: environmentCredentialLabel(name);
+		addSource(sources, { kind: "api_key", label });
+	}
+	if (selectedEnvSource && selectedEnvSource.kind !== "environment") {
+		addSource(sources, { kind: "api_key", label: environmentSourceLabel(selectedEnvSource) });
 	}
 	return sources;
 }
@@ -123,6 +150,13 @@ function activeSource(
 	}
 	if (authStorage.hasConfigApiKey(provider, owner)) {
 		const envName = session.modelRegistry.getProviderConfigApiKeyEnvName(provider);
+		if (!authStorage.hasLiteralConfigApiKey(provider, owner)) {
+			const rowId = authStorage.getSessionCredentialRowId(provider, sessionId);
+			const storedKey =
+				entries.find(entry => entry.credential.type === "api_key" && entry.id === rowId) ??
+				entries.find(entry => entry.credential.type === "api_key");
+			if (storedKey) return { kind: "api_key", label: `API key (stored credential id:${storedKey.id})` };
+		}
 		return {
 			kind: "api_key",
 			label: envName ? `API key (env ${envName})` : "API key (models.yml)",
@@ -135,9 +169,8 @@ function activeSource(
 	if (storedKey) return { kind: "api_key", label: `API key (stored credential id:${storedKey.id})` };
 
 	const envProvider = resolveOAuthStorageProvider(provider);
-	const envName = getEnvApiKeyEnvName(envProvider);
-	if (envName) return { kind: "api_key", label: environmentCredentialLabel(envName) };
-	if (getEnvApiKey(envProvider)) return { kind: "api_key", label: "API key (environment credentials)" };
+	const envSource = getEnvApiKeyCredentialSource(envProvider);
+	if (envSource) return { kind: "api_key", label: environmentSourceLabel(envSource) };
 	return { kind: "api_key", label: "API key (configured)" };
 }
 
@@ -168,7 +201,9 @@ export function buildProviderAuthStatusText(session: ProviderAuthStatusSession):
 				? activeSource(provider, entries, session, owner, activeType)
 				: undefined;
 		lines.push(`${sanitizeDisplayLine(provider)}: ${active?.label ?? "credential source unavailable"}`);
-		const shadowed = active ? sources.filter(source => source.kind !== active.kind).map(source => source.label) : [];
+		const shadowed = active
+			? sources.filter(source => source.label !== active.label).map(source => source.label)
+			: [];
 		if (shadowed.length > 0) lines.push(`  shadowed: ${[...new Set(shadowed)].join(", ")}`);
 	}
 	return lines.join("\n");
