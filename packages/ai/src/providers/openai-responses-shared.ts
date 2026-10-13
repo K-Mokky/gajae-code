@@ -994,6 +994,7 @@ export async function processResponsesStream<TApi extends Api>(
 			calculateCost(model, output.usage);
 			// Apply service tier cost multiplier (ultrafast = 6x, priority = 2x, flex = 0.5x)
 			const effectiveServiceTier = parseResolvedServiceTier(response?.service_tier) ?? options?.serviceTier;
+			output.serviceTier = parseResolvedServiceTier(effectiveServiceTier);
 			const multiplier = getResponsesServiceTierCostMultiplier(effectiveServiceTier);
 			if (multiplier !== 1) {
 				output.usage.cost.input *= multiplier;

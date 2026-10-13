@@ -34,6 +34,7 @@ import {
 	type Model,
 	modelSupportsUltrafastTier,
 	type ProviderSessionState,
+	parseResolvedServiceTier,
 	resolveServiceTier,
 	type ServiceTier,
 	type StreamFunction,
@@ -2311,6 +2312,9 @@ function handleResponseCompleted(
 	}
 
 	calculateCost(model, output.usage);
+	output.serviceTier =
+		parseResolvedServiceTier(response?.service_tier) ??
+		parseResolvedServiceTier(runtime.requestBodyForState.service_tier);
 	applyCodexServiceTierPricing(model, output.usage, response?.service_tier, runtime.requestBodyForState.service_tier);
 	output.stopReason = mapOpenAIResponsesStopReason(response?.status as OpenAI.Responses.ResponseStatus | undefined);
 	// A response cut short for length may have stopped mid-tool-call. Flag any

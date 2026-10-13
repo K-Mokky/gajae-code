@@ -265,6 +265,31 @@ describe("SDK operation matrix", () => {
 			expect(sends).toBe(0);
 		}
 	});
+	it("preserves the ultrafast restriction error for chat config patches", async () => {
+		for (const transport of ["telegram", "discord", "slack"] as const) {
+			let sends = 0;
+			const result = await sendAuthorizedChatOperation(
+				transport,
+				{
+					kind: "control",
+					operation: "config.patch",
+					input: { patch: { "task.serviceTier": "ultrafast" } },
+				},
+				async () => {
+					sends++;
+					return "sent";
+				},
+			);
+			expect(result).toMatchObject({
+				ok: false,
+				error: {
+					code: "ultrafast_tier_forbidden",
+					message: "config.patch serviceTier ultrafast is restricted to trusted local sources.",
+				},
+			});
+			expect(sends).toBe(0);
+		}
+	});
 	it("removes Broker lifecycle controls from host surfaces before mutation", async () => {
 		const lifecycleOperations = [
 			"session.new",

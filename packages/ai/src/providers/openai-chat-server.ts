@@ -406,6 +406,7 @@ export function encodeResponse(message: AssistantMessage, requestedModelId: stri
 				logprobs: null,
 			},
 		],
+		...(message.serviceTier ? { service_tier: message.serviceTier } : {}),
 		usage: buildUsage(message),
 	};
 }
@@ -543,6 +544,7 @@ export function encodeStream(
 			model: requestedModelId,
 			system_fingerprint: null,
 			choices: [],
+			...(message.serviceTier ? { service_tier: message.serviceTier } : {}),
 			usage: buildUsage(message),
 		});
 	};
@@ -678,7 +680,10 @@ export function encodeStream(
 										: hasToolCalls
 											? "tool_calls"
 											: "stop";
-							writeSse(controller, baseChunk({}, finishReason));
+							writeSse(controller, {
+								...baseChunk({}, finishReason),
+								...(event.message.serviceTier ? { service_tier: event.message.serviceTier } : {}),
+							});
 							if (includeUsage) writeUsage(controller, event.message);
 							controller.enqueue(encoder.encode("data: [DONE]\n\n"));
 							controller.close();

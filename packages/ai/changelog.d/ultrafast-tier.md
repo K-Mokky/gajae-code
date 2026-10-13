@@ -12,6 +12,10 @@
 - OpenAI chat server schema updated to accept "ultrafast" in service_tier field
 - Codex service tier cost multiplier function now handles ultrafast 6x multiplier
 
+### Fixed
+
+- Usage pricing now follows provider-reported effective tiers when available, and gateway responses preserve that tier for downstream clients.
+
 ### Notes
 
 - Ultrafast tier is currently available for gpt-6-astra and gpt-6.1-sol. The gpt-5.6-sol model is Fast-only and is not eligible for ultrafast.

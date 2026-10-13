@@ -214,6 +214,35 @@ describe("agent-loop OTEL instrumentation", () => {
 		expect(openAiChat?.attributes["gen_ai.request.service_tier"]).toBeUndefined();
 	});
 
+	it("reports ultrafast telemetry only when the model capability permits sending it", async () => {
+		for (const supportsUltrafastTier of [false, true]) {
+			exporter.reset();
+			const mock = createMockModel({
+				id: `gpt-mock-${supportsUltrafastTier}`,
+				provider: "openai",
+				responses: [{ content: ["ok"] }],
+			});
+			const model = { ...mock.model, compat: { supportsUltrafastTier } };
+			await runAndDrain(
+				agentLoop(
+					[createUserMessage("hi")],
+					{ systemPrompt: [], messages: [], tools: [] },
+					{
+						model,
+						convertToLlm: identityConverter,
+						serviceTier: "ultrafast",
+						telemetry: {},
+					},
+					undefined,
+					mock.stream,
+				),
+			);
+
+			const chat = findSpan(exporter.getFinishedSpans(), `chat ${model.id}`);
+			expect(chat?.attributes[OpenAIAttr.RequestServiceTier]).toBe(supportsUltrafastTier ? "ultrafast" : undefined);
+		}
+	});
+
 	it("emits execute_tool spans parented to invoke_agent (not chat) per semconv", async () => {
 		const mock = createMockModel({
 			...MOCK_IDENT,

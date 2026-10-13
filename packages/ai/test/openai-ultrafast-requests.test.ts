@@ -133,9 +133,14 @@ describe("ultrafast request serialization for bundled models", () => {
 	it("prices Responses usage using its effective tier and falls back when the response omits it", async () => {
 		const model = getBundledModel("opencode-zen", "gpt-6.1-sol") as Model<"openai-responses">;
 		const scenarios = [
-			{ requestedTier: "ultrafast", responseTier: "default", expectedCost: 0.00002 },
-			{ requestedTier: "priority", responseTier: "ultrafast", expectedCost: 0.00012 },
-			{ requestedTier: "ultrafast", responseTier: undefined, expectedCost: 0.00012 },
+			{ requestedTier: "ultrafast", responseTier: "default", effectiveTier: "default", expectedCost: 0.00002 },
+			{ requestedTier: "priority", responseTier: "ultrafast", effectiveTier: "ultrafast", expectedCost: 0.00012 },
+			{
+				requestedTier: "ultrafast",
+				responseTier: undefined,
+				effectiveTier: "ultrafast",
+				expectedCost: 0.00012,
+			},
 		] as const;
 
 		for (const scenario of scenarios) {
@@ -147,6 +152,7 @@ describe("ultrafast request serialization for bundled models", () => {
 
 			expect(result.stopReason).toBe("stop");
 			expect(bodies[0]?.service_tier).toBe(scenario.requestedTier);
+			expect(result.serviceTier).toBe(scenario.effectiveTier);
 			expect(result.usage.cost.total).toBeCloseTo(scenario.expectedCost, 12);
 		}
 	});
@@ -154,9 +160,14 @@ describe("ultrafast request serialization for bundled models", () => {
 	it("prices Completions usage using its effective tier and falls back when the response omits it", async () => {
 		const model = getBundledModel("github-copilot", "gpt-6-astra") as Model<"openai-completions">;
 		const scenarios = [
-			{ requestedTier: "ultrafast", responseTier: "default", expectedCost: 0.0001 },
-			{ requestedTier: "priority", responseTier: "ultrafast", expectedCost: 0.0006 },
-			{ requestedTier: "ultrafast", responseTier: undefined, expectedCost: 0.0006 },
+			{ requestedTier: "ultrafast", responseTier: "default", effectiveTier: "default", expectedCost: 0.0001 },
+			{ requestedTier: "priority", responseTier: "ultrafast", effectiveTier: "ultrafast", expectedCost: 0.0006 },
+			{
+				requestedTier: "ultrafast",
+				responseTier: undefined,
+				effectiveTier: "ultrafast",
+				expectedCost: 0.0006,
+			},
 		] as const;
 
 		for (const scenario of scenarios) {
@@ -168,6 +179,7 @@ describe("ultrafast request serialization for bundled models", () => {
 
 			expect(result.stopReason).toBe("stop");
 			expect(bodies[0]?.service_tier).toBe(scenario.requestedTier);
+			expect(result.serviceTier).toBe(scenario.effectiveTier);
 			expect(result.usage.cost.total).toBeCloseTo(scenario.expectedCost, 12);
 		}
 	});
@@ -184,6 +196,7 @@ describe("ultrafast request serialization for bundled models", () => {
 		}).result();
 
 		expect(result.stopReason).toBe("stop");
+		expect(result.serviceTier).toBe("ultrafast");
 		expect(bodies[0]?.service_tier).toBe("ultrafast");
 	});
 });

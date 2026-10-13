@@ -722,6 +722,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
 				}
 				// Capture the service tier for use in cost calculations
 				effectiveServiceTier = (params as Record<string, unknown>).service_tier as ServiceTier | undefined;
+				output.serviceTier = parseResolvedServiceTier(effectiveServiceTier);
 				rawRequestDump = {
 					provider: model.provider,
 					api: output.api,
@@ -1193,7 +1194,10 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
 				// budget and the request hangs open (#5627 review r5).
 				if (chunk && typeof chunk === "object") {
 					const responseServiceTier = parseResolvedServiceTier(Reflect.get(chunk, "service_tier"));
-					if (responseServiceTier !== undefined) effectiveServiceTier = responseServiceTier;
+					if (responseServiceTier !== undefined) {
+						effectiveServiceTier = responseServiceTier;
+						output.serviceTier = responseServiceTier;
+					}
 					// OpenAI documents ChatCompletionChunk.id as the unique chat completion identifier,
 					// and each chunk in a streamed completion carries the same id.
 					output.responseId ||= chunk.id;

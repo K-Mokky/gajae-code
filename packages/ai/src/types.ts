@@ -886,6 +886,8 @@ export interface AssistantMessage {
 	provider: Provider;
 	model: string;
 	responseId?: string; // Provider-specific response/message identifier when the upstream API exposes one
+	/** Effective service tier reported by the provider, or the sent tier when the provider omits it. */
+	serviceTier?: ResolvedServiceTier;
 	usage: Usage;
 	stopReason: StopReason;
 	errorMessage?: string;

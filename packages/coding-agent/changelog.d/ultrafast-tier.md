@@ -6,7 +6,7 @@
 ### Changed
 
 - Settings schema now recognizes and validates `ultrafast` alongside existing tiers (auto, default, flex, scale, priority, openai-only, claude-only)
-- SDK adapter validation now accepts `ultrafast` in `service_tier.set` operations
+- Trusted local SDK controls may set `ultrafast`; model-facing and chat adapter inputs remain restricted
 
 ### Notes
 
@@ -14,5 +14,5 @@ The ultrafast tier works like flex/scale/priority — it's a cost and processing
 
 Users can configure ultrafast via:
 - Settings: `serviceTier: "ultrafast"`
-- SDK: `service_tier.set` with tier value `"ultrafast"`
+- SDK: `service_tier.set` with tier value `"ultrafast"` on trusted local control routes
 - Command line: future `/fast ultrafast` or UI tier selector additions
