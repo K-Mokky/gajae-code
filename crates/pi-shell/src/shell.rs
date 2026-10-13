@@ -3756,6 +3756,30 @@ mod tests {
 		assert_eq!(output, "é|ü\n");
 	}
 
+	/// Contract: `read` preserves Windows ACP bytes from an external producer.
+	#[cfg(windows)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn read_decodes_windows_acp_bytes_from_native_pipeline() {
+		// This fixture is CP1252-specific; other Windows ACPs are covered by the
+		// shared decoder's explicit code-page tests.
+		// SAFETY: GetACP has no preconditions.
+		if unsafe { windows_sys::Win32::Globalization::GetACP() } != 1252 {
+			return;
+		}
+
+		let script = "$stream = [Console]::OpenStandardOutput(); $stream.WriteByte(0xE9); \
+		              $stream.WriteByte(0x0A)";
+		let utf16: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
+		let encoded = test_base64(&utf16);
+		let command = format!(
+			"powershell -NoProfile -NonInteractive -EncodedCommand {encoded} | {{ read -r x; printf \
+			 '[%s]\\n' \"$x\"; }}"
+		);
+		let (result, output) = execute_captured(command).await;
+		assert_eq!(result.exit_code, Some(0), "{output:?}");
+		assert_eq!(output, "[é]\n");
+	}
+
 	/// Contract: `read -n` counts characters, not bytes, as bash does in a
 	/// UTF-8 locale; a multibyte character is never split.
 	#[tokio::test(flavor = "multi_thread")]

@@ -3,17 +3,17 @@
 
 use std::io::{self, Read};
 
-use brush_core::openfiles::OpenFile;
+use brush_core::{openfiles::OpenFile, output_decode::decode_owned_bytes};
 
 /// ASCII control character for Ctrl+C (ETX - End of Text).
 pub(crate) const CTRL_C: u8 = 0x03;
 /// ASCII control character for Ctrl+D (EOT - End of Transmission).
 pub(crate) const CTRL_D: u8 = 0x04;
 
-/// The bytes of a read line as text: UTF-8 decoded once per line, invalid
-/// sequences replaced rather than each byte read as a Latin-1 character.
+/// The bytes of a read line as text: UTF-8 first, with Windows ACP fallback
+/// for byte-oriented native commands and replacement for invalid input.
 pub(crate) fn decode_line(line: Vec<u8>) -> String {
-	String::from_utf8(line).unwrap_or_else(|error| String::from_utf8_lossy(error.as_bytes()).into_owned())
+	decode_owned_bytes(line)
 }
 
 /// A shell descriptor read one byte at a time by its caller.
