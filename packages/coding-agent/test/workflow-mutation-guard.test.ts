@@ -1197,6 +1197,32 @@ describe("workflow mutation guard", () => {
 		}
 	}, 60_000);
 
+	it("fails closed when the caller cwd dotenv exceeds the bounded snapshot size", async () => {
+		const cwd = await makeTempRoot();
+		const processCwd = await makeTempRoot();
+		await writeActiveDeepInterview(cwd);
+		const projectTmp = await makeNonNeutralDir();
+		try {
+			const product = path.join(projectTmp, "src", "product.ts");
+			await fs.mkdir(path.dirname(product), { recursive: true });
+			await Bun.write(product, "original\n");
+			await Bun.write(path.join(cwd, ".env"), `TMPDIR=${projectTmp}\n${"#".repeat(128 * 1024)}\n`);
+
+			const decision = await runProjectTmpdirProbe({
+				cwd,
+				processCwd,
+				target: product,
+				sessionId: "session-a",
+				tmpdir: projectTmp,
+			});
+			expect(decision.blocked).toBe(true);
+			expect(decision.message).toBe(DEEP_INTERVIEW_MUTATION_BLOCK_MESSAGE);
+			expect(await Bun.file(product).text()).toBe("original\n");
+		} finally {
+			await removeDirLeafFirst(projectTmp);
+		}
+	}, 60_000);
+
 	it("still allows the real OS temp dir during an active planning phase", async () => {
 		const workspace = await makeTempRoot();
 		await writeActiveDeepInterview(workspace);
