@@ -42,6 +42,7 @@ afterEach(async () => {
 test("a local native build keeps the tracked manifest unchanged and stores only its local digest", async () => {
 	const fixture = await createBuildFixture();
 	const originalManifest = await Bun.file(fixture.manifestPath).text();
+	await Bun.write(`${fixture.addonPath}.provenance.json`, "stale CI provenance");
 
 	await recordDiagnosticArtifactDigest({ ...fixture, profile: "local" });
 

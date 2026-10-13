@@ -16,13 +16,15 @@
  *       `<addon>.provenance.json` its build emitted, and that sidecar's digest must
  *       equal the bytes that actually arrived. The record is then written with the
  *       version of the package that is about to ship, so a version staged after the
- *       build cannot leave a stale record behind. The digests come from the
- *       transferred build provenance -- never from a runtime cache.
+ *       build cannot leave a stale record behind. Local build outputs marked by a
+ *       `.build.json` profile of `local` are not release artifacts and are ignored.
+ *       The digests come from transferred build provenance -- never from a runtime
+ *       cache.
  *   --verify <nativeDir>
  *       Gate for embedding and packing: the record must exist, its version must
- *       equal the package version, and every addon present must match its recorded
- *       digest. Addons recorded but not shipped in this package (the platform
- *       packages carry them) are allowed.
+ *       equal the package version, and every non-local addon present must match its
+ *       recorded digest. Addons recorded but not shipped in this package (the
+ *       platform packages carry them) are allowed.
  *   --stage-check <stagedNativeDir> --trusted-native-dir <nativeDir>
  *       Gate for platform-package staging: every staged addon must be byte-equal to
  *       what the trusted record describes.
@@ -62,7 +64,17 @@ async function packageVersionFor(nativeDir: string): Promise<string> {
 
 async function addonsIn(dir: string): Promise<string[]> {
 	const entries = await fs.readdir(dir).catch(() => fail(`cannot read native directory ${dir}`));
-	return entries.filter(entry => entry.endsWith(".node")).sort();
+	const addons = entries.filter(entry => entry.endsWith(".node")).sort();
+	const releaseAddons: string[] = [];
+	for (const addon of addons) {
+		const buildMetadataPath = `${path.join(dir, addon)}.build.json`;
+		if (await Bun.file(buildMetadataPath).exists()) {
+			const buildMetadata = (await Bun.file(buildMetadataPath).json()) as { profile?: string };
+			if (buildMetadata.profile === "local") continue;
+		}
+		releaseAddons.push(addon);
+	}
+	return releaseAddons;
 }
 
 async function readTrustedRecord(nativeDir: string): Promise<TrustedRecord> {

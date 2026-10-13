@@ -1,3 +1,4 @@
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
 export type NativeBuildProfile = "local" | "ci" | "dist";
@@ -36,7 +37,10 @@ export async function recordDiagnosticArtifactDigest(options: {
 		`${JSON.stringify({ schema: "gjc.diagnostic-artifact", version, artifacts }, null, 2)}\n`,
 	);
 
-	if (!localBuild) {
+	if (localBuild) {
+		// A prior CI build may have left provenance beside this same addon filename.
+		await fs.rm(`${addonPath}.provenance.json`, { force: true });
+	} else {
 		// Release addons travel to other checkouts as bare `.node` uploads, so the digest
 		// travels beside each artifact and `scripts/verify-diagnostic-artifact-provenance.ts`
 		// rebuilds the trusted record there from these sidecars.

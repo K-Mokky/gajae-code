@@ -99,6 +99,31 @@ describe("diagnostic artifact provenance transfer (C2)", () => {
 		}
 	});
 
+	it("ignores local native build outputs in release provenance checks", async () => {
+		const workspace = await fs.mkdtemp(path.join(await fs.realpath(os.tmpdir()), "gjc-prov-local-build-"));
+		try {
+			const fixture = await fixturePackage(workspace);
+			const initial = await run(["--rebuild-from-sidecars", fixture.native], workspace);
+			expect(initial.exitCode).toBe(0);
+
+			const localAddon = path.join(fixture.native, "pi_natives.linux-x64-modern.node");
+			await Bun.write(localAddon, "local addon bytes");
+			await Bun.write(`${localAddon}.build.json`, JSON.stringify({ profile: "local" }));
+
+			expect((await run(["--verify", fixture.native], workspace)).exitCode).toBe(0);
+			const rebuilt = await run(["--rebuild-from-sidecars", fixture.native], workspace);
+			expect(rebuilt.exitCode).toBe(0);
+			const manifest = (await Bun.file(path.join(fixture.native, "diagnostic-artifact.json")).json()) as {
+				artifacts: Record<string, string>;
+			};
+			expect(manifest.artifacts).toEqual({
+				"pi_natives.darwin-arm64.node": await sha256(path.join(fixture.native, "pi_natives.darwin-arm64.node")),
+			});
+		} finally {
+			await fs.rm(workspace, { recursive: true, force: true });
+		}
+	});
+
 	it("refuses an addon that arrived without its provenance sidecar", async () => {
 		const workspace = await fs.mkdtemp(path.join(await fs.realpath(os.tmpdir()), "gjc-prov-missing-"));
 		try {
