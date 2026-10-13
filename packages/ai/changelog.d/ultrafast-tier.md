@@ -15,4 +15,4 @@
 ### Notes
 
 - Ultrafast tier is currently available for gpt-6-astra and gpt-6.1-sol. The gpt-5.6-sol model is Fast-only and is not eligible for ultrafast.
-- The tier is not sent to unsupported models; requests fail-closed with no silent fallback.
+- For unsupported models, ultrafast is omitted and provider-default processing is used; no unsupported tier is sent.
