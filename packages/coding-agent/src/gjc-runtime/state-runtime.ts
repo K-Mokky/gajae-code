@@ -2231,6 +2231,7 @@ async function nonCrystalApprovalPublication(cwd: string, sessionId: string, sta
 	if (stage === "ralplan") {
 		const final = await verifiedRalplanFinalEvidence(cwd, sessionId, state);
 		if (!final) throw new StateCommandError(2, "execution approval requires verified Ralplan final evidence");
+		await assertRalplanManualApprovalReadiness(cwd, sessionId, state, final);
 		return {
 			state_path: final.statePath,
 			state_revision: final.stateRevision,
@@ -2287,6 +2288,7 @@ export async function captureExecutionApprovalPresentation(
 			throw new StateCommandError(2, "Ralplan execution approval requires valid final state");
 		const final = await verifiedRalplanFinalEvidence(cwd, sessionId, ralplanRead.value);
 		if (!final) throw new StateCommandError(2, "execution approval requires verified Ralplan final evidence");
+		await assertRalplanManualApprovalReadiness(cwd, sessionId, ralplanRead.value, final);
 		return {
 			state_path: path.resolve(statePath),
 			state_revision: existingStateRevision(envelope)!,
@@ -2854,6 +2856,7 @@ export async function recordDeepInterviewExecutionApproval(options: {
 				ralplanFinal = await verifiedRalplanFinalEvidence(options.cwd, options.sessionId, ralplanState);
 				if (!ralplanFinal)
 					throw new StateCommandError(2, "Ralplan execution approval requires verified final plan evidence");
+				await assertRalplanManualApprovalReadiness(options.cwd, options.sessionId, ralplanState, ralplanFinal);
 			}
 			if (
 				envelope.version !== WORKFLOW_STATE_VERSION ||
@@ -3667,6 +3670,162 @@ interface VerifiedRalplanFinalEvidence {
 	finalSha256: string;
 }
 
+interface RalplanPlannerReference {
+	stage_n: number;
+	path: string;
+	sha256: string;
+}
+
+interface RalplanReviewReceipt {
+	valid: boolean;
+	verdict: string | undefined;
+	decision: string | undefined;
+}
+
+function parseRalplanPlannerReference(value: unknown): RalplanPlannerReference | undefined {
+	if (!isPlainObject(value)) return undefined;
+	if (
+		typeof value.stage_n !== "number" ||
+		!Number.isSafeInteger(value.stage_n) ||
+		value.stage_n < 1 ||
+		value.stage_n > 999 ||
+		typeof value.path !== "string" ||
+		!path.isAbsolute(value.path) ||
+		typeof value.sha256 !== "string" ||
+		!/^[0-9a-f]{64}$/.test(value.sha256)
+	)
+		return undefined;
+	return { stage_n: value.stage_n, path: path.resolve(value.path), sha256: value.sha256 };
+}
+
+function sameRalplanPlannerReference(value: unknown, expected: RalplanPlannerReference): boolean {
+	const reference = parseRalplanPlannerReference(value);
+	return (
+		reference !== undefined &&
+		reference.stage_n === expected.stage_n &&
+		reference.path === expected.path &&
+		reference.sha256 === expected.sha256
+	);
+}
+
+async function verifiedRalplanStageReference(
+	runDir: string,
+	row: Record<string, unknown>,
+): Promise<RalplanPlannerReference | undefined> {
+	const stage = row.stage;
+	const reference = parseRalplanPlannerReference({ stage_n: row.stage_n, path: row.path, sha256: row.sha256 });
+	if (!reference || typeof stage !== "string") return undefined;
+	const relative = path.relative(path.resolve(runDir), reference.path);
+	if (relative === "" || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative))
+		return undefined;
+	const canonicalPath = path.resolve(runDir, `stage-${String(reference.stage_n).padStart(2, "0")}-${stage}.md`);
+	if (reference.path !== canonicalPath) return undefined;
+	try {
+		return (await hashIdentityFile(reference.path, "ralplan review artifact")) === reference.sha256
+			? reference
+			: undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+async function hasVerifiedRalplanApprovalReviewJoin(
+	cwd: string,
+	sessionId: string,
+	finalEvidence: VerifiedRalplanFinalEvidence,
+): Promise<boolean> {
+	const runDir = path.join(sessionPlansDir(cwd, sessionId), "ralplan", finalEvidence.runId);
+	const indexPath = path.join(runDir, "index.jsonl");
+	let indexText: string | undefined;
+	try {
+		indexText = await readBoundedIdentityText(indexPath, 1024 * 1024, "ralplan approval review index");
+	} catch {
+		return false;
+	}
+	if (indexText === undefined) return false;
+
+	let planner: RalplanPlannerReference | undefined;
+	let architect: RalplanReviewReceipt | undefined;
+	let critic: RalplanReviewReceipt | undefined;
+	let finalJoin:
+		| {
+				stageN: number;
+				planner: RalplanPlannerReference | undefined;
+				finalPlanner: RalplanPlannerReference | undefined;
+				architect: RalplanReviewReceipt | undefined;
+				critic: RalplanReviewReceipt | undefined;
+		  }
+		| undefined;
+	for (const line of indexText.split(/\r?\n/)) {
+		if (!line.trim()) continue;
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(line);
+		} catch {
+			return false;
+		}
+		if (!isPlainObject(parsed)) return false;
+		const row = parsed;
+		if (row.stage === "planner" || row.stage === "revision") {
+			planner = await verifiedRalplanStageReference(runDir, row);
+			architect = undefined;
+			critic = undefined;
+			continue;
+		}
+		if ((row.stage === "architect" || row.stage === "critic") && planner && row.stage_n === planner.stage_n) {
+			const receipt: RalplanReviewReceipt = {
+				valid:
+					sameRalplanPlannerReference(row.reviewed_planner, planner) &&
+					(await verifiedRalplanStageReference(runDir, row)) !== undefined,
+				verdict: typeof row.lane_verdict === "string" ? row.lane_verdict : undefined,
+				decision: typeof row.architect_decision === "string" ? row.architect_decision : undefined,
+			};
+			if (row.stage === "architect") architect = receipt;
+			else critic = receipt;
+			continue;
+		}
+		if (row.stage === "final") {
+			const finalPath = typeof row.path === "string" ? path.resolve(row.path) : undefined;
+			const finalSha = typeof row.sha256 === "string" ? row.sha256 : undefined;
+			if (finalPath === finalEvidence.finalPath && finalSha === finalEvidence.finalSha256) {
+				finalJoin = {
+					stageN: typeof row.stage_n === "number" ? row.stage_n : -1,
+					planner,
+					finalPlanner: parseRalplanPlannerReference(row.reviewed_planner),
+					architect,
+					critic,
+				};
+			}
+		}
+	}
+	return Boolean(
+		finalJoin?.planner &&
+			finalJoin.stageN === finalJoin.planner.stage_n &&
+			sameRalplanPlannerReference(finalJoin.finalPlanner, finalJoin.planner) &&
+			finalJoin.architect?.valid === true &&
+			finalJoin.architect.verdict === "CLEAR" &&
+			finalJoin.architect.decision === "APPROVE" &&
+			finalJoin.critic?.valid === true &&
+			finalJoin.critic.verdict === "OKAY",
+	);
+}
+
+async function assertRalplanManualApprovalReadiness(
+	cwd: string,
+	sessionId: string,
+	state: Record<string, unknown>,
+	finalEvidence: VerifiedRalplanFinalEvidence,
+): Promise<void> {
+	const admission = isPlainObject(state.auto_handoff) ? state.auto_handoff : undefined;
+	if (admission?.effectiveTarget !== "off")
+		throw new StateCommandError(2, "manual Ralplan execution approval requires effectiveTarget off");
+	if (!(await hasVerifiedRalplanApprovalReviewJoin(cwd, sessionId, finalEvidence)))
+		throw new StateCommandError(
+			2,
+			"Ralplan execution approval requires a verified same-pass Architect/Critic review join",
+		);
+}
+
 async function hasDurableRalplanPlanningStuck(
 	cwd: string,
 	sessionId: string,
@@ -3838,6 +3997,7 @@ async function assertRalplanApprovalRecordCurrent(
 	}
 	const evidence = await verifiedRalplanFinalEvidence(cwd, sessionId, ralplanState);
 	if (!evidence) throw new StateCommandError(2, "Ralplan execution approval final evidence is unavailable");
+	await assertRalplanManualApprovalReadiness(cwd, sessionId, ralplanState, evidence);
 	if (
 		record.ralplan_state_path !== evidence.statePath ||
 		record.ralplan_run_id !== evidence.runId ||

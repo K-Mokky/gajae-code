@@ -123,6 +123,46 @@ async function writePublishedReadyCrystal(
 	return { callerPath, specPath };
 }
 
+async function writeReviewedRalplanFinal(
+	cwd: string,
+	sessionId: string,
+	runId: string,
+	stageN: number,
+	finalArtifact: string,
+): Promise<void> {
+	const stages = [
+		{ stage: "planner", artifact: "# Planner\n\nImplement the reviewed change.", extra: [] },
+		{
+			stage: "architect",
+			artifact: "## Architectural Status\nCLEAR\n\n## Code Review Recommendation\nAPPROVE\n",
+			extra: ["--lane-verdict", "CLEAR", "--architect-decision", "APPROVE"],
+		},
+		{ stage: "critic", artifact: "## Verdict\n**OKAY**\n", extra: ["--lane-verdict", "OKAY"] },
+		{ stage: "final", artifact: finalArtifact, extra: [] },
+	] as const;
+	for (const row of stages) {
+		const result = await runNativeRalplanCommand(
+			[
+				"--write",
+				"--stage",
+				row.stage,
+				"--stage_n",
+				String(stageN),
+				"--artifact",
+				row.artifact,
+				"--run-id",
+				runId,
+				"--session-id",
+				sessionId,
+				...row.extra,
+				"--json",
+			],
+			cwd,
+		);
+		expect(result.status, result.stderr).toBe(0);
+	}
+}
+
 async function writeLegacyApprovedCrystal(cwd: string): Promise<string> {
 	const crystal = readyCrystal();
 	const content = crystalMarkdown(crystal);
@@ -691,11 +731,7 @@ describe("gjc state handoff", () => {
 			const runId = parseRequiredJson(seed.stdout, "ralplan seed stdout").run_id as string;
 			const artifactPath = path.join(cwd, "renewal-final.md");
 			await fs.writeFile(artifactPath, `# Final\n${"계획".repeat(60_000)}`);
-			const final = await runNativeRalplanCommand(
-				["--write", "--stage", "final", "--stage_n", "1", "--artifact", artifactPath, "--run-id", runId, "--json"],
-				cwd,
-			);
-			expect(final.status, final.stderr).toBe(0);
+			await writeReviewedRalplanFinal(cwd, sessionId, runId, 1, artifactPath);
 			const handoff = () =>
 				runNativeStateCommand(
 					["handoff", "--mode", "ralplan", "--to", "ultragoal", "--session-id", sessionId, "--json"],
@@ -1822,11 +1858,7 @@ describe("gjc state handoff", () => {
 			const runId = parseRequiredJson(seed.stdout, "ralplan seed stdout").run_id as string;
 			const artifactPath = path.join(cwd, "large-final.md");
 			await fs.writeFile(artifactPath, `# Final\n${"계획".repeat(60_000)}`);
-			const final = await runNativeRalplanCommand(
-				["--write", "--stage", "final", "--stage_n", "1", "--artifact", artifactPath, "--run-id", runId, "--json"],
-				cwd,
-			);
-			expect(final.status, final.stderr).toBe(0);
+			await writeReviewedRalplanFinal(cwd, TEST_SESSION_ID, runId, 1, artifactPath);
 			const result = await runNativeStateCommand(
 				["handoff", "--mode", "ralplan", "--to", "ultragoal", "--json"],
 				cwd,

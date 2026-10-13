@@ -11,6 +11,12 @@ const ULTRAGOAL_ASK_GUARD = Symbol.for("gajae-code.ultragoalAskGuard");
 const RALPLAN_ULTRAGOAL_APPROVAL_OPTIONS = ["Refine further", "Approve execution via ultragoal", "Stop here"] as const;
 
 type GuardedTool = AgentTool & { [ULTRAGOAL_ASK_GUARD]?: true };
+const builtinAskTools = new WeakSet<object>();
+
+export function markBuiltinAskTool<T extends object>(tool: T): T {
+	builtinAskTools.add(tool);
+	return tool;
+}
 
 export function formatRalplanUltragoalApprovalQuestion(
 	presentation: ExecutionApprovalPresentation,
@@ -93,6 +99,7 @@ export async function assertUltragoalAskAllowed(
 	context: UltragoalAskGuardContext = {},
 	agentDir?: string,
 	params?: unknown,
+	allowRalplanApproval = false,
 ): Promise<ExecutionApprovalPresentation | undefined> {
 	// Durable Ultragoal state is session-scoped, so only the caller's own run may
 	// block `ask`. An anonymous caller has no run attributable to it, so the guard
@@ -103,7 +110,9 @@ export async function assertUltragoalAskAllowed(
 	if (!sessionId) return undefined;
 	const diagnostic = await isUltragoalAskBlocked(cwd, { sessionId });
 	if (!diagnostic.active) return undefined;
-	const presentation = await isVerifiedRalplanUltragoalApproval(cwd, sessionId, diagnostic, params);
+	const presentation = allowRalplanApproval
+		? await isVerifiedRalplanUltragoalApproval(cwd, sessionId, diagnostic, params)
+		: undefined;
 	if (presentation) return presentation;
 	const nudge = await consumeUltragoalAskNudge(cwd, sessionId, agentDir);
 	if (nudge.nudged) throw new ToolError(nudge.message);
@@ -128,7 +137,13 @@ export function guardToolForUltragoalAsk<T extends AgentTool>(
 				// budget against the SESSION profile, never the process-global one.
 				// The caller session id is the only binding, so a foreign session's
 				// durable run can never gate this ask.
-				await assertUltragoalAskAllowed(getCwd(), getContext(), getSessionAgentDir(), args[1]);
+				await assertUltragoalAskAllowed(
+					getCwd(),
+					getContext(),
+					getSessionAgentDir(),
+					args[1],
+					builtinAskTools.has(tool),
+				);
 				return Reflect.apply(target.execute, target, args);
 			};
 		},

@@ -90,7 +90,7 @@ export { askSchema } from "./ask-contract";
 
 import { formatErrorMessage, formatMeta, formatTitle } from "./render-utils";
 import { ToolAbortError, ToolError } from "./tool-errors";
-import { assertUltragoalAskAllowed } from "./ultragoal-ask-guard";
+import { assertUltragoalAskAllowed, markBuiltinAskTool } from "./ultragoal-ask-guard";
 
 // =============================================================================
 // Types
@@ -824,6 +824,7 @@ export class AskTool implements AgentTool<AskParametersSchema, AskToolDetails> {
 	readonly loadMode = "discoverable";
 	constructor(private readonly session: ToolSession) {
 		this.description = prompt.render(askDescription);
+		markBuiltinAskTool(this);
 	}
 
 	static createIf(session: ToolSession): AskTool | null {
@@ -954,6 +955,7 @@ export class AskTool implements AgentTool<AskParametersSchema, AskToolDetails> {
 			{ sessionId: this.session.getSessionId?.() ?? null },
 			this.session.getSessionAgentDir?.() ?? this.session.settings.getAgentDir(),
 			params,
+			true,
 		);
 		assertDeepInterviewStructuredResponseWithinLimit(params);
 		// Recheck at execution time as well: direct SDK callers and a phase change
@@ -1746,12 +1748,30 @@ interface AskRenderArgs {
 	question?: string;
 	options?: Array<{ label: string }>;
 	multi?: boolean;
+	workflowGate?: { stage: string; kind: string };
 	questions?: Array<{
 		id: string;
 		question: string;
 		options: Array<{ label: string }>;
 		multi?: boolean;
+		workflowGate?: { stage: string; kind: string };
 	}>;
+}
+
+function markdownCodeSpan(value: string): string {
+	let longestBacktickRun = 0;
+	for (const match of value.matchAll(/`+/g)) longestBacktickRun = Math.max(longestBacktickRun, match[0].length);
+	const delimiter = "`".repeat(longestBacktickRun + 1);
+	const padding = value.startsWith(" ") || value.endsWith(" ") ? " " : "";
+	return `${delimiter}${padding}${value}${padding}${delimiter}`;
+}
+
+function isRalplanApprovalGate(gate: AskRenderArgs["workflowGate"]): boolean {
+	return gate?.stage === "ralplan" && gate.kind === "approval";
+}
+
+function isRalplanApprovalQuestion(question: string): boolean {
+	return question.startsWith("Approve execution via ultragoal for the current Ralplan final at ");
 }
 
 /** Render custom input as a single block with continuation lines (not one entry per line) */
@@ -1824,7 +1844,11 @@ export const askToolRenderer = {
 					new Text(` ${uiTheme.fg("dim", qBranch)} ${uiTheme.fg("dim", `[${q.id}]`)}${metaStr}`, 0, 0),
 				);
 				const deepInterviewQuestion = renderDeepInterviewAskQuestion(q.question, uiTheme);
-				container.addChild(deepInterviewQuestion ?? new Markdown(q.question, 3, 0, mdTheme, accentStyle));
+				const markdownQuestion =
+					isRalplanApprovalGate(q.workflowGate) || isRalplanApprovalQuestion(q.question)
+						? markdownCodeSpan(q.question)
+						: q.question;
+				container.addChild(deepInterviewQuestion ?? new Markdown(markdownQuestion, 3, 0, mdTheme, accentStyle));
 
 				const qOptions = q.options;
 				if (qOptions?.length) {
@@ -1857,7 +1881,11 @@ export const askToolRenderer = {
 		if (args.options?.length) meta.push(`options:${args.options.length}`);
 		container.addChild(new Text(`${label}${formatMeta(meta, uiTheme)}`, 0, 0));
 		const deepInterviewQuestion = renderDeepInterviewAskQuestion(question, uiTheme);
-		container.addChild(deepInterviewQuestion ?? new Markdown(question, 1, 0, mdTheme, accentStyle));
+		const markdownQuestion =
+			isRalplanApprovalGate(args.workflowGate) || isRalplanApprovalQuestion(question)
+				? markdownCodeSpan(question)
+				: question;
+		container.addChild(deepInterviewQuestion ?? new Markdown(markdownQuestion, 1, 0, mdTheme, accentStyle));
 
 		const options = args.options;
 		if (options?.length) {
@@ -1929,7 +1957,13 @@ export const askToolRenderer = {
 				);
 				container.addChild(
 					renderDeepInterviewAskQuestion(r.question, uiTheme) ??
-						new Markdown(r.question, 3, 0, mdTheme, accentStyle),
+						new Markdown(
+							isRalplanApprovalQuestion(r.question) ? markdownCodeSpan(r.question) : r.question,
+							3,
+							0,
+							mdTheme,
+							accentStyle,
+						),
 				);
 
 				const answerLines: string[] = [];
@@ -1986,9 +2020,12 @@ export const askToolRenderer = {
 		const header = renderStatusLine({ icon: hasSelection ? "success" : "warning", title: "Ask" }, uiTheme);
 		const container = new Container();
 		container.addChild(new Text(header, 0, 0));
+		const markdownQuestion = isRalplanApprovalQuestion(details.question)
+			? markdownCodeSpan(details.question)
+			: details.question;
 		container.addChild(
 			renderDeepInterviewAskQuestion(details.question, uiTheme) ??
-				new Markdown(details.question, 1, 0, mdTheme, accentStyle),
+				new Markdown(markdownQuestion, 1, 0, mdTheme, accentStyle),
 		);
 
 		const answerLines: string[] = [];

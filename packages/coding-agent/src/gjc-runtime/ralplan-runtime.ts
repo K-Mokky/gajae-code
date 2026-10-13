@@ -704,6 +704,7 @@ const VALUE_FLAGS = new Set([
 	"--fallback-stage-n",
 	"--fallback-receipt-path",
 	"--lane-verdict",
+	"--architect-decision",
 	"--worktree-root",
 ]);
 
@@ -1115,6 +1116,7 @@ interface LaneVerdictUpdate {
 	lane: RalplanReviewLane;
 	verdict: string;
 	stageN: number;
+	architectDecision?: string;
 }
 
 const PERSISTED_ROLES = ["planner", "architect", "critic"] as const;
@@ -1129,6 +1131,8 @@ const LANE_VERDICTS: Record<RalplanReviewLane, ReadonlySet<string>> = {
 	architect: new Set(["CLEAR", "WATCH", "BLOCK"]),
 	critic: new Set(["OKAY", "ITERATE", "REJECT"]),
 };
+
+const ARCHITECT_REVIEW_DECISIONS = new Set(["APPROVE", "COMMENT", "REQUEST_CHANGES"]);
 
 function parseBooleanFlag(raw: string, flag: string): boolean {
 	if (raw === "true") return true;
@@ -1272,7 +1276,18 @@ function parseLaneVerdictArgs(
 	stageN: number,
 ): LaneVerdictUpdate | undefined {
 	const rawVerdict = roleStateFlagValue(args, "--lane-verdict");
-	if (rawVerdict === undefined) return undefined;
+	const rawArchitectDecision = roleStateFlagValue(args, "--architect-decision");
+	if (rawArchitectDecision !== undefined && stage !== "architect") {
+		throw new RalplanCommandError(
+			2,
+			`--architect-decision is only valid with --stage architect (received ${stage}).`,
+		);
+	}
+	if (rawVerdict === undefined) {
+		if (rawArchitectDecision !== undefined)
+			throw new RalplanCommandError(2, "--architect-decision requires --lane-verdict on the same write.");
+		return undefined;
+	}
 	if (stage !== "architect" && stage !== "critic") {
 		throw new RalplanCommandError(
 			2,
@@ -1286,7 +1301,19 @@ function parseLaneVerdictArgs(
 			`invalid --lane-verdict for ${stage}: ${rawVerdict}. Expected one of: ${[...LANE_VERDICTS[stage]].join(", ")}.`,
 		);
 	}
-	return { lane: stage, verdict, stageN };
+	const architectDecision = rawArchitectDecision?.trim().toUpperCase();
+	if (architectDecision !== undefined && !ARCHITECT_REVIEW_DECISIONS.has(architectDecision)) {
+		throw new RalplanCommandError(
+			2,
+			`invalid --architect-decision: ${rawArchitectDecision}. Expected one of: ${[...ARCHITECT_REVIEW_DECISIONS].join(", ")}.`,
+		);
+	}
+	return {
+		lane: stage,
+		verdict,
+		stageN,
+		...(architectDecision === undefined ? {} : { architectDecision }),
+	};
 }
 
 /**
@@ -1807,29 +1834,146 @@ function ralplanIndexKey(entry: unknown): string | undefined {
 	return `${stage}\u0000${stage_n}\u0000${sha256}`;
 }
 
+interface RalplanPlannerReference {
+	stage_n: number;
+	path: string;
+	sha256: string;
+}
+
+function parseRalplanPlannerReference(value: unknown): RalplanPlannerReference | undefined {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+	const record = value as Record<string, unknown>;
+	if (
+		!Number.isSafeInteger(record.stage_n) ||
+		(typeof record.stage_n === "number" && (record.stage_n < 1 || record.stage_n > 999)) ||
+		typeof record.path !== "string" ||
+		!path.isAbsolute(record.path) ||
+		typeof record.sha256 !== "string" ||
+		!/^[0-9a-f]{64}$/.test(record.sha256)
+	)
+		return undefined;
+	return { stage_n: record.stage_n as number, path: path.resolve(record.path), sha256: record.sha256 };
+}
+
+function sameRalplanPlannerReference(left: unknown, right: RalplanPlannerReference): boolean {
+	const parsed = parseRalplanPlannerReference(left);
+	return (
+		parsed !== undefined &&
+		parsed.stage_n === right.stage_n &&
+		parsed.path === right.path &&
+		parsed.sha256 === right.sha256
+	);
+}
+
+/** Resolve the latest Planner/revision receipt for the exact review pass. */
+function latestRalplanPlannerReference(
+	indexText: string | undefined,
+	runDir: string,
+	stageN: number,
+): RalplanPlannerReference | undefined {
+	if (indexText === undefined) return undefined;
+	let latest: RalplanPlannerReference | undefined;
+	for (const line of indexText.split(/\r?\n/)) {
+		if (!line.trim()) continue;
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(line);
+		} catch {
+			return undefined;
+		}
+		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+		const record = parsed as Record<string, unknown>;
+		if (record.stage !== "planner" && record.stage !== "revision") continue;
+		const reference = parseRalplanPlannerReference({
+			stage_n: record.stage_n,
+			path: record.path,
+			sha256: record.sha256,
+		});
+		if (!reference) {
+			latest = undefined;
+			continue;
+		}
+		const relative = path.relative(path.resolve(runDir), reference.path);
+		if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+			latest = undefined;
+			continue;
+		}
+		latest = reference;
+	}
+	return latest?.stage_n === stageN ? latest : undefined;
+}
+
 function serializeRalplanIndexEntries(entries: readonly unknown[]): string {
 	return entries.map(entry => `${JSON.stringify(entry)}\n`).join("");
 }
 
+function protectRalplanPlannerJoin(
+	entries: readonly unknown[],
+	reference: RalplanPlannerReference,
+	protectedIndices: Set<number>,
+): void {
+	for (const [index, entry] of entries.entries()) {
+		if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+		const record = entry as Record<string, unknown>;
+		if (
+			(record.stage === "planner" || record.stage === "revision") &&
+			sameRalplanPlannerReference({ stage_n: record.stage_n, path: record.path, sha256: record.sha256 }, reference)
+		) {
+			protectedIndices.add(index);
+		}
+		if (
+			(record.stage === "architect" || record.stage === "critic") &&
+			sameRalplanPlannerReference(record.reviewed_planner, reference)
+		) {
+			protectedIndices.add(index);
+		}
+	}
+}
+
 /**
  * Compact the append-only ralplan ledger without dropping the current final receipt.
- * The newest row and newest planning-stuck marker are also retained so a write can
- * never report success while silently losing the receipt it just persisted.
+ * Retain both the latest final's joined review evidence and the active pass receipts,
+ * alongside the newest row/stuck marker, so compaction cannot invalidate approval.
  */
 function compactRalplanIndexEntries(entries: readonly unknown[]): unknown[] {
 	let latestFinal = -1;
 	let latestPlanningStuck = -1;
+	let latestPlanner = -1;
 	for (const [index, entry] of entries.entries()) {
 		if (entry && typeof entry === "object" && !Array.isArray(entry)) {
 			const record = entry as Record<string, unknown>;
 			if (record.stage === "final") latestFinal = index;
 			if (record.planning_stuck === true) latestPlanningStuck = index;
+			if (record.stage === "planner" || record.stage === "revision") latestPlanner = index;
 		}
+	}
+	const protectedIndices = new Set([entries.length - 1, latestFinal, latestPlanningStuck]);
+	if (latestPlanner >= 0) {
+		const plannerRow = entries[latestPlanner];
+		const plannerRecord =
+			plannerRow && typeof plannerRow === "object" && !Array.isArray(plannerRow)
+				? (plannerRow as Record<string, unknown>)
+				: undefined;
+		const currentPlanner = parseRalplanPlannerReference({
+			stage_n: plannerRecord?.stage_n,
+			path: plannerRecord?.path,
+			sha256: plannerRecord?.sha256,
+		});
+		if (currentPlanner) protectRalplanPlannerJoin(entries, currentPlanner, protectedIndices);
+	}
+	if (latestFinal >= 0) {
+		const finalRow = entries[latestFinal];
+		const finalRecord =
+			finalRow && typeof finalRow === "object" && !Array.isArray(finalRow)
+				? (finalRow as Record<string, unknown>)
+				: undefined;
+		const finalPlanner = parseRalplanPlannerReference(finalRecord?.reviewed_planner);
+		if (finalPlanner) protectRalplanPlannerJoin(entries, finalPlanner, protectedIndices);
 	}
 	const retained = entries.map((entry, index) => ({
 		entry,
 		bytes: Buffer.byteLength(`${JSON.stringify(entry)}\n`, "utf8"),
-		protected: index === entries.length - 1 || index === latestFinal || index === latestPlanningStuck,
+		protected: protectedIndices.has(index),
 	}));
 	let totalBytes = retained.reduce((total, item) => total + item.bytes, 0);
 	while (totalBytes > RALPLAN_MAX_INDEX_BYTES) {
@@ -1900,6 +2044,8 @@ async function persistArtifact(
 	content: string,
 	sha256: string,
 	finalAdmission?: RalplanAutoHandoffResolution,
+	reviewedPlanner?: RalplanPlannerReference,
+	laneVerdict?: LaneVerdictUpdate,
 ): Promise<PersistedArtifact> {
 	const runDir = path.join(sessionPlansDir(cwd, resolved.sessionId), "ralplan", resolved.runId);
 
@@ -1923,6 +2069,9 @@ async function persistArtifact(
 		path: filePath,
 		created_at: createdAt,
 		sha256,
+		...(reviewedPlanner ? { reviewed_planner: reviewedPlanner } : {}),
+		...(laneVerdict ? { lane_verdict: laneVerdict.verdict } : {}),
+		...(laneVerdict?.architectDecision ? { architect_decision: laneVerdict.architectDecision } : {}),
 		...(finalAdmission ? { auto_handoff: finalAdmission } : {}),
 	};
 	await appendRalplanIndexIdempotent(path.join(runDir, "index.jsonl"), indexEntry, {
@@ -2116,6 +2265,8 @@ async function repairMissingStageArtifactLedger(
 	resolved: Pick<ResolvedArtifactArgs, "sessionId" | "runId" | "stage" | "stageN">,
 	onDisk: OnDiskStageArtifact,
 	finalAdmission?: RalplanAutoHandoffResolution,
+	reviewedPlanner?: RalplanPlannerReference,
+	laneVerdict?: LaneVerdictUpdate,
 ): Promise<ExistingStageArtifact> {
 	const createdAt = new Date().toISOString();
 	const indexEntry = {
@@ -2124,6 +2275,9 @@ async function repairMissingStageArtifactLedger(
 		path: onDisk.path,
 		created_at: createdAt,
 		sha256: onDisk.sha256,
+		...(reviewedPlanner ? { reviewed_planner: reviewedPlanner } : {}),
+		...(laneVerdict ? { lane_verdict: laneVerdict.verdict } : {}),
+		...(laneVerdict?.architectDecision ? { architect_decision: laneVerdict.architectDecision } : {}),
 		...(finalAdmission ? { auto_handoff: finalAdmission } : {}),
 	};
 	const result = await appendRalplanIndexIdempotent(
@@ -2382,6 +2536,11 @@ async function handleArtifactWrite(
 			: resolved.artifact;
 	const content = normalizedArtifact.endsWith("\n") ? normalizedArtifact : `${normalizedArtifact}\n`;
 	const sha256 = createHash("sha256").update(content).digest("hex");
+	const runDir = path.join(sessionPlansDir(persistCwd, resolved.sessionId), "ralplan", resolved.runId);
+	const reviewedPlanner =
+		resolved.stage === "architect" || resolved.stage === "critic" || resolved.stage === "final"
+			? latestRalplanPlannerReference(indexLoad.rawText, runDir, resolved.stageN)
+			: undefined;
 
 	// Duplicate-write guard: a second `--write` for the same (stage, stage_n) must not
 	// silently clobber the artifact or append a duplicate ledger row. Classify before any
@@ -2463,6 +2622,8 @@ async function handleArtifactWrite(
 			resolved,
 			onDiskArtifact,
 			resolved.stage === "final" ? unavailableRalplanFinalAdmission() : undefined,
+			reviewedPlanner,
+			laneVerdict,
 		);
 		if (resolved.stage === "final") {
 			const recoveryPublication = { id: randomUUID(), sha256 };
@@ -2572,7 +2733,15 @@ async function handleArtifactWrite(
 	}
 	// Keep run-state `current_phase` coherent with the stage being persisted.
 	await persistActiveRunId(persistCwd, resolved.sessionId, resolved.runId, resolved.stage);
-	const persisted = await persistArtifact(resolved, persistCwd, content, sha256, autoHandoff);
+	const persisted = await persistArtifact(
+		resolved,
+		persistCwd,
+		content,
+		sha256,
+		autoHandoff,
+		reviewedPlanner,
+		laneVerdict,
+	);
 	if (persistedRoleState) {
 		await applyPersistedRoleStateUpdate(persistCwd, resolved.sessionId, persistedRoleState);
 	}
@@ -2625,6 +2794,7 @@ async function handleArtifactWrite(
 	if (persistedRoleState) payload[`${persistedRoleState.role}_state`] = persistedRoleStatePayload(persistedRoleState);
 	if (reviewBudgetWarning) payload.review_budget_warning = reviewBudgetWarning;
 	if (laneVerdict) payload.lane_verdict = { lane: laneVerdict.lane, verdict: laneVerdict.verdict };
+	if (laneVerdict?.architectDecision) payload.architect_decision = laneVerdict.architectDecision;
 	if (autoHandoff) payload.auto_handoff = autoHandoff;
 
 	const stdout = resolved.json
@@ -2666,6 +2836,7 @@ async function buildDeduplicatedResult(
 		deduplicated: true,
 	};
 	if (laneVerdict) payload.lane_verdict = { lane: laneVerdict.lane, verdict: laneVerdict.verdict };
+	if (laneVerdict?.architectDecision) payload.architect_decision = laneVerdict.architectDecision;
 	if (persistedRoleState) {
 		payload[`${persistedRoleState.role}_state`] = persistedRoleStatePayload(persistedRoleState);
 	}

@@ -1858,6 +1858,43 @@ describe("AskTool option rendering", () => {
 		expect(renderedText).not.toContain("...");
 		expect(lines.some(line => /^\s{8,}.*readable by wrapping/.test(line))).toBe(true);
 	});
+
+	it("renders a Ralplan approval publication path as literal Markdown text", async () => {
+		const theme = await getThemeByName("red-claw");
+		expect(theme).toBeDefined();
+		const question =
+			'Approve execution via ultragoal for the current Ralplan final at "/tmp/[click](https://example.invalid)/plan.md" (run_id="run", sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef)?';
+		const rendered = askToolRenderer.renderCall(
+			{
+				questions: [
+					{
+						id: "approval",
+						question,
+						options: [{ label: "Approve" }],
+						workflowGate: { stage: "ralplan", kind: "approval" },
+					},
+				],
+			},
+			{ expanded: true, isPartial: false },
+			theme!,
+		);
+
+		expect(stripAnsi(rendered.render(300).join("\n"))).toContain(question);
+		const renderedResult = askToolRenderer.renderResult(
+			{
+				content: [{ type: "text", text: "Approval recorded." }],
+				details: {
+					question,
+					options: ["Refine further", "Approve execution via ultragoal", "Stop here"],
+					selectedOptions: ["Approve execution via ultragoal"],
+					multi: false,
+				},
+			},
+			{ expanded: true, isPartial: false },
+			theme!,
+		);
+		expect(stripAnsi(renderedResult.render(300).join("\n"))).toContain(question);
+	});
 });
 
 describe("AskTool multiline custom input rendering", () => {

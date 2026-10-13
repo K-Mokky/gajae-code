@@ -1,3 +1,3 @@
 ### Fixed
 
-- The Ultragoal Ask guard now permits only the canonical Ralplan approval question bound to the current final publication, blocking unrelated questions from bypassing the guard.
+- The Ultragoal Ask guard permits only the built-in Ask tool's canonical Ralplan approval for an `off` final with a runtime-verified same-pass Planner/Architect/Critic join, blocking unrelated prompts and non-off admissions from bypassing the guard; approval paths render literally instead of as Markdown links.

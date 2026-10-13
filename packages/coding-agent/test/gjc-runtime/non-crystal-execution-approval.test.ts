@@ -81,46 +81,35 @@ async function withSession(fn: (cwd: string, manager: SessionManager, sessionId:
 }
 
 async function publish(cwd: string, sessionId: string, stage: ExecutionApprovalStage, version = 1) {
-	const result =
-		stage === "deep-interview"
-			? await runNativeDeepInterviewCommand(
-					[
-						"--write",
-						"--stage",
-						"final",
-						"--slug",
-						`ordinary-${version}`,
-						"--spec",
-						`# Report specification ${version}\n\nBuild a report.`,
-						"--session-id",
-						sessionId,
-						"--json",
-					],
-					cwd,
-				)
-			: await runNativeRalplanCommand(
-					[
-						"--write",
-						"--stage",
-						"final",
-						"--stage_n",
-						String(version),
-						"--artifact",
-						`# Report plan ${version}\n\nImplement and test the report.`,
-						"--run-id",
-						"ordinary-plan",
-						"--session-id",
-						sessionId,
-						"--json",
-					],
-					cwd,
-				);
+	if (stage === "ralplan") {
+		await publishReviewedRalplanFinal(cwd, sessionId, "ordinary-plan", version);
+		return JSON.parse(await fs.readFile(modeStatePath(cwd, sessionId, stage), "utf8"));
+	}
+	const result = await runNativeDeepInterviewCommand(
+		[
+			"--write",
+			"--stage",
+			"final",
+			"--slug",
+			`ordinary-${version}`,
+			"--spec",
+			`# Report specification ${version}\n\nBuild a report.`,
+			"--session-id",
+			sessionId,
+			"--json",
+		],
+		cwd,
+	);
 	expect(result.status, result.stderr).toBe(0);
 	return JSON.parse(await fs.readFile(modeStatePath(cwd, sessionId, stage), "utf8"));
 }
 
-async function publishReviewedRalplanFinal(cwd: string, sessionId: string) {
-	const runId = "reviewed-current-final";
+async function publishReviewedRalplanFinal(
+	cwd: string,
+	sessionId: string,
+	runId = "reviewed-current-final",
+	stageN = 1,
+) {
 	const stages = [
 		{
 			stage: "planner",
@@ -130,7 +119,7 @@ async function publishReviewedRalplanFinal(cwd: string, sessionId: string) {
 		{
 			stage: "architect",
 			artifact: "## Architectural Status\nCLEAR\n\n## Code Review Recommendation\nAPPROVE\n",
-			extra: ["--architect-id", "2-Architect", "--lane-verdict", "CLEAR"],
+			extra: ["--architect-id", "2-Architect", "--lane-verdict", "CLEAR", "--architect-decision", "APPROVE"],
 		},
 		{
 			stage: "critic",
@@ -139,31 +128,45 @@ async function publishReviewedRalplanFinal(cwd: string, sessionId: string) {
 		},
 		{
 			stage: "final",
-			artifact: "# Approved final plan\n\nImplement and test the approved repair.",
+			artifact: `# Approved final plan ${stageN}\n\nImplement and test the approved repair.`,
 			extra: [],
 		},
 	] as const;
 	for (const row of stages) {
-		const result = await runNativeRalplanCommand(
-			[
-				"--write",
-				"--stage",
-				row.stage,
-				"--stage_n",
-				"1",
-				"--artifact",
-				row.artifact,
-				"--run-id",
-				runId,
-				"--session-id",
-				sessionId,
-				...row.extra,
-				"--json",
-			],
-			cwd,
-		);
-		expect(result.status, result.stderr).toBe(0);
+		await writeRalplanStage(cwd, sessionId, runId, row.stage, stageN, row.artifact, row.extra);
 	}
+	return JSON.parse(await fs.readFile(modeStatePath(cwd, sessionId, "ralplan"), "utf8"));
+}
+
+async function writeRalplanStage(
+	cwd: string,
+	sessionId: string,
+	runId: string,
+	stage: string,
+	stageN: number,
+	artifact: string,
+	extra: readonly string[] = [],
+) {
+	const result = await runNativeRalplanCommand(
+		[
+			"--write",
+			"--stage",
+			stage,
+			"--stage_n",
+			String(stageN),
+			"--artifact",
+			artifact,
+			"--run-id",
+			runId,
+			"--session-id",
+			sessionId,
+			...extra,
+			"--json",
+		],
+		cwd,
+	);
+	expect(result.status, result.stderr).toBe(0);
+	return JSON.parse(result.stdout ?? "{}");
 }
 
 async function ask(
@@ -325,6 +328,104 @@ describe("non-Crystal user-gated execution approval", () => {
 			expect(await isUltragoalAskBlocked(cwd, { sessionId })).toMatchObject({ active: true });
 			expect(await fs.readFile(paths.goalsPath, "utf8")).toBe(goalsBefore);
 			expect(await fs.readFile(paths.ledgerPath, "utf8")).toBe(ledgerBefore);
+		});
+	});
+
+	it("requires runtime-recorded same-pass accepted reviews and an off admission target", async () => {
+		for (const invalidJoin of ["missing", "rejected", "mismatched", "unapproved-architect"] as const) {
+			await withSession(async (cwd, manager, sessionId) => {
+				await createUltragoalPlan({ cwd, brief: "Implement the approved repair" });
+				const runId = `invalid-review-join-${invalidJoin}`;
+				if (invalidJoin !== "missing") {
+					await writeRalplanStage(cwd, sessionId, runId, "planner", 1, "# Planner\n\nPlan the repair.");
+					await writeRalplanStage(
+						cwd,
+						sessionId,
+						runId,
+						"architect",
+						invalidJoin === "mismatched" ? 2 : 1,
+						`## Architectural Status\nCLEAR\n\n## Code Review Recommendation\n${invalidJoin === "unapproved-architect" ? "COMMENT" : "APPROVE"}\n`,
+						[
+							"--lane-verdict",
+							"CLEAR",
+							"--architect-decision",
+							invalidJoin === "unapproved-architect" ? "COMMENT" : "APPROVE",
+						],
+					);
+					await writeRalplanStage(
+						cwd,
+						sessionId,
+						runId,
+						"critic",
+						invalidJoin === "mismatched" ? 2 : 1,
+						"## Verdict\n**OKAY**\n",
+						["--lane-verdict", invalidJoin === "rejected" ? "ITERATE" : "OKAY"],
+					);
+				}
+				await writeRalplanStage(cwd, sessionId, runId, "final", 1, "# Final plan\n\nPlan the repair.");
+
+				await expect(ask(cwd, manager, "ralplan", `invalid-${invalidJoin}`, false, true)).rejects.toThrow(
+					/Ultragoal try-harder nudge/,
+				);
+				expect(await Bun.file(nonCrystalExecutionApprovalRecordPath(cwd, sessionId, "ralplan")).exists()).toBe(
+					false,
+				);
+			});
+		}
+	});
+
+	it("does not offer manual approval for a Ralplan autoresearch admission", async () => {
+		await withSession(async (cwd, manager, sessionId) => {
+			await fs.writeFile(path.join(cwd, ".gjc", "config.yml"), "gjc:\n  ralplan:\n    autoHandoff: autoresearch\n");
+			await createUltragoalPlan({ cwd, brief: "Implement the approved repair" });
+			const finalState = await publishReviewedRalplanFinal(cwd, sessionId);
+			expect(finalState.auto_handoff).toMatchObject({ effectiveTarget: "autoresearch" });
+
+			await expect(ask(cwd, manager, "ralplan", "autoresearch-is-not-manual-approval", false, true)).rejects.toThrow(
+				/Ultragoal try-harder nudge/,
+			);
+			expect(await Bun.file(nonCrystalExecutionApprovalRecordPath(cwd, sessionId, "ralplan")).exists()).toBe(false);
+		});
+	});
+
+	it("reserves the approval exception for the built-in Ask tool", async () => {
+		await withSession(async (cwd, _manager, sessionId) => {
+			await createUltragoalPlan({ cwd, brief: "Implement the approved repair" });
+			await publishReviewedRalplanFinal(cwd, sessionId);
+			const presentation = await captureExecutionApprovalPresentation(cwd, sessionId, "ralplan");
+			const execute = vi.fn(async () => ({ content: [{ type: "text" as const, text: "asked" }] }));
+			const customAsk = {
+				name: "ask",
+				description: "Extension Ask tool",
+				parameters: {},
+				execute,
+			} as unknown as AgentTool;
+			const guarded = guardToolForUltragoalAsk(
+				customAsk,
+				() => cwd,
+				() => ({ sessionId }),
+			);
+			const approvalQuestion = formatRalplanUltragoalApprovalQuestion(presentation);
+			if (!approvalQuestion) throw new Error("expected canonical Ralplan approval question");
+			const params = {
+				questions: [
+					{
+						id: "custom-ask-approval",
+						question: approvalQuestion,
+						options: [
+							{ label: "Refine further" },
+							{ label: "Approve execution via ultragoal" },
+							{ label: "Stop here" },
+						],
+						recommended: 1,
+						multi: false,
+						workflowGate: { stage: "ralplan", kind: "approval" },
+					},
+				],
+			};
+
+			await expect(guarded.execute("custom-ask-call", params)).rejects.toThrow(/Ultragoal try-harder nudge/);
+			expect(execute).not.toHaveBeenCalled();
 		});
 	});
 
@@ -769,24 +870,7 @@ describe("non-Crystal user-gated execution approval", () => {
 			const indexPath = path.join(sessionStateDir(cwd, sessionId), "deep-interview-handoff-ralplan-audit.json");
 			const oldIndex = await fs.readFile(indexPath, "utf8");
 			const oldAudit = await fs.readFile(auditPath(cwd, sessionId), "utf8");
-			const replacement = await runNativeRalplanCommand(
-				[
-					"--write",
-					"--stage",
-					"final",
-					"--stage_n",
-					"1",
-					"--artifact",
-					"# Independent replacement plan",
-					"--run-id",
-					"replacement-plan",
-					"--session-id",
-					sessionId,
-					"--json",
-				],
-				cwd,
-			);
-			expect(replacement.status, replacement.stderr).toBe(0);
+			await publishReviewedRalplanFinal(cwd, sessionId, "replacement-plan");
 			expect(await executionApprovalLineage(cwd, sessionId, "ralplan")).toBe("ordinary");
 			expect((await handoff(cwd, sessionId, "ralplan")).status).toBe(2);
 			await ask(cwd, manager, "ralplan", "approve-independent-plan");
