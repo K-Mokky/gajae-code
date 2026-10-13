@@ -791,6 +791,8 @@ Runtime discovery fetches models (`GET /v1/models`) and synthesizes model entrie
 
 You can configure discovery yourself:
 
+For `openai-models-list`, `apiByModelPrefix` routes are matched against model IDs without case sensitivity; the longest matching prefix wins.
+
 ```yaml
 providers:
   ollama:

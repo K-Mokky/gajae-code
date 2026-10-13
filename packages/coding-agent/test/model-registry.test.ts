@@ -6700,8 +6700,58 @@ describe("ModelRegistry", () => {
 
 		const registry = new ModelRegistry(authStorage, modelsJsonPath);
 		expect(String(registry.getError()?.message)).toContain(
+			' modelOverrides "streamIdleTimeoutMs" is only supported with openai-completions or openai-responses APIs',
+		);
+	});
+
+	test("validates discovery API prefixes case-insensitively for modelOverrides", () => {
+		writeRawModelsConfig({
+			providers: {
+				proxy: {
+					baseUrl: "https://proxy.example.com/v1",
+					apiKey: "TEST_KEY",
+					api: "openai-completions",
+					discovery: {
+						type: "openai-models-list",
+						apiByModelPrefix: { "vendor-": "anthropic-messages" },
+					},
+					modelOverrides: { "VENDOR-OPUS": { streamIdleTimeoutMs: 300_000 } },
+				},
+			},
+		});
+
+		const registry = new ModelRegistry(authStorage, modelsJsonPath);
+		expect(String(registry.getError()?.message)).toContain(
 			'modelOverrides "streamIdleTimeoutMs" is only supported with openai-completions or openai-responses APIs',
 		);
+	});
+
+	test("routes discovered model IDs with case-insensitive API prefixes", async () => {
+		writeRawModelsConfig({
+			providers: {
+				proxy: {
+					baseUrl: "https://proxy.example.com/v1",
+					apiKey: "TEST_KEY",
+					api: "openai-completions",
+					discovery: {
+						type: "openai-models-list",
+						apiByModelPrefix: { "VENDOR-": "anthropic-messages" },
+					},
+				},
+			},
+		});
+
+		const registry = new ModelRegistry(authStorage, modelsJsonPath);
+		using _hook = hookFetch(
+			() =>
+				new Response(JSON.stringify({ data: [{ id: "vendor-opus" }] }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				}),
+		);
+		await registry.refreshProvider("proxy", "online");
+
+		expect(registry.find("proxy", "vendor-opus")).toMatchObject({ api: "anthropic-messages" });
 	});
 
 	test("does not apply provider stream idle timeouts to discovered Anthropic routes", async () => {

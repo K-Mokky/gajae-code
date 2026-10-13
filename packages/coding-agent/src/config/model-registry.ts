@@ -480,12 +480,14 @@ function resolveModelApiFromDiscovery(
 	entry?: { id?: unknown; owned_by?: unknown },
 ): Api {
 	// Explicit per-prefix routing always wins over model-id detection.
+	const normalizedModelId = modelId.toLowerCase();
 	let matchedPrefixLength = -1;
 	let prefixApi: Api | undefined;
 	for (const [prefix, routedApi] of Object.entries(discovery.apiByModelPrefix ?? {})) {
-		if (modelId.startsWith(prefix) && prefix.length > matchedPrefixLength) {
+		const normalizedPrefix = prefix.toLowerCase();
+		if (normalizedModelId.startsWith(normalizedPrefix) && normalizedPrefix.length > matchedPrefixLength) {
 			prefixApi = routedApi;
-			matchedPrefixLength = prefix.length;
+			matchedPrefixLength = normalizedPrefix.length;
 		}
 	}
 	if (prefixApi !== undefined) return prefixApi;
