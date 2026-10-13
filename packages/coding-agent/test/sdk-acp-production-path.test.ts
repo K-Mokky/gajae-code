@@ -336,6 +336,9 @@ test("production ACP preserves lifecycle, turn, replay, and connection ownership
 	let originalImageBase64 = "";
 	let corruptNextImageBeginAck = false;
 	let malformedBeginId: string | undefined;
+	let overlongNextImageBeginAck = false;
+	let overlongBeginActualId: string | undefined;
+	const overlongBeginAckId = "x".repeat(128 * 1024);
 	let holdNextImageBeginAck = false;
 	let releaseImageBeginAck: (() => void) | undefined;
 	let holdNextUploadAck: "turn.image.append" | "turn.image.finish" | undefined;
@@ -650,7 +653,18 @@ test("production ACP preserves lifecycle, turn, replay, and connection ownership
 										socket.send(JSON.stringify({ type: "control_response", id: frame.id, ok: true, result }));
 									return;
 								}
-								if (frame.operation === "turn.image.begin" && corruptNextImageBeginAck) {
+								if (frame.operation === "turn.image.begin" && overlongNextImageBeginAck) {
+									overlongNextImageBeginAck = false;
+									overlongBeginActualId = (result as { id: string }).id;
+									socket.send(
+										JSON.stringify({
+											type: "control_response",
+											id: frame.id,
+											ok: true,
+											result: { ...result, id: overlongBeginAckId },
+										}),
+									);
+								} else if (frame.operation === "turn.image.begin" && corruptNextImageBeginAck) {
 									corruptNextImageBeginAck = false;
 									malformedBeginId = (result as { id: string }).id;
 									socket.send(
@@ -1873,6 +1887,28 @@ test("production ACP preserves lifecycle, turn, replay, and connection ownership
 	expect(() => imageUploads.redeem("acp-contract-reconnected", [{ id: malformedBeginId! }])).toThrow(
 		expect.objectContaining({ code: "resource_gone" }),
 	);
+	overlongNextImageBeginAck = true;
+	const beforeOverlongBegin = controlOperations.length;
+	const beforeOverlongPrompt = promptInputs.length;
+	const beforeOverlongFrames = imageFrameBytes.length;
+	await expect(
+		bounded(
+			agent.prompt({ sessionId: created.sessionId, prompt: [imageBlock(originalImageBase64)] }),
+			"overlong image begin acknowledgement ID",
+		),
+	).rejects.toMatchObject({ code: "invalid_prompt_acknowledgement" });
+	await waitFor(
+		() => controlOperations.slice(beforeOverlongBegin).includes("turn.image.discard"),
+		"overlong image begin lease discard",
+	);
+	const overlongOperations = controlOperations.slice(beforeOverlongBegin);
+	expect(overlongOperations).toContain("turn.image.begin");
+	expect(overlongOperations).toContain("turn.image.discard");
+	expect(overlongOperations).not.toContain("turn.image.append");
+	expect(promptInputs).toHaveLength(beforeOverlongPrompt);
+	expect(imageFrameBytes.slice(beforeOverlongFrames).every(bytes => bytes <= 256 * 1024)).toBe(true);
+	expect(overlongBeginActualId).toEqual(expect.any(String));
+	imageUploads.discard("acp-contract-reconnected", { id: overlongBeginActualId! });
 	imageEchoStartIndex = updates.length;
 	imageEchoPresentAtDispatch = false;
 	const imagePrompt = agent.prompt({

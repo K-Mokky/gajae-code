@@ -119,6 +119,8 @@ const CANCEL_SETTLEMENT_GRACE_MS = 5_000;
 const MAX_PROMPT_FRAME_BYTES = 256 * 1024;
 const IMAGE_UPLOAD_CHUNK_BYTES = 96 * 1024;
 const MAX_PROMPT_IMAGES = 16;
+const MAX_IMAGE_UPLOAD_ID_LENGTH = 128;
+const MAX_IMAGE_UPLOAD_CLEANUP_ID_LENGTH = 128 * 1024;
 const INVALID_IMAGE_BASE64_CHARACTER = /[^A-Za-z0-9+/]/;
 const CANONICAL_TWO_BYTE_TAIL = "AEIMQUYcgkosw048";
 /**
@@ -2630,6 +2632,22 @@ export class AcpAgent implements Agent {
 			}),
 		);
 		const stageImages = !skillInvocation && payload.images.length > 0 && promptFrameBytes > MAX_PROMPT_FRAME_BYTES;
+		const measureStagedPromptFrame = (ids: readonly string[]): number =>
+			Buffer.byteLength(
+				JSON.stringify({
+					type: "control_request",
+					operation: "turn.prompt",
+					id: PROMPT_FRAME_ID_PLACEHOLDER,
+					input: {
+						text: payload.text,
+						stagedImages: ids.map(id => ({ id })),
+						clientRef,
+					},
+					...(record.adapter.connectionId === undefined ? {} : { connectionId: record.adapter.connectionId }),
+				}),
+			);
+		if (stageImages && measureStagedPromptFrame([]) > MAX_PROMPT_FRAME_BYTES)
+			throw new AcpSdkAdapterError("invalid_input", "ACP prompt text exceeds the SDK transport limit.");
 		if (promptFrameBytes > MAX_PROMPT_FRAME_BYTES && !stageImages)
 			throw new AcpSdkAdapterError(
 				"invalid_input",
@@ -2678,6 +2696,23 @@ export class AcpAgent implements Agent {
 		waiter.uploadAbort.signal.addEventListener("abort", () => stopUpload(undefined), { once: true });
 		const stagedIds = new Set<string>();
 		const discardImage = async (id: string): Promise<boolean> => {
+			if (id.length > MAX_IMAGE_UPLOAD_CLEANUP_ID_LENGTH) {
+				logger.warn("acp_image_discard_failed", { sessionId: params.sessionId, code: "invalid_input" });
+				return false;
+			}
+			const discardFrameBytes = Buffer.byteLength(
+				JSON.stringify({
+					type: "control_request",
+					operation: "turn.image.discard",
+					id: PROMPT_FRAME_ID_PLACEHOLDER,
+					input: { id },
+					...(record.adapter.connectionId === undefined ? {} : { connectionId: record.adapter.connectionId }),
+				}),
+			);
+			if (discardFrameBytes > MAX_PROMPT_FRAME_BYTES) {
+				logger.warn("acp_image_discard_failed", { sessionId: params.sessionId, code: "invalid_input" });
+				return false;
+			}
 			try {
 				await record.adapter.uploadImageDiscard(id);
 				return true;
@@ -2739,6 +2774,7 @@ export class AcpAgent implements Agent {
 						if (
 							typeof id === "string" &&
 							id &&
+							id.length <= MAX_IMAGE_UPLOAD_CLEANUP_ID_LENGTH &&
 							(promptWaiterRetired(record, waiter) || waiter.uploadAbort.signal.aborted)
 						)
 							void discardImage(id);
@@ -2746,8 +2782,8 @@ export class AcpAgent implements Agent {
 					() => undefined,
 				);
 				const { id, nextSequence } = await whileActive(begin);
-				if (typeof id === "string" && id) stagedIds.add(id);
-				if (typeof id !== "string" || !id || nextSequence !== 0)
+				if (typeof id === "string" && id && id.length <= MAX_IMAGE_UPLOAD_CLEANUP_ID_LENGTH) stagedIds.add(id);
+				if (typeof id !== "string" || !id || id.length > MAX_IMAGE_UPLOAD_ID_LENGTH || nextSequence !== 0)
 					throw new AcpSdkAdapterError(
 						"invalid_prompt_acknowledgement",
 						"SDK image begin acknowledgement is invalid.",
@@ -2783,20 +2819,7 @@ export class AcpAgent implements Agent {
 					);
 				observeUploadProgress();
 			}
-			const stagedFrameBytes = Buffer.byteLength(
-				JSON.stringify({
-					type: "control_request",
-					operation: "turn.prompt",
-					id: PROMPT_FRAME_ID_PLACEHOLDER,
-					input: {
-						text: payload.text,
-						stagedImages: [...stagedIds].map(id => ({ id })),
-						clientRef,
-					},
-					...(record.adapter.connectionId === undefined ? {} : { connectionId: record.adapter.connectionId }),
-				}),
-			);
-			if (stagedFrameBytes > MAX_PROMPT_FRAME_BYTES)
+			if (measureStagedPromptFrame([...stagedIds]) > MAX_PROMPT_FRAME_BYTES)
 				throw new AcpSdkAdapterError("invalid_input", "ACP prompt text exceeds the SDK transport limit.");
 		};
 		try {
