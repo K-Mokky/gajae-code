@@ -4603,6 +4603,8 @@ async function invocationHarness(
 		isIdle?: () => boolean;
 		/** Null omits authoritative transport liveness entirely. */
 		isConnectionOpen?: ((connectionId: string) => boolean) | null;
+		/** False omits transport disconnect notifications. */
+		connectionCloseNotifications?: boolean;
 		settings?: Settings;
 		/** Throw to inject a durable-write failure for matching transitions. */
 		persistInterceptor?: (transition: { type: string }) => void;
@@ -4675,17 +4677,33 @@ async function invocationHarness(
 		...(hooks.settings ? { settings: hooks.settings } : {}),
 		createTransport: async ({ sessionId: id, stateRoot, token }) => {
 			let open = false;
+			let closeConnection: ((connectionId: string) => void) | undefined;
+			const openConnections = new Set<string>();
 			return {
 				sessionId: id,
 				stateRoot,
 				token,
 				...(hooks.isConnectionOpen === null ? {} : { isConnectionOpen: hooks.isConnectionOpen ?? (() => open) }),
+				...(hooks.connectionCloseNotifications === false
+					? {}
+					: {
+							onConnectionClose(handler) {
+								closeConnection = handler;
+								return () => {
+									if (closeConnection === handler) closeConnection = undefined;
+								};
+							},
+						}),
 				onFrame(handler) {
-					deliver = handler;
-					deliveries.set(id, handler);
+					const receiveFrame = (connectionId: string, frame: SdkFrame): void => {
+						openConnections.add(connectionId);
+						handler(connectionId, frame);
+					};
+					deliver = receiveFrame;
+					deliveries.set(id, receiveFrame);
 					return () => {
-						if (deliver === handler) deliver = undefined;
-						if (deliveries.get(id) === handler) deliveries.delete(id);
+						if (deliver === receiveFrame) deliver = undefined;
+						if (deliveries.get(id) === receiveFrame) deliveries.delete(id);
 					};
 				},
 				sendFrame(_connectionId, frame) {
@@ -4707,6 +4725,8 @@ async function invocationHarness(
 				},
 				stop: async () => {
 					open = false;
+					for (const connectionId of openConnections) closeConnection?.(connectionId);
+					openConnections.clear();
 				},
 			};
 		},
@@ -5331,6 +5351,34 @@ test("SDK-only transport without liveness omits image capabilities and dispatch 
 				{ type: "image", mimeType: "image/png", data },
 			],
 		]);
+	} finally {
+		await harness?.stop();
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("SDK-only transport without disconnect notifications omits staged-image controls", async () => {
+	const cwd = await mkdtemp(path.join(os.tmpdir(), "gjc-sdk-no-image-disconnect-notifications-"));
+	let harness: InvocationHarness | undefined;
+	try {
+		harness = await invocationHarness("sdk-no-image-disconnect-notifications", cwd, {
+			isConnectionOpen: connectionId => connectionId !== "closed",
+			connectionCloseNotifications: false,
+		});
+		const capabilities = await harness.query("runtime.capabilities", {});
+		expect(capabilities.ok).toBe(true);
+		const operations = (capabilities as unknown as { page: { items: Array<{ operations: string[] }> } }).page
+			.items[0]!.operations;
+		expect(operations).toContain("turn.prompt");
+		expect(operations.filter(operation => operation.startsWith("turn.image."))).toEqual([]);
+		for (const operation of ["turn.image.begin", "turn.image.append", "turn.image.finish", "turn.image.discard"])
+			expect(await harness.control(operation, {})).toMatchObject({
+				ok: false,
+				error: { code: "operation_not_session_owned" },
+			});
+		expect(
+			await harness.control("turn.prompt", { text: "Unsupported", stagedImages: [{ id: "missing" }] }),
+		).toMatchObject({ ok: false, error: { code: "operation_prohibited" } });
 	} finally {
 		await harness?.stop();
 		await rm(cwd, { recursive: true, force: true });
