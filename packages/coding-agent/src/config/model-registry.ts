@@ -1524,13 +1524,18 @@ function applyModelOverride(model: Model<Api>, override: ModelOverride): Model<A
 	if (override.output !== undefined) result.output = override.output as ("text" | "image")[];
 	if (override.cacheRetention !== undefined) result.cacheRetention = override.cacheRetention;
 	if (override.streamIdleTimeoutMs !== undefined) {
-		assertRequestTransformSupportedForModelApi(
-			model.provider,
-			model.id,
-			model.api,
-			'modelOverrides "streamIdleTimeoutMs"',
-		);
-		result.streamIdleTimeoutMs = override.streamIdleTimeoutMs;
+		if (isRequestTransformApi(model.api)) {
+			result.streamIdleTimeoutMs = override.streamIdleTimeoutMs;
+		} else {
+			// Discovery ownership can reveal an incompatible route after config
+			// validation, including while hydrating a cached model at startup.
+			// Reject only this override so the otherwise-valid model stays usable.
+			logger.warn("model stream idle timeout override ignored for incompatible API", {
+				model: model.id,
+				provider: model.provider,
+				api: model.api,
+			});
+		}
 	}
 	const contextWindowOverride = toPositiveNumberOrUndefined(override.contextWindow);
 	if (contextWindowOverride !== undefined) {

@@ -6905,7 +6905,7 @@ describe("ModelRegistry", () => {
 		});
 	});
 
-	test("rejects discovered idle timeout overrides when the catalog resolves to Anthropic", async () => {
+	test("does not apply discovered idle timeout overrides when the catalog resolves to Anthropic", async () => {
 		writeRawModelsConfig({
 			providers: {
 				proxy: {
@@ -6929,7 +6929,54 @@ describe("ModelRegistry", () => {
 		);
 
 		await registry.refreshProvider("proxy", "online");
-		expect(registry.find("proxy", "claude-opus-5")).toBeUndefined();
+		expect(registry.find("proxy", "claude-opus-5")).toMatchObject({ api: "anthropic-messages" });
+		expect(registry.find("proxy", "claude-opus-5")).not.toHaveProperty("streamIdleTimeoutMs");
+	});
+
+	test("hydrates cached Anthropic routes without applying deferred timeout overrides", async () => {
+		const provider = "cached-timeout-proxy";
+		const baseUrl = "https://proxy.example.com/v1";
+		const registrySettings = Settings.isolated();
+		const writeConfig = (includeOverride: boolean) => {
+			writeRawModelsConfig({
+				providers: {
+					[provider]: {
+						baseUrl,
+						apiKey: "TEST_KEY",
+						api: "openai-completions",
+						discovery: { type: "openai-models-list" },
+						...(includeOverride ? { modelOverrides: { "claude-opus-5": { streamIdleTimeoutMs: 300_000 } } } : {}),
+					},
+				},
+			});
+		};
+		writeConfig(false);
+
+		let requests = 0;
+		using _hook = hookFetch(input => {
+			const url = input instanceof Request ? input.url : String(input);
+			if (url !== `${baseUrl}/models`) throw new Error(`Unexpected discovery URL: ${url}`);
+			requests++;
+			return Response.json({ data: [{ id: "claude-opus-5", owned_by: "anthropic" }] });
+		});
+
+		const discovered = new ModelRegistry(authStorage, modelsJsonPath, registrySettings, { automaticRefresh: false });
+		try {
+			await discovered.refreshProvider(provider, "online");
+			expect(discovered.find(provider, "claude-opus-5")).toMatchObject({ api: "anthropic-messages" });
+		} finally {
+			discovered.dispose();
+		}
+
+		writeConfig(true);
+		const reloaded = new ModelRegistry(authStorage, modelsJsonPath, registrySettings, { automaticRefresh: false });
+		try {
+			expect(reloaded.find(provider, "claude-opus-5")).toMatchObject({ api: "anthropic-messages" });
+			expect(reloaded.find(provider, "claude-opus-5")).not.toHaveProperty("streamIdleTimeoutMs");
+			expect(requests).toBe(1);
+		} finally {
+			reloaded.dispose();
+		}
 	});
 
 	test("validates discovery API prefixes case-insensitively for modelOverrides", () => {
