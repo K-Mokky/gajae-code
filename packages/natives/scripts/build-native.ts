@@ -321,9 +321,10 @@ try {
 
 	await installGeneratedBindings(buildOutputDir);
 
+	const { version } = (await Bun.file(packageJsonPath).json()) as { version: string };
 	await Bun.write(
 		`${canonicalAddonPath}.build.json`,
-		`${JSON.stringify({ languageSet, profile: profileLabel, builtAt: new Date().toISOString() }, null, 2)}\n`,
+		`${JSON.stringify({ languageSet, profile: profileLabel, version, builtAt: new Date().toISOString() }, null, 2)}\n`,
 	);
 
 	await recordDiagnosticArtifactDigest({

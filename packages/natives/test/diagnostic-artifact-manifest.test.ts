@@ -2,7 +2,10 @@ import { afterEach, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { recordDiagnosticArtifactDigest } from "../scripts/diagnostic-artifact-manifest";
+import {
+	recordDiagnosticArtifactDigest,
+	verifyDiagnosticArtifactDigest,
+} from "../scripts/diagnostic-artifact-manifest";
 
 const tempDirs: string[] = [];
 const repoRoot = path.join(import.meta.dir, "../../..");
@@ -107,14 +110,8 @@ test("bootstrapping a new local manifest includes pre-existing local variants on
 	await Bun.write(packageJsonPath, JSON.stringify({ version: "2.0.0" }));
 	await Bun.write(modernAddonPath, "modern addon bytes");
 	await Bun.write(baselineAddonPath, "baseline addon bytes");
-	await Bun.write(
-		`${modernAddonPath}.build.json`,
-		JSON.stringify({ profile: "local" }),
-	);
-	await Bun.write(
-		`${baselineAddonPath}.build.json`,
-		JSON.stringify({ profile: "local" }),
-	);
+	await Bun.write(`${modernAddonPath}.build.json`, JSON.stringify({ profile: "local", version: "2.0.0" }));
+	await Bun.write(`${baselineAddonPath}.build.json`, JSON.stringify({ profile: "local", version: "2.0.0" }));
 
 	// Record the modern addon; the local manifest doesn't exist yet.
 	await recordDiagnosticArtifactDigest({
@@ -130,9 +127,7 @@ test("bootstrapping a new local manifest includes pre-existing local variants on
 		version: string;
 		artifacts: Record<string, string>;
 	};
-	const modernDigest = new Bun.CryptoHasher("sha256")
-		.update(await Bun.file(modernAddonPath).bytes())
-		.digest("hex");
+	const modernDigest = new Bun.CryptoHasher("sha256").update(await Bun.file(modernAddonPath).bytes()).digest("hex");
 	const baselineDigest = new Bun.CryptoHasher("sha256")
 		.update(await Bun.file(baselineAddonPath).bytes())
 		.digest("hex");
@@ -145,6 +140,60 @@ test("bootstrapping a new local manifest includes pre-existing local variants on
 			"pi_natives.linux-x64-baseline.node": baselineDigest,
 		},
 	});
+});
+
+test("a version bump does not migrate stale local variants into the new manifest", async () => {
+	const nativeDir = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-native-stale-variant-"));
+	tempDirs.push(nativeDir);
+	const packageJsonPath = path.join(nativeDir, "package.json");
+	const modernAddonPath = path.join(nativeDir, "pi_natives.linux-x64-modern.node");
+	const baselineAddonPath = path.join(nativeDir, "pi_natives.linux-x64-baseline.node");
+
+	await Bun.write(packageJsonPath, JSON.stringify({ version: "2.0.0" }));
+	await Bun.write(modernAddonPath, "modern addon bytes");
+	await Bun.write(baselineAddonPath, "baseline addon bytes");
+	await Bun.write(`${modernAddonPath}.build.json`, JSON.stringify({ profile: "local", version: "2.0.0" }));
+	await Bun.write(`${baselineAddonPath}.build.json`, JSON.stringify({ profile: "local", version: "1.0.0" }));
+
+	await recordDiagnosticArtifactDigest({
+		addonPath: modernAddonPath,
+		nativeDir,
+		packageJsonPath,
+		profile: "local",
+	});
+
+	const localManifest = (await Bun.file(path.join(nativeDir, "diagnostic-artifact.local.json")).json()) as {
+		artifacts: Record<string, string>;
+	};
+	expect(Object.keys(localManifest.artifacts)).toEqual(["pi_natives.linux-x64-modern.node"]);
+});
+
+test("verification rejects a local addon built for a different package version", async () => {
+	const nativeDir = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-native-stale-build-"));
+	tempDirs.push(nativeDir);
+	const addonPath = path.join(nativeDir, "pi_natives.linux-x64-modern.node");
+	const addonBytes = "stale local addon bytes";
+	const digest = new Bun.CryptoHasher("sha256").update(addonBytes).digest("hex");
+
+	await Bun.write(addonPath, addonBytes);
+	await Bun.write(`${addonPath}.build.json`, JSON.stringify({ profile: "local", version: "1.0.0" }));
+	await Bun.write(
+		path.join(nativeDir, "diagnostic-artifact.local.json"),
+		JSON.stringify({
+			schema: "gjc.diagnostic-artifact",
+			version: "2.0.0",
+			artifacts: { [path.basename(addonPath)]: digest },
+		}),
+	);
+
+	await expect(
+		verifyDiagnosticArtifactDigest({
+			addonPath,
+			nativeDir,
+			version: "2.0.0",
+			allowLocalBuilds: true,
+		}),
+	).rejects.toThrow("local build for @gajae-code/natives@1.0.0");
 });
 
 test("the local artifact manifest is ignored by git", () => {

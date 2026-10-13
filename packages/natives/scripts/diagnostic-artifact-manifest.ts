@@ -25,11 +25,16 @@ export async function verifyDiagnosticArtifactDigest(options: {
 	const addon = path.basename(addonPath);
 	const metadataPath = `${addonPath}.build.json`;
 	const metadata = (await Bun.file(metadataPath).exists())
-		? ((await Bun.file(metadataPath).json()) as { profile?: string })
+		? ((await Bun.file(metadataPath).json()) as { profile?: string; version?: string })
 		: undefined;
 	const localBuild = metadata?.profile === "local";
 	if (localBuild && !allowLocalBuilds) {
 		throw new Error(`${addon} is a local build and is not eligible for trusted verification`);
+	}
+	if (localBuild && metadata.version !== version) {
+		throw new Error(
+			`${addon} is a local build for @gajae-code/natives@${metadata.version ?? "unknown"}; rebuild it for @gajae-code/natives@${version} before embedding`,
+		);
 	}
 
 	const manifestPath = path.join(
@@ -81,11 +86,9 @@ export async function recordDiagnosticArtifactDigest(options: {
 		: {};
 	const { version } = (await Bun.file(packageJsonPath).json()) as { version: string };
 	const artifacts = existing.version === version ? { ...(existing.artifacts ?? {}) } : {};
-	// Preserve pre-existing local variants during manifest migration: if bootstrapping a new local
-	// manifest (artifacts is empty), scan for other local-profile variants on disk and include them.
-	// This ensures that when the version changes and only one variant rebuilds first, the manifest
-	// still tracks all present local addons, preventing verification failures when embed-native
-	// later checks for addons that exist on disk but aren't in the manifest.
+	// Preserve pre-existing local variants during manifest migration, but only when their sidecar
+	// confirms they were built for this package version. A stale addon has a different native version
+	// sentinel and must not be included in a compiled binary.
 	if (localBuild && Object.keys(artifacts).length === 0) {
 		const entries = await fs.readdir(nativeDir);
 		for (const entry of entries) {
@@ -93,9 +96,9 @@ export async function recordDiagnosticArtifactDigest(options: {
 			const variantPath = path.join(nativeDir, entry);
 			const sidecarPath = `${variantPath}.build.json`;
 			const sidecar = (await Bun.file(sidecarPath).exists())
-				? ((await Bun.file(sidecarPath).json()) as { profile?: string })
+				? ((await Bun.file(sidecarPath).json()) as { profile?: string; version?: string })
 				: undefined;
-			if (sidecar?.profile === "local" && entry !== path.basename(addonPath)) {
+			if (sidecar?.profile === "local" && sidecar.version === version && entry !== path.basename(addonPath)) {
 				const variantDigest = new Bun.CryptoHasher("sha256")
 					.update(await Bun.file(variantPath).bytes())
 					.digest("hex");
