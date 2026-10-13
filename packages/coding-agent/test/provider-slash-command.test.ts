@@ -331,9 +331,89 @@ describe("provider slash command", () => {
 			const pinnedStatus = await status();
 			expect(pinnedStatus).toContain("openai: API key (selected credential unavailable)");
 			expect(pinnedStatus).not.toContain("openai: API key (env OPENAI_API_KEY)");
+
+			authStorage.clearSessionCredentialSelector("openai", sessionId);
+			authStorage.setRuntimeCredentialSelector("openai", {
+				kind: "id",
+				value: String(commandRow.id),
+			});
+			expect(await authStorage.getApiKey("openai", sessionId)).toBeUndefined();
+			const runtimePinnedStatus = await status();
+			expect(runtimePinnedStatus).toContain("openai: API key (selected credential unavailable)");
+			expect(runtimePinnedStatus).not.toContain("openai: API key (env OPENAI_API_KEY)");
 		} finally {
 			if (originalOpenAiKey === undefined) delete Bun.env.OPENAI_API_KEY;
 			else Bun.env.OPENAI_API_KEY = originalOpenAiKey;
+		}
+	});
+
+	it("reports configured overrides ahead of unavailable session pins", async () => {
+		tempAgentDir = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-provider-slash-"));
+		setAgentDir(tempAgentDir);
+		const originalConfigKey = Bun.env[TEST_PROVIDER_KEY_ENV];
+		Bun.env[TEST_PROVIDER_KEY_ENV] = "config-override-secret-test-value";
+		try {
+			const authStorage = await AuthStorage.create(path.join(tempAgentDir, "auth.db"));
+			authStorages.push(authStorage);
+			await Bun.write(
+				path.join(tempAgentDir, "models.yml"),
+				YAML.stringify({
+					providers: {
+						"status-config-override": {
+							api: "openai-completions",
+							baseUrl: "https://config-override.example.test/v1",
+							apiKeyEnv: TEST_PROVIDER_KEY_ENV,
+							models: [
+								{
+									id: "config-override-model",
+									name: "Config Override Model",
+									reasoning: false,
+									input: ["text"],
+									cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+									contextWindow: 100_000,
+									maxTokens: 8_000,
+								},
+							],
+						},
+					},
+				}),
+			);
+			const registry = new ModelRegistry(authStorage, path.join(tempAgentDir, "models.yml"));
+			modelRegistries.push(registry);
+			await registry.refresh("offline");
+			const sessionId = "unavailable-config-override-session";
+			authStorage.markSessionCredentialUnavailable(sessionId, "openai", {
+				kind: "id",
+				value: "missing-openai-row",
+			});
+			authStorage.markSessionCredentialUnavailable(sessionId, "status-config-override", {
+				kind: "id",
+				value: "missing-config-row",
+			});
+			authStorage.setRuntimeApiKey("openai", "runtime-override-secret-test-value");
+			expect(await authStorage.getApiKey("openai", sessionId)).toBe("runtime-override-secret-test-value");
+			expect(
+				await authStorage.getApiKey("status-config-override", sessionId, {
+					owner: registry.getAuthStorageOwner(),
+				}),
+			).toBe("config-override-secret-test-value");
+
+			const outputs: string[] = [];
+			const command = BUILTIN_SLASH_COMMANDS_INTERNAL.find(entry => entry.name === "provider");
+			await command?.handle?.({ name: "provider", args: "status", text: "/provider status" }, {
+				session: { modelRegistry: registry, credentialSessionId: sessionId },
+				output: (text: string) => outputs.push(text),
+			} as unknown as SlashCommandRuntime);
+
+			const output = outputs.join("\n");
+			expect(output).toContain("openai: API key (runtime override)");
+			expect(output).toContain(`status-config-override: API key (env ${TEST_PROVIDER_KEY_ENV})`);
+			expect(output).not.toContain("selected credential unavailable");
+			expect(output).not.toContain("runtime-override-secret-test-value");
+			expect(output).not.toContain("config-override-secret-test-value");
+		} finally {
+			if (originalConfigKey === undefined) delete Bun.env[TEST_PROVIDER_KEY_ENV];
+			else Bun.env[TEST_PROVIDER_KEY_ENV] = originalConfigKey;
 		}
 	});
 
@@ -592,6 +672,93 @@ describe("provider slash command", () => {
 		} finally {
 			if (originalApiKey === undefined) delete Bun.env[TEST_PROVIDER_KEY_ENV];
 			else Bun.env[TEST_PROVIDER_KEY_ENV] = originalApiKey;
+		}
+	});
+
+	it("reports shadowed config credentials and the dispatched apiKeyEnv precedence", async () => {
+		tempAgentDir = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-provider-slash-"));
+		setAgentDir(tempAgentDir);
+		const envNames = [
+			"GJC_PROVIDER_STATUS_STATIC_KEY",
+			"GJC_PROVIDER_STATUS_RUNTIME_KEY",
+			"GJC_PROVIDER_STATUS_TOP_LEVEL_KEY",
+			"GJC_PROVIDER_STATUS_COMPAT_KEY",
+		] as const;
+		const originalEnv = new Map(envNames.map(name => [name, Bun.env[name]]));
+		Bun.env.GJC_PROVIDER_STATUS_STATIC_KEY = "static-config-secret-test-value";
+		Bun.env.GJC_PROVIDER_STATUS_RUNTIME_KEY = "runtime-provider-secret-test-value";
+		Bun.env.GJC_PROVIDER_STATUS_TOP_LEVEL_KEY = "top-level-config-secret-test-value";
+		Bun.env.GJC_PROVIDER_STATUS_COMPAT_KEY = "compat-config-secret-test-value";
+		try {
+			const authStorage = await AuthStorage.create(path.join(tempAgentDir, "auth.db"));
+			authStorages.push(authStorage);
+			const makeModel = (id: string) => ({
+				id,
+				name: id,
+				reasoning: false,
+				input: ["text" as const],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 100_000,
+				maxTokens: 8_000,
+			});
+			await Bun.write(
+				path.join(tempAgentDir, "models.yml"),
+				YAML.stringify({
+					providers: {
+						"status-runtime-source": {
+							api: "openai-completions",
+							baseUrl: "https://static-source.example.test/v1",
+							apiKeyEnv: "GJC_PROVIDER_STATUS_STATIC_KEY",
+							models: [makeModel("runtime-source-model")],
+						},
+						"status-precedence": {
+							api: "openai-completions",
+							baseUrl: "https://top-level.example.test/v1",
+							apiKeyEnv: "GJC_PROVIDER_STATUS_TOP_LEVEL_KEY",
+							openaiCompat: {
+								baseUrl: "https://compat.example.test/v1",
+								apiKey: "GJC_PROVIDER_STATUS_COMPAT_KEY",
+							},
+							models: [makeModel("precedence-model")],
+						},
+					},
+				}),
+			);
+			const registry = new ModelRegistry(authStorage, path.join(tempAgentDir, "models.yml"));
+			modelRegistries.push(registry);
+			await registry.refresh("offline");
+			registry.registerProvider("status-runtime-source", {
+				api: "openai-completions",
+				baseUrl: "https://runtime-source.example.test/v1",
+				apiKey: "GJC_PROVIDER_STATUS_RUNTIME_KEY",
+				models: [makeModel("runtime-source-runtime-model")],
+			});
+
+			const outputs: string[] = [];
+			const command = BUILTIN_SLASH_COMMANDS_INTERNAL.find(entry => entry.name === "provider");
+			await command?.handle?.({ name: "provider", args: "status", text: "/provider status" }, {
+				session: { modelRegistry: registry },
+				output: (text: string) => outputs.push(text),
+			} as unknown as SlashCommandRuntime);
+			const output = outputs.join("\n");
+			const runtimeLines = output.split("\n");
+			const runtimeLineIndex = runtimeLines.findIndex(line => line.startsWith("status-runtime-source:"));
+			expect(runtimeLines[runtimeLineIndex]).toBe(
+				"status-runtime-source: API key (env GJC_PROVIDER_STATUS_RUNTIME_KEY)",
+			);
+			expect(runtimeLines[runtimeLineIndex + 1]).toContain("shadowed: API key (env GJC_PROVIDER_STATUS_STATIC_KEY)");
+			expect(output).toContain("status-precedence: API key (env GJC_PROVIDER_STATUS_TOP_LEVEL_KEY)");
+			expect(await registry.getApiKeyForProvider("status-precedence")).toBe("top-level-config-secret-test-value");
+			expect(output).not.toContain("static-config-secret-test-value");
+			expect(output).not.toContain("runtime-provider-secret-test-value");
+			expect(output).not.toContain("top-level-config-secret-test-value");
+			expect(output).not.toContain("compat-config-secret-test-value");
+		} finally {
+			for (const name of envNames) {
+				const original = originalEnv.get(name);
+				if (original === undefined) delete Bun.env[name];
+				else Bun.env[name] = original;
+			}
 		}
 	});
 

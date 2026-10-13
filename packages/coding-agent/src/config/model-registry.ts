@@ -6074,7 +6074,11 @@ export class ModelRegistry {
 			Object.entries(configuredProviders ?? {}).find(
 				([configuredProvider]) => resolveOAuthStorageProvider(configuredProvider) === normalizedProvider,
 			)?.[1];
+		if (configured?.apiKeyEnv) return configured.apiKeyEnv;
 		if (configured?.apiKey && Bun.env[configured.apiKey]) return configured.apiKey;
+		if (configured?.openaiCompat?.apiKeyEnv) {
+			return configured.openaiCompat.apiKeyEnv;
+		}
 		if (configured?.openaiCompat?.apiKey && Bun.env[configured.openaiCompat.apiKey]) {
 			return configured.openaiCompat.apiKey;
 		}

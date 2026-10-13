@@ -157,7 +157,8 @@ function collectSources(
 			layer: "runtime-provider",
 			label: envName ? `API key (env ${displayEnvironmentName(envName)})` : "API key (runtime provider)",
 		});
-	} else if (authStorage.hasConfigApiKey(provider, owner)) {
+	}
+	if (authStorage.hasConfigApiKey(provider, owner)) {
 		const envName = registry.getProviderConfigApiKeyEnvName(provider);
 		addSource(sources, {
 			kind: "api_key",
@@ -281,17 +282,25 @@ export async function buildProviderAuthStatusText(session: ProviderAuthStatusSes
 			provider,
 			session.credentialSessionId,
 		);
-		const active = sessionCredentialUnavailable
-			? { kind: "api_key" as const, layer: "pending" as const, label: "selected credential unavailable" }
-			: activeType === "oauth" || activeType === "api_key"
-				? activeSource(provider, entries, session, owner, activeType, googleVertexSource)
-				: provider === "google-vertex" && googleVertexSource
-					? {
-							kind: "api_key" as const,
-							layer: "environment" as const,
-							label: environmentSourceLabel(googleVertexSource),
-						}
-					: undefined;
+		let active: { kind: "api_key" | "oauth"; layer: string; label: string } | undefined;
+		if (activeType === "oauth" || activeType === "api_key") {
+			active = activeSource(provider, entries, session, owner, activeType, googleVertexSource);
+		} else if (provider === "google-vertex" && googleVertexSource) {
+			active = {
+				kind: "api_key" as const,
+				layer: "environment" as const,
+				label: environmentSourceLabel(googleVertexSource),
+			};
+		} else {
+			active = undefined;
+		}
+		// If session credential is unavailable, suppress environment variable fallback
+		// unless there's an explicit runtime or config override
+		if (sessionCredentialUnavailable && active?.layer === "environment") {
+			active = { kind: "api_key" as const, layer: "pending" as const, label: "selected credential unavailable" };
+		} else if (!active && sessionCredentialUnavailable) {
+			active = { kind: "api_key" as const, layer: "pending" as const, label: "selected credential unavailable" };
+		}
 		lines.push(`${displayStatusValue(provider)}: ${active?.label ?? "credential source unavailable"}`);
 		const shadowed =
 			active && active.layer !== "pending"
