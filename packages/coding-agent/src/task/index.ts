@@ -2109,7 +2109,11 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			const tasksWithUniqueIds = tasks.map((t, i) => ({ ...t, id: validateAllocatedTaskId(uniqueIds[i] ?? "") }));
 
 			const isResumedRun = executionOverrides?.runMode === "resume" || executionOverrides?.runMode === "message";
-			const effectiveAutorouting = (isResumedRun ? this.#ownerSession : session).settings.getEffectiveAutorouting();
+			const routingSettings = isResumedRun ? this.#ownerSession.settings : session.settings;
+			const effectiveAutorouting = routingSettings.getEffectiveAutorouting();
+			const disabledProviders = new Set(
+				routingSettings.get("disabledProviders").map(provider => provider.toLowerCase()),
+			);
 			const registry = session.modelRegistry as
 				| {
 						getAvailable?: () => Model[];
@@ -2118,6 +2122,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				  }
 				| undefined;
 			const routingSnapshot = registry?.getAll?.() ?? registry?.getAvailable?.();
+			const availableRoutingSnapshot = routingSnapshot?.filter(
+				model => !disabledProviders.has(model.provider.toLowerCase()),
+			);
 			const routingByIndex = new Map<number, RoutingOutcome>();
 			const routingCandidatesByIndex = new Map<number, string[]>();
 			const routingSkipsByIndex = new Map<number, Array<{ selector: string; code: AutoroutingReasonCode }>>();
@@ -2127,7 +2134,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					? resolveTaskRouting({
 							effectiveAutorouting,
 							requestedTier: task.tier,
-							availableModels: routingSnapshot,
+							availableModels: availableRoutingSnapshot,
 						})
 					: effectiveAutorouting.active
 						? {
@@ -2149,9 +2156,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				const configured = effectiveAutorouting.map[outcome.tier] ?? [];
 				const candidates: string[] = [];
 				const skips: Array<{ selector: string; code: AutoroutingReasonCode }> = [];
-				const disabledProviders = new Set(
-					session.settings.get("disabledProviders").map(provider => provider.toLowerCase()),
-				);
 				for (const selector of configured) {
 					const slash = selector.indexOf("/");
 					const provider = slash > 0 ? selector.slice(0, slash).toLowerCase() : "";
@@ -2357,7 +2361,11 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 									skips: [...(routingSkipsByIndex.get(index) ?? [])],
 									preflightErrors: new Map(),
 								}
-						: { candidates: undefined, skips: undefined, preflightErrors: new Map() };
+						: {
+								candidates: undefined,
+								skips: [...(routingSkipsByIndex.get(index) ?? [])],
+								preflightErrors: new Map(),
+							};
 				const routingForRun = routeEvidence(
 					routingOutcome,
 					effectiveRunMode === "resume" || effectiveRunMode === "message",

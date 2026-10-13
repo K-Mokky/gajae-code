@@ -399,7 +399,7 @@ describe("TaskTool autorouting integration surfaces", () => {
 		expect(result.content[0]?.type).toBe("text");
 		expect(JSON.stringify(result)).not.toContain('"routing"');
 	});
-	it("registered resume runner recomputes a fresh route and marks freshOnResume", async () => {
+	it("registered resume runner recomputes current routing settings and marks freshOnResume", async () => {
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents, projectAgentsDir: null });
 		const settings = Settings.isolated({
 			"task.autorouting.enabled": true,
@@ -453,6 +453,19 @@ describe("TaskTool autorouting integration surfaces", () => {
 		expect(captured.at(-1)?.routing).toMatchObject({
 			freshOnResume: true,
 			effectiveModel: "anthropic/claude-opus-5",
+		});
+
+		settings.override("disabledProviders", ["anthropic"]);
+		expect(AsyncJobManager.instance()!.resumeSubagent(record.subagentId).ok).toBe(true);
+		await AsyncJobManager.instance()!.waitForAll();
+		expect(captured.at(-1)?.runMode).toBe("resume");
+		expect(captured.at(-1)?.modelOverride).toEqual(["manual/frontmatter"]);
+		expect(captured.at(-1)?.routing).toMatchObject({
+			freshOnResume: true,
+			requestedSelector: "manual-model-chain",
+			effectiveModel: "manual-model-chain",
+			manualFallbackReason: "tier_unmatched",
+			skips: [{ selector: "anthropic/claude-opus-5", code: "provider_disabled" }],
 		});
 	});
 
