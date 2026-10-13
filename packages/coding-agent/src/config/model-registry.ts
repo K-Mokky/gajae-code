@@ -686,8 +686,8 @@ function validateProviderConfiguration(
 			configuredModel?.api ??
 			(configuredModel ? config.api : undefined) ??
 			discoveryApi ??
-			config.api ??
-			getKnownProviderModelApi(providerName, modelId);
+			getKnownProviderModelApi(providerName, modelId) ??
+			config.api;
 		const effectiveTimeoutApi = effectiveApi ?? (config.openaiCompat ? "openai-completions" : undefined);
 		if (override.compat?.supportsResponsesSessionAffinity !== undefined) {
 			assertResponsesSessionAffinitySupported(
