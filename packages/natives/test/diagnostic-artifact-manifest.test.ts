@@ -1,0 +1,105 @@
+import { afterEach, expect, test } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import { recordDiagnosticArtifactDigest } from "../scripts/diagnostic-artifact-manifest";
+
+const tempDirs: string[] = [];
+const repoRoot = path.join(import.meta.dir, "../../..");
+
+async function createBuildFixture() {
+	const nativeDir = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-native-manifest-"));
+	tempDirs.push(nativeDir);
+	const packageJsonPath = path.join(nativeDir, "package.json");
+	const manifestPath = path.join(nativeDir, "diagnostic-artifact.json");
+	const addonPath = path.join(nativeDir, "pi_natives.linux-x64-modern.node");
+	await Bun.write(packageJsonPath, JSON.stringify({ version: "1.0.0" }));
+	await Bun.write(
+		manifestPath,
+		`${JSON.stringify(
+			{
+				schema: "gjc.diagnostic-artifact",
+				version: "1.0.0",
+				artifacts: {
+					"pi_natives.darwin-arm64.node": "darwin-release-digest",
+					"pi_natives.linux-x64-modern.node": "previous-local-digest",
+				},
+			},
+			null,
+			2,
+		)}\n`,
+	);
+	await Bun.write(addonPath, "locally built addon bytes");
+	return { addonPath, manifestPath, nativeDir, packageJsonPath };
+}
+
+afterEach(async () => {
+	for (const dir of tempDirs.splice(0, tempDirs.length)) {
+		await fs.rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("a local native build keeps the tracked manifest unchanged and stores only its local digest", async () => {
+	const fixture = await createBuildFixture();
+	const originalManifest = await Bun.file(fixture.manifestPath).text();
+
+	await recordDiagnosticArtifactDigest({ ...fixture, profile: "local" });
+
+	expect(await Bun.file(fixture.manifestPath).text()).toBe(originalManifest);
+	const localManifest = (await Bun.file(path.join(fixture.nativeDir, "diagnostic-artifact.local.json")).json()) as {
+		schema: string;
+		version: string;
+		artifacts: Record<string, string>;
+	};
+	const digest = new Bun.CryptoHasher("sha256").update(await Bun.file(fixture.addonPath).bytes()).digest("hex");
+	expect(localManifest).toEqual({
+		schema: "gjc.diagnostic-artifact",
+		version: "1.0.0",
+		artifacts: { "pi_natives.linux-x64-modern.node": digest },
+	});
+	expect(await Bun.file(`${fixture.addonPath}.provenance.json`).exists()).toBe(false);
+});
+
+test.each(["ci", "dist"] as const)("a %s native build updates the trusted manifest and provenance", async profile => {
+	const fixture = await createBuildFixture();
+	const before = (await Bun.file(fixture.manifestPath).json()) as {
+		artifacts: Record<string, string>;
+	};
+	const digest = new Bun.CryptoHasher("sha256").update(await Bun.file(fixture.addonPath).bytes()).digest("hex");
+
+	await recordDiagnosticArtifactDigest({ ...fixture, profile });
+
+	const manifest = (await Bun.file(fixture.manifestPath).json()) as {
+		schema: string;
+		version: string;
+		artifacts: Record<string, string>;
+	};
+	expect(manifest).toEqual({
+		schema: "gjc.diagnostic-artifact",
+		version: "1.0.0",
+		artifacts: {
+			...before.artifacts,
+			"pi_natives.linux-x64-modern.node": digest,
+		},
+	});
+	const provenance = (await Bun.file(`${fixture.addonPath}.provenance.json`).json()) as {
+		schema: string;
+		version: string;
+		artifact: string;
+		sha256: string;
+	};
+	expect(provenance).toEqual({
+		schema: "gjc.diagnostic-artifact-provenance",
+		version: "1.0.0",
+		artifact: "pi_natives.linux-x64-modern.node",
+		sha256: digest,
+	});
+});
+
+test("the local artifact manifest is ignored by git", () => {
+	const localManifestPath = "packages/natives/native/diagnostic-artifact.local.json";
+	const result = Bun.spawnSync(["git", "check-ignore", "--no-index", "--quiet", localManifestPath], {
+		cwd: repoRoot,
+	});
+	expect(result.exitCode).toBe(0);
+});
