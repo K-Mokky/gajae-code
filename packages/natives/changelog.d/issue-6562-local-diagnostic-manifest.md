@@ -1,3 +1,3 @@
 ### Fixed
 
-- Keep local native builds from rewriting the checked-in diagnostic artifact manifest; CI and distribution builds continue updating the trusted record. Local binary builds verify the ignored digest and carry it into the compiled binary instead of weakening the release trust gate. Compiled-addon cache reuse now checks that digest, so same-sized rebuilds replace stale cached bytes.
+- Keep local native builds from rewriting the checked-in diagnostic artifact manifest; CI and distribution builds continue updating the trusted record. Local-only embedding verifies the ignored digest without requiring a fresh release manifest; mixed/release builds remain strict. Compiled binaries carry the verified digest and refresh same-sized stale addon caches on rebuild.

@@ -148,9 +148,11 @@ async function rebuildFromSidecars(nativeDir: string): Promise<void> {
 
 async function verify(nativeDir: string, allowLocalBuilds = false): Promise<void> {
 	const version = await packageVersionFor(nativeDir);
-	const record = await readTrustedRecord(nativeDir);
-	if (record.version !== version) {
-		fail(`record version ${record.version} does not match package version ${version}`);
+	if (!allowLocalBuilds || (await addonsIn(nativeDir, true)).length > 0) {
+		const record = await readTrustedRecord(nativeDir);
+		if (record.version !== version) {
+			fail(`record version ${record.version} does not match package version ${version}`);
+		}
 	}
 	const addons = await addonsIn(nativeDir);
 	for (const addon of addons) {

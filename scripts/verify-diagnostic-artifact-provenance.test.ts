@@ -159,6 +159,43 @@ describe("diagnostic artifact provenance transfer (C2)", () => {
 		}
 	});
 
+	it("embeds a local-only build when the trusted record still has the previous package version", async () => {
+		const workspace = await fs.mkdtemp(path.join(await fs.realpath(os.tmpdir()), "gjc-prov-local-stale-record-"));
+		try {
+			const fixture = await fixturePackage(workspace, {
+				version: "9.9.9-fixture",
+				addons: { "pi_natives.linux-x64-modern.node": "local addon bytes" },
+				sidecars: "none",
+			});
+			const addon = path.join(fixture.native, "pi_natives.linux-x64-modern.node");
+			await Bun.write(`${addon}.build.json`, JSON.stringify({ profile: "local" }));
+			await Bun.write(
+				path.join(fixture.native, "diagnostic-artifact.local.json"),
+				JSON.stringify({
+					schema: "gjc.diagnostic-artifact",
+					version: fixture.version,
+					artifacts: { [path.basename(addon)]: await sha256(addon) },
+				}),
+			);
+			await Bun.write(
+				path.join(fixture.native, "diagnostic-artifact.json"),
+				JSON.stringify({ schema: "gjc.diagnostic-artifact", version: "9.9.8-fixture", artifacts: {} }),
+			);
+
+			const embedding = await run(["--verify-for-embedding", fixture.native], workspace);
+			expect(embedding.exitCode).toBe(0);
+			expect(embedding.stdout).toContain("verified 1 present artifact(s) for embedding");
+
+			const releaseVerification = await run(["--verify", fixture.native], workspace);
+			expect(releaseVerification.exitCode).not.toBe(0);
+			expect(releaseVerification.stderr).toContain(
+				"record version 9.9.8-fixture does not match package version 9.9.9-fixture",
+			);
+		} finally {
+			await fs.rm(workspace, { recursive: true, force: true });
+		}
+	});
+
 	it("refuses an addon that arrived without its provenance sidecar", async () => {
 		const workspace = await fs.mkdtemp(path.join(await fs.realpath(os.tmpdir()), "gjc-prov-missing-"));
 		try {
