@@ -49,6 +49,9 @@ describe("SvgFigure", () => {
 			figure.invalidate();
 			const afterInvalidate = figure.render(80).join("");
 			expect(afterInvalidate).toContain("\x1b_G");
+
+			figure.dispose();
+			expect(figure.debugState()).toMatchObject({ raster: null, current: false });
 		} finally {
 			figure.dispose();
 			setCellDimensions(previousCellDimensions);
