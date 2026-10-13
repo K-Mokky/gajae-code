@@ -14,6 +14,7 @@ import * as brokerDiscovery from "../src/sdk/broker/discovery";
 import { brokerProcessIncarnation, readBrokerDiscovery, writeBrokerDiscovery } from "../src/sdk/broker/discovery";
 import { ensureBroker } from "../src/sdk/broker/ensure";
 import { LifecycleLedger } from "../src/sdk/broker/lifecycle-ledger";
+import { brokerLockHostIdentity } from "../src/sdk/broker/lock-host-identity";
 
 const HOUR_MS = 60 * 60 * 1_000;
 
@@ -38,7 +39,7 @@ async function ageTo(target: string, ageMs: number, now: number): Promise<void> 
 async function writeArtifact(
 	agentDir: string,
 	name: string,
-	owner: { pid: number; incarnation?: string } | "no-record" | "unparseable",
+	owner: { pid: number; incarnation?: string; ownerHostId?: string } | "no-record" | "unparseable",
 	ageMs: number,
 	now: number,
 ): Promise<string> {
@@ -53,6 +54,7 @@ async function writeArtifact(
 				ownerId: "owner-a",
 				pid: owner.pid,
 				...(owner.incarnation === undefined ? {} : { incarnation: owner.incarnation }),
+				...(owner.ownerHostId === undefined ? {} : { ownerHostId: owner.ownerHostId }),
 				acquiredAt: now - ageMs,
 			}),
 		);
@@ -124,10 +126,11 @@ describe("broker lock artifact reaper", () => {
 		const currentIncarnation = brokerProcessIncarnation(process.pid);
 		if (!currentIncarnation) throw new Error("Test process incarnation is unavailable.");
 		const previousIncarnation = currentIncarnation.replace(/\d+$/u, currentIncarnation.endsWith(":0") ? "1" : "0");
+		const { ownerHostId } = await brokerLockHostIdentity(agentDir);
 		const tombstone = await writeArtifact(
 			agentDir,
 			".broker.lock.stale-pid-reused",
-			{ pid: process.pid, incarnation: previousIncarnation },
+			{ pid: process.pid, incarnation: previousIncarnation, ownerHostId },
 			30 * HOUR_MS,
 			now,
 		);
@@ -142,6 +145,36 @@ describe("broker lock artifact reaper", () => {
 
 		expect(result).toEqual({ removed: [tombstone], retained: [] });
 		expect(await exists(tombstone)).toBe(false);
+	});
+
+	it.each([
+		["a foreign host", "some-foreign-host", (): boolean => false],
+		["no host (legacy)", undefined, (): boolean => true],
+	] as const)("retains an aged tombstone owned by %s despite PID evidence", async (_label, ownerHostId, alive) => {
+		const now = Date.now();
+		const agentDir = await makeAgentDir();
+		const currentIncarnation = brokerProcessIncarnation(process.pid);
+		if (!currentIncarnation) throw new Error("Test process incarnation is unavailable.");
+		const previousIncarnation = currentIncarnation.replace(/\d+$/u, currentIncarnation.endsWith(":0") ? "1" : "0");
+		const tombstone = await writeArtifact(
+			agentDir,
+			".broker.lock.stale-host-qualified",
+			{ pid: process.pid, incarnation: previousIncarnation, ...(ownerHostId ? { ownerHostId } : {}) },
+			30 * HOUR_MS,
+			now,
+		);
+
+		const result = await reapStaleBrokerLockArtifacts({
+			agentDir,
+			now,
+			graceMs: HOUR_MS,
+			pidAlive: alive,
+			processIncarnation: () => currentIncarnation,
+		});
+
+		expect(result.removed).toEqual([]);
+		expect(result.retained).toEqual([{ path: tombstone, reason: "owner-alive" }]);
+		expect(await exists(tombstone)).toBe(true);
 	});
 
 	it("keeps a tombstone whose owner record cannot be parsed", async () => {
@@ -352,11 +385,29 @@ describe("broker lock artifact reaper", () => {
 });
 
 describe("broker lock owner incarnation", () => {
-	async function writeOwner(agentDir: string, incarnation: unknown): Promise<string> {
+	/** Writes an owner record; the host defaults to this host, `null` writes a legacy host-unqualified record. */
+	async function writeOwner(
+		agentDir: string,
+		incarnation: unknown,
+		options: { ownerHostId?: string | null; pid?: number } = {},
+	): Promise<string> {
 		const lock = path.join(agentDir, "sdk", "broker.lock");
 		await fs.mkdir(lock, { recursive: true, mode: 0o700 });
 		const record = path.join(lock, "owner.json");
-		await Bun.write(record, JSON.stringify({ version: 1, ownerId: "previous-owner", pid: process.pid, incarnation }));
+		const ownerHostId =
+			options.ownerHostId === undefined
+				? (await brokerLockHostIdentity(agentDir)).ownerHostId
+				: (options.ownerHostId ?? undefined);
+		await Bun.write(
+			record,
+			JSON.stringify({
+				version: 1,
+				ownerId: "previous-owner",
+				pid: options.pid ?? process.pid,
+				incarnation,
+				...(ownerHostId === undefined ? {} : { ownerHostId }),
+			}),
+		);
 		return record;
 	}
 
@@ -479,6 +530,37 @@ describe("broker lock owner incarnation", () => {
 			expect(discovery.incarnation).toBe(incarnation);
 		} finally {
 			probe.mockRestore();
+			await broker.stop();
+		}
+	});
+
+	it("keeps a legacy host-unqualified lock whose live PID has a different incarnation", async () => {
+		const agentDir = await makeAgentDir();
+		const record = await writeOwner(agentDir, differentIncarnation(currentIncarnation()), { ownerHostId: null });
+		const original = await Bun.file(record).text();
+		const broker = new Broker({ agentDir });
+		try {
+			await expect(broker.start()).rejects.toThrow(`Broker lock is held by a live owner (pid ${process.pid})`);
+			expect(await Bun.file(record).text()).toBe(original);
+			expect(broker.ownsDiscovery).toBe(false);
+		} finally {
+			await broker.stop();
+		}
+	});
+
+	it("never reclaims a foreign host's lock, even when its PID is dead on this host", async () => {
+		const agentDir = await makeAgentDir();
+		const record = await writeOwner(agentDir, differentIncarnation(currentIncarnation()), {
+			ownerHostId: "some-foreign-host",
+			pid: 2_147_483_646,
+		});
+		const original = await Bun.file(record).text();
+		const broker = new Broker({ agentDir });
+		try {
+			await expect(broker.start()).rejects.toThrow("Broker lock is held by a live owner");
+			expect(await Bun.file(record).text()).toBe(original);
+			expect(broker.ownsDiscovery).toBe(false);
+		} finally {
 			await broker.stop();
 		}
 	});

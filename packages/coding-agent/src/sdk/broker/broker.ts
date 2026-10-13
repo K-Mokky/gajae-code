@@ -1180,24 +1180,17 @@ type BrokerLockSnapshot = {
 
 function isBrokerLockOwnerAlive(
 	snapshot: Pick<BrokerLockSnapshot, "pid" | "incarnation" | "ownerHostId">,
+	currentHostId: string | undefined,
 	pidAlive: (pid: number) => boolean = isPidAlive,
 	readProcessIncarnation: (pid: number) => string | undefined = brokerProcessIncarnation,
-	currentHostId?: string,
 ): boolean {
+	// This host's process table says nothing about another host's owner: neither a dead nor a
+	// recycled local PID proves it is gone, so a foreign (or unverifiable) owner is never reclaimed.
+	if (snapshot.ownerHostId !== undefined && snapshot.ownerHostId !== currentHostId) return true;
 	if (snapshot.pid <= 0 || !pidAlive(snapshot.pid)) return false;
-	// Only use PID/incarnation checks when the recorded host equals the current host.
-	// Foreign or host-unqualified (legacy) owners are treated conservatively: no mismatch-based reclaim.
-	if (currentHostId && snapshot.ownerHostId && snapshot.ownerHostId !== currentHostId) {
-		// Foreign host: incarnation mismatch does not prove death.
-		return true;
-	}
-	if (currentHostId && !snapshot.ownerHostId) {
-		// Legacy (host-unqualified) owner: incarnation mismatch does not prove death.
-		// Fail closed and don't reclaim based on mismatch alone.
-		return true;
-	}
-	// Same-host owner (or unqualified when currentHostId is undefined): use PID/incarnation checks.
-	if (!snapshot.incarnation) return true;
+	// A live PID is retained unless this host recorded the owner and its incarnation proves reuse.
+	// Host-unqualified (legacy) owners and missing incarnation evidence remain fail-closed.
+	if (snapshot.ownerHostId === undefined || !snapshot.incarnation) return true;
 	const incarnation = readProcessIncarnation(snapshot.pid);
 	return !incarnation || incarnation === snapshot.incarnation;
 }
@@ -1263,6 +1256,7 @@ async function classifyBrokerLockArtifact(
 	graceMs: number,
 	pidAlive: (pid: number) => boolean,
 	readProcessIncarnation: (pid: number) => string | undefined,
+	currentHostId: string | undefined,
 ): Promise<BrokerLockArtifactRetentionReason | "abandoned"> {
 	const target = path.join(directory, name);
 	// lstat, never stat: a symlink pointing at live state must never be followed
@@ -1285,16 +1279,21 @@ async function classifyBrokerLockArtifact(
 			return "owner-record-unreadable";
 		}
 	}
-	let owner: { pid?: unknown; incarnation?: unknown };
+	let owner: { pid?: unknown; incarnation?: unknown; ownerHostId?: unknown };
 	try {
-		owner = JSON.parse(raw) as { pid?: unknown; incarnation?: unknown };
+		owner = JSON.parse(raw) as { pid?: unknown; incarnation?: unknown; ownerHostId?: unknown };
 	} catch {
 		return "owner-record-unreadable";
 	}
 	if (typeof owner.pid !== "number" || !Number.isInteger(owner.pid) || owner.pid <= 0)
 		return "owner-record-unreadable";
 	return isBrokerLockOwnerAlive(
-		{ pid: owner.pid, incarnation: isProcessIncarnation(owner.incarnation) ? owner.incarnation : undefined },
+		{
+			pid: owner.pid,
+			incarnation: isProcessIncarnation(owner.incarnation) ? owner.incarnation : undefined,
+			ownerHostId: typeof owner.ownerHostId === "string" ? owner.ownerHostId : undefined,
+		},
+		currentHostId,
 		pidAlive,
 		readProcessIncarnation,
 	)
@@ -1325,6 +1324,11 @@ export async function reapStaleBrokerLockArtifacts(input: {
 	const graceMs = input.graceMs ?? BROKER_LOCK_ARTIFACT_GRACE_MS;
 	const pidAlive = input.pidAlive ?? isPidAlive;
 	const readProcessIncarnation = input.processIncarnation ?? brokerProcessIncarnation;
+	// Without this host's identity no host-qualified owner can be matched, so all of them are retained.
+	const currentHostId = await brokerLockHostIdentity(input.agentDir).then(
+		identity => identity.ownerHostId,
+		() => undefined,
+	);
 	const removed: string[] = [];
 	const retained: BrokerLockArtifactRetention[] = [];
 	const retainedByReason = new Map<BrokerLockArtifactRetentionReason, number>();
@@ -1341,7 +1345,15 @@ export async function reapStaleBrokerLockArtifacts(input: {
 		const target = path.join(directory, name);
 		let verdict: BrokerLockArtifactRetentionReason | "abandoned";
 		try {
-			verdict = await classifyBrokerLockArtifact(directory, name, now, graceMs, pidAlive, readProcessIncarnation);
+			verdict = await classifyBrokerLockArtifact(
+				directory,
+				name,
+				now,
+				graceMs,
+				pidAlive,
+				readProcessIncarnation,
+				currentHostId,
+			);
 		} catch (error) {
 			// A vanished candidate needs no decision; anything else is ambiguous.
 			if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
@@ -3845,7 +3857,7 @@ export class Broker {
 				!current ||
 				current.identity !== snapshot.identity ||
 				current.lockIdentity !== snapshot.lockIdentity ||
-				isBrokerLockOwnerAlive(current, isPidAlive, brokerProcessIncarnation, hostIdentity.ownerHostId)
+				isBrokerLockOwnerAlive(current, hostIdentity.ownerHostId)
 			)
 				return false;
 			await brokerLockReclaimHooksForTest.get(this)?.beforeQuarantine?.();
@@ -3973,7 +3985,7 @@ export class Broker {
 			const snapshot = await this.#readLock();
 			if (!snapshot) continue;
 			const hostIdentity = await brokerLockHostIdentity(this.settings.agentDir);
-			if (isBrokerLockOwnerAlive(snapshot, isPidAlive, brokerProcessIncarnation, hostIdentity.ownerHostId)) {
+			if (isBrokerLockOwnerAlive(snapshot, hostIdentity.ownerHostId)) {
 				const starting = await this.#waitForBrokerDiscovery();
 				if (starting) {
 					logger.info(
@@ -3987,7 +3999,7 @@ export class Broker {
 				if (
 					current &&
 					current.identity === snapshot.identity &&
-					isBrokerLockOwnerAlive(current, isPidAlive, brokerProcessIncarnation, hostIdentity.ownerHostId)
+					isBrokerLockOwnerAlive(current, hostIdentity.ownerHostId)
 				) {
 					logger.warn(
 						`sdk broker: lock contention, refusing to start because ${this.#lock} is held by live pid ${current.pid} that published no discovery record`,
