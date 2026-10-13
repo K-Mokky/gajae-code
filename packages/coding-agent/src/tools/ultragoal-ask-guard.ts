@@ -64,6 +64,14 @@ function isSingleRalplanUltragoalApproval(params: unknown, expectedQuestion?: st
 	);
 }
 
+export function isCanonicalRalplanUltragoalApproval(
+	params: unknown,
+	presentation: ExecutionApprovalPresentation,
+): boolean {
+	const expectedQuestion = formatRalplanUltragoalApprovalQuestion(presentation);
+	return expectedQuestion !== undefined && isSingleRalplanUltragoalApproval(params, expectedQuestion);
+}
+
 async function isVerifiedRalplanUltragoalApproval(
 	cwd: string,
 	sessionId: string,
@@ -81,10 +89,7 @@ async function isVerifiedRalplanUltragoalApproval(
 		// The public workflowGate fields are routing hints only. The narrowly exempt
 		// ask must identify the runtime-verified current final publication visibly.
 		const presentation = await captureExecutionApprovalPresentation(cwd, sessionId, "ralplan");
-		const expectedQuestion = formatRalplanUltragoalApprovalQuestion(presentation);
-		return expectedQuestion !== undefined && isSingleRalplanUltragoalApproval(params, expectedQuestion)
-			? presentation
-			: undefined;
+		return isCanonicalRalplanUltragoalApproval(params, presentation) ? presentation : undefined;
 	} catch {
 		return undefined;
 	}
@@ -139,6 +144,7 @@ export function guardToolForUltragoalAsk<T extends AgentTool>(
 	getCwd: () => string,
 	getContext: () => UltragoalAskGuardContext = () => ({}),
 	getSessionAgentDir: () => string | undefined = () => undefined,
+	builtinAskProvenance = false,
 ): T {
 	if (tool.name !== "ask") return tool;
 	const candidate = tool as GuardedTool;
@@ -157,7 +163,7 @@ export function guardToolForUltragoalAsk<T extends AgentTool>(
 					getContext(),
 					getSessionAgentDir(),
 					args[1],
-					builtinAskTools.has(tool),
+					builtinAskTools.has(tool) || builtinAskProvenance,
 				);
 				return Reflect.apply(target.execute, target, args);
 			};

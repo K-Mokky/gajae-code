@@ -2702,7 +2702,26 @@ async function handleArtifactWrite(
 				}
 			}
 		}
-		return await buildDeduplicatedResult(resolved, existingArtifact, sha256, persistCwd, repositoryBinding, laneVerdict, persistedRoleState);
+		let appliedPersistedRoleState: PersistedRoleStateUpdate | undefined;
+		if (
+			persistedRoleState &&
+			(await applyPersistedRoleStateUpdate(persistCwd, resolved.sessionId, persistedRoleState, resolved.runId))
+		) {
+			appliedPersistedRoleState = persistedRoleState;
+		}
+		let appliedLaneVerdict: LaneVerdictUpdate | undefined;
+		if (laneVerdict && (await applyLaneVerdictUpdate(persistCwd, resolved.sessionId, laneVerdict, resolved.runId))) {
+			appliedLaneVerdict = laneVerdict;
+		}
+		return await buildDeduplicatedResult(
+			resolved,
+			existingArtifact,
+			sha256,
+			persistCwd,
+			repositoryBinding,
+			appliedLaneVerdict,
+			appliedPersistedRoleState,
+		);
 	}
 
 	// `persistArtifact` writes the artifact before its ledger row. If a process crashed

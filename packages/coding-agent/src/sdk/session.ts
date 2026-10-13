@@ -5131,6 +5131,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					() => sessionManager.getCwd(),
 					() => ({ sessionId: sessionManager.getSessionId?.() ?? null }),
 					() => session?.getSessionAgentDir(),
+					builtinToolIdentities.has(tool),
 				),
 			);
 

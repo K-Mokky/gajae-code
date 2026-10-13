@@ -39,6 +39,7 @@ import {
 	formatRalplanUltragoalApprovalQuestion,
 	guardToolForUltragoalAsk,
 } from "@gajae-code/coding-agent/tools/ultragoal-ask-guard";
+import { ExtensionToolWrapper } from "../../src/extensibility/extensions/wrapper";
 
 let askInvocationCounter = 0;
 
@@ -337,7 +338,7 @@ describe("non-Crystal user-gated execution approval", () => {
 		});
 	});
 
-	it("keeps the built-in Ask approval exception through the production LazyAgentTool facade", async () => {
+	it("keeps built-in Ask approval through SDK extension-wrapper preflight", async () => {
 		await withSession(async (cwd, _manager, sessionId) => {
 			await createUltragoalPlan({ cwd, brief: "Implement the approved repair" });
 			await publishReviewedRalplanFinal(cwd, sessionId);
@@ -354,10 +355,19 @@ describe("non-Crystal user-gated execution approval", () => {
 			} as unknown as ToolSession;
 			const askFacade = (await createTools(session, ["ask"])).find(tool => tool.name === "ask");
 			if (!askFacade) throw new Error("built-in Ask LazyAgentTool was not created");
+			const extensionWrappedAsk = new ExtensionToolWrapper(
+				askFacade as AgentTool,
+				{
+					hasHandlers: () => false,
+					hasToolResultMediation: () => false,
+				} as never,
+			);
 			const guarded = guardToolForUltragoalAsk(
-				askFacade,
+				extensionWrappedAsk,
 				() => cwd,
 				() => ({ sessionId }),
+				() => undefined,
+				true,
 			);
 			const context = {
 				hasUI: true,
@@ -524,6 +534,106 @@ describe("non-Crystal user-gated execution approval", () => {
 			await expect(captureExecutionApprovalPresentation(cwd, sessionId, "ralplan")).resolves.toMatchObject({
 				run_id: legacyRunId,
 			});
+		});
+	});
+
+	it("refreshes the final review join after post-publication metadata enrichment", async () => {
+		await withSession(async (cwd, _manager, sessionId) => {
+			const runId = "late-review-metadata-enrichment";
+			const architectArtifact = "## Architectural Status\nCLEAR\n\n## Code Review Recommendation\nAPPROVE\n";
+			await writeRalplanStage(cwd, sessionId, runId, "planner", 1, "# Planner\n\nPlan the repair.");
+			await writeRalplanStage(cwd, sessionId, runId, "architect", 1, architectArtifact);
+			await writeRalplanStage(cwd, sessionId, runId, "critic", 1, "## Verdict\n**OKAY**\n", [
+				"--lane-verdict",
+				"OKAY",
+			]);
+			await writeRalplanStage(cwd, sessionId, runId, "final", 1, "# Final plan\n\nPlan the repair.");
+			await expect(captureExecutionApprovalPresentation(cwd, sessionId, "ralplan")).rejects.toThrow(
+				/verified same-pass Architect\/Critic review join/,
+			);
+
+			await writeRalplanStage(cwd, sessionId, runId, "architect", 1, architectArtifact, [
+				"--lane-verdict",
+				"CLEAR",
+				"--architect-decision",
+				"APPROVE",
+			]);
+
+			const presentation = await captureExecutionApprovalPresentation(cwd, sessionId, "ralplan");
+			expect(presentation).toMatchObject({ run_id: runId });
+		});
+	});
+
+	it("requires the exact current-final Ralplan approval prompt outside the Ultragoal guard", async () => {
+		await withSession(async (cwd, _manager, sessionId) => {
+			await publishReviewedRalplanFinal(cwd, sessionId);
+			const presentation = await captureExecutionApprovalPresentation(cwd, sessionId, "ralplan");
+			const question = formatRalplanUltragoalApprovalQuestion(presentation);
+			if (!question) throw new Error("expected canonical Ralplan approval question");
+			const select = vi.fn(async () => "Approve execution via ultragoal");
+			const tool = new AskTool({
+				cwd,
+				hasUI: true,
+				settings: Settings.isolated(),
+				getSessionId: () => sessionId,
+				getSessionFile: () => null,
+				getSessionSpawns: () => "*",
+			});
+			const context = {
+				hasUI: true,
+				ui: { select, editor: async () => undefined },
+				abort: () => {},
+			} as unknown as AgentToolContext;
+			const options = [
+				{ label: "Refine further" },
+				{ label: "Approve execution via ultragoal" },
+				{ label: "Stop here" },
+			];
+
+			await expect(
+				tool.execute(
+					"generic-ralplan-approval-question",
+					{
+						questions: [
+							{
+								id: "ralplan-approval",
+								question: "Approve this plan?",
+								options,
+								recommended: 1,
+								multi: false,
+								workflowGate: { stage: "ralplan", kind: "approval" },
+							},
+						],
+					},
+					undefined,
+					undefined,
+					context,
+				),
+			).rejects.toThrow(/exact question and options for the current final publication/);
+
+			await expect(
+				tool.execute(
+					"extra-question-ralplan-approval",
+					{
+						questions: [
+							{
+								id: "ralplan-approval",
+								question,
+								options,
+								recommended: 1,
+								multi: false,
+								workflowGate: { stage: "ralplan", kind: "approval" },
+							},
+							{ id: "unrelated", question: "Continue?", options: [{ label: "Yes" }] },
+						],
+					},
+					undefined,
+					undefined,
+					context,
+				),
+			).rejects.toThrow(/must be the only question/);
+			expect(select).not.toHaveBeenCalled();
+			expect(await Bun.file(nonCrystalExecutionApprovalRecordPath(cwd, sessionId, "ralplan")).exists()).toBe(false);
 		});
 	});
 

@@ -3133,6 +3133,49 @@ describe("ralplan HUD lane verdict carriage", () => {
 		expect(chips.find(chip => chip.label === "verdict")?.value).toBe("ITERATE");
 	});
 
+	it("applies lane verdict and role metadata on an identical artifact retry", async () => {
+		const root = await tempDir();
+		const runId = "hud-duplicate-metadata";
+		expect((await writeRalplanArtifact(root, runId, "planner", 1, "# plan")).status).toBe(0);
+		expect((await writeRalplanArtifact(root, runId, "architect", 2, "# architecture")).status).toBe(0);
+
+		const retry = await runNativeRalplanCommand(
+			[
+				"--write",
+				"--stage",
+				"architect",
+				"--stage_n",
+				"2",
+				"--artifact",
+				"# architecture",
+				"--run-id",
+				runId,
+				"--architect-id",
+				"1-ActiveArchitect",
+				"--architect-resumable",
+				"true",
+				"--lane-verdict",
+				"WATCH",
+				"--json",
+			],
+			root,
+		);
+		expect(retry.status, retry.stderr).toBe(0);
+		expect(JSON.parse(retry.stdout ?? "{}")).toMatchObject({
+			deduplicated: true,
+			architect_state: { architect_id: "1-ActiveArchitect", architect_resumable: true },
+			lane_verdict: { lane: "architect", verdict: "WATCH" },
+		});
+		expect(JSON.parse(await fs.readFile(ralplanStatePath(root), "utf-8"))).toMatchObject({
+			run_id: runId,
+			architect_id: "1-ActiveArchitect",
+			architect_resumable: true,
+			last_review_verdict: "WATCH",
+			last_review_verdict_lane: "architect",
+			last_review_verdict_stage_n: 2,
+		});
+	});
+
 	it("applies a riding lane verdict while repairing an identical crash-gap artifact", async () => {
 		const root = await tempDir();
 		const runId = "hud-crash-gap-verdict";

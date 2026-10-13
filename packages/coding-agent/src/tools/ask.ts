@@ -101,6 +101,7 @@ import { ToolAbortError, ToolError } from "./tool-errors";
 import {
 	assertUltragoalAskAllowed,
 	isAcceptedRalplanApprovalResponse,
+	isCanonicalRalplanUltragoalApproval,
 	markBuiltinAskTool,
 } from "./ultragoal-ask-guard";
 
@@ -175,6 +176,8 @@ const DEEP_INTERVIEW_SELECTOR_SCROLL_TITLE_ROWS = Number.MAX_SAFE_INTEGER;
 const DEEP_INTERVIEW_RECORDER_AWAIT_TIMEOUT_MS = 250;
 export const MAX_EMPTY_CUSTOM_ATTEMPTS = 3;
 const EMPTY_CUSTOM_RETRY_MESSAGE = "Custom input cannot be empty. Enter text or cancel the ask.";
+const INVALID_RALPLAN_APPROVAL_RETRY_MESSAGE =
+	"Choose one of the listed Ralplan approval options; custom input and clarifications are not accepted.";
 
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
@@ -962,7 +965,7 @@ export class AskTool implements AgentTool<AskParametersSchema, AskToolDetails> {
 		_onUpdate?: AgentToolUpdateCallback<AskToolDetails>,
 		context?: AgentToolContext,
 	): Promise<AgentToolResult<AskToolDetails>> {
-		const verifiedRalplanApprovalPresentation = await assertUltragoalAskAllowed(
+		let verifiedRalplanApprovalPresentation = await assertUltragoalAskAllowed(
 			this.session.cwd,
 			{ sessionId: this.session.getSessionId?.() ?? null },
 			this.session.getSessionAgentDir?.() ?? this.session.settings.getAgentDir(),
@@ -984,6 +987,41 @@ export class AskTool implements AgentTool<AskParametersSchema, AskToolDetails> {
 				{ type: "toolCall", id: _toolCallId, name: this.name, arguments: params },
 			),
 		);
+		const executionGateCount = params.questions.filter(
+			question =>
+				(question.workflowGate?.stage === "deep-interview" && question.workflowGate.kind === "execution") ||
+				(question.workflowGate?.stage === "ralplan" && question.workflowGate.kind === "approval"),
+		).length;
+		if (executionGateCount > 1)
+			throw new ToolError("Ask accepts at most one execution-authorizing workflow gate per invocation");
+		const hasRalplanApproval = params.questions.some(
+			question => question.workflowGate?.stage === "ralplan" && question.workflowGate.kind === "approval",
+		);
+		if (hasRalplanApproval) {
+			if (params.questions.length !== 1)
+				throw new ToolError("Ralplan approval must be the only question in its Ask invocation");
+			const sessionId = this.session.getSessionId?.();
+			if (!sessionId) throw new ToolAbortError("Execution approval requires a session");
+			if (!verifiedRalplanApprovalPresentation) {
+				try {
+					verifiedRalplanApprovalPresentation = await captureExecutionApprovalPresentation(
+						this.session.cwd,
+						sessionId,
+						"ralplan",
+					);
+				} catch (error) {
+					throw new ToolAbortError(
+						error instanceof Error
+							? `Execution approval publication could not be authenticated: ${error.message}`
+							: "Execution approval publication could not be authenticated",
+					);
+				}
+			}
+			if (!isCanonicalRalplanUltragoalApproval(params, verifiedRalplanApprovalPresentation))
+				throw new ToolError(
+					"Ralplan approval must use the exact question and options for the current final publication",
+				);
+		}
 		let activeRemoteReceipt: AskRemoteReceipt | undefined;
 		let activeRemoteRequest: AskAnswerRequest | undefined;
 		let remoteGeneration = 0;
@@ -1333,26 +1371,20 @@ export class AskTool implements AgentTool<AskParametersSchema, AskToolDetails> {
 		// Send notification if waiting and not suppressed
 		this.#sendAskNotification();
 
-		if (
-			params.questions.filter(
-				question =>
-					(question.workflowGate?.stage === "deep-interview" && question.workflowGate.kind === "execution") ||
-					(question.workflowGate?.stage === "ralplan" && question.workflowGate.kind === "approval"),
-			).length > 1
-		)
-			throw new ToolError("Ask accepts at most one execution-authorizing workflow gate per invocation");
 		const askQuestion = async (
 			q: AskParams["questions"][number],
 			options?: {
 				previous?: QuestionResult;
 				navigation?: NavigationControls;
 				emptyCustomAttempt?: number;
+				invalidRetryMessage?: string;
 			},
 		) => {
 			const rawOptionLabels = q.options.map(o => o.label);
 			const recommended = validRecommendedIndex(q.recommended, rawOptionLabels.length);
 			const questionIndex = params.questions.indexOf(q);
 			const emptyCustomAttempt = options?.emptyCustomAttempt ?? 0;
+			const invalidRetryMessage = options?.invalidRetryMessage ?? EMPTY_CUSTOM_RETRY_MESSAGE;
 			const isExecutionApprovalQuestion =
 				(q.workflowGate?.stage === "deep-interview" && q.workflowGate.kind === "execution") ||
 				(q.workflowGate?.stage === "ralplan" && q.workflowGate.kind === "approval");
@@ -1420,7 +1452,7 @@ export class AskTool implements AgentTool<AskParametersSchema, AskToolDetails> {
 						: q.question);
 				const displayQuestion =
 					emptyCustomAttempt > 0
-						? `${baseDisplayQuestion}\n\n${EMPTY_CUSTOM_RETRY_MESSAGE} (attempt ${emptyCustomAttempt + 1} of ${MAX_EMPTY_CUSTOM_ATTEMPTS})`
+						? `${baseDisplayQuestion}\n\n${invalidRetryMessage} (attempt ${emptyCustomAttempt + 1} of ${MAX_EMPTY_CUSTOM_ATTEMPTS})`
 						: baseDisplayQuestion;
 				const shouldNumberOptions = isDeepInterviewQuestion || isDeepInterviewAskQuestion(q.question);
 				const optionLabels = shouldNumberOptions ? numberOptionLabels(rawOptionLabels) : rawOptionLabels;
@@ -1524,15 +1556,21 @@ export class AskTool implements AgentTool<AskParametersSchema, AskToolDetails> {
 				if ((isDeepInterviewQuestion || isDeepInterviewAskQuestion(q.question)) && customInput !== undefined)
 					assertDeepInterviewInputWithinLimit(customInput, MAX_USER_RESPONSE_LENGTH, "user_response");
 				if (activeRemoteReceipt) {
-					const settlement: AskSettlement =
-						clarificationQuestion !== undefined
-							? { kind: "resolve_without_commit", reason: "clarification_submitted" }
+					const invalidRalplanApprovalAnswer =
+						q.workflowGate?.stage === "ralplan" &&
+						q.workflowGate.kind === "approval" &&
+						(selectedOptions.length > 0 || customInput !== undefined || clarificationQuestion !== undefined) &&
+						!isAcceptedRalplanApprovalResponse(selectedOptions, customInput, clarificationQuestion, timedOut);
+					const settlement: AskSettlement = cancelled
+						? { kind: "resolve_without_commit", reason: "cancelled" }
+						: timedOut
+							? { kind: "resolve_without_commit", reason: "timed_out" }
 							: customInput !== undefined && customInput.trim().length === 0
 								? { kind: "invalid", reason: "empty_custom" }
-								: cancelled
-									? { kind: "resolve_without_commit", reason: "cancelled" }
-									: timedOut
-										? { kind: "resolve_without_commit", reason: "timed_out" }
+								: invalidRalplanApprovalAnswer
+									? { kind: "invalid", reason: "invalid_workflow_gate_answer" }
+									: clarificationQuestion !== undefined
+										? { kind: "resolve_without_commit", reason: "clarification_submitted" }
 										: navigation === "back"
 											? { kind: "resolve_without_commit", reason: "back_navigation" }
 											: navigation === "forward" &&
@@ -1563,6 +1601,10 @@ export class AskTool implements AgentTool<AskParametersSchema, AskToolDetails> {
 						return askQuestion(q, {
 							...options,
 							emptyCustomAttempt: emptyCustomAttempt + 1,
+							invalidRetryMessage:
+								settlement.reason === "invalid_workflow_gate_answer"
+									? INVALID_RALPLAN_APPROVAL_RETRY_MESSAGE
+									: options?.invalidRetryMessage,
 						});
 					}
 				}
@@ -1618,9 +1660,10 @@ export class AskTool implements AgentTool<AskParametersSchema, AskToolDetails> {
 			}
 			if (
 				verifiedRalplanApprovalPresentation &&
+				!timedOut &&
 				!isAcceptedRalplanApprovalResponse(selectedOptions, customInput, clarificationQuestion, timedOut)
 			)
-				throw new ToolError("Ralplan approval during Ultragoal accepts only the listed choices, not free text.");
+				throw new ToolError("Ralplan approval accepts only the listed choices, not free text.");
 			if (
 				clarificationQuestion === undefined &&
 				!(timedOut && (intentContract(q.deepInterview) || intentReview(q.deepInterview)))
@@ -1707,9 +1750,10 @@ export class AskTool implements AgentTool<AskParametersSchema, AskToolDetails> {
 			}
 			if (
 				verifiedRalplanApprovalPresentation &&
+				!timedOut &&
 				!isAcceptedRalplanApprovalResponse(selectedOptions, customInput, clarificationQuestion, timedOut)
 			)
-				throw new ToolError("Ralplan approval during Ultragoal accepts only the listed choices, not free text.");
+				throw new ToolError("Ralplan approval accepts only the listed choices, not free text.");
 
 			resultsByIndex[questionIndex] = {
 				id: q.id,

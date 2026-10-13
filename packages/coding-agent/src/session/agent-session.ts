@@ -12112,6 +12112,7 @@ export class AgentSession {
 						() => this.sessionManager.getCwd(),
 						() => ({ sessionId: this.sessionManager.getSessionId() }),
 						() => this.getSessionAgentDir(),
+						this.#builtinToolIdentities.has(tool),
 					),
 				),
 			),

@@ -137,6 +137,7 @@ export type AskSettlement =
 				| "invalid_option"
 				| "invalid_control"
 				| "invalid_structured_answer"
+				| "invalid_workflow_gate_answer"
 				| "empty_custom"
 				| "empty_clarification";
 	  };

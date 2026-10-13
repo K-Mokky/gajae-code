@@ -3792,8 +3792,25 @@ async function hasVerifiedRalplanApprovalReviewJoin(
 				verdict: typeof row.lane_verdict === "string" ? row.lane_verdict : undefined,
 				decision: typeof row.architect_decision === "string" ? row.architect_decision : undefined,
 			};
-			if (row.stage === "architect") architect = receipt;
-			else critic = receipt;
+			if (row.stage === "architect") {
+				architect = receipt;
+				if (
+					finalJoin?.stageN === row.stage_n &&
+					finalJoin.planner &&
+					sameRalplanPlannerReference(finalJoin.planner, planner) &&
+					sameRalplanPlannerReference(finalJoin.finalPlanner, planner)
+				)
+					finalJoin = { ...finalJoin, architect: receipt };
+			} else {
+				critic = receipt;
+				if (
+					finalJoin?.stageN === row.stage_n &&
+					finalJoin.planner &&
+					sameRalplanPlannerReference(finalJoin.planner, planner) &&
+					sameRalplanPlannerReference(finalJoin.finalPlanner, planner)
+				)
+					finalJoin = { ...finalJoin, critic: receipt };
+			}
 			continue;
 		}
 		if (row.stage === "final") {
@@ -3892,6 +3909,17 @@ async function verifiedRalplanFinalEvidence(
 	const ralplanPath = modeStateFile(cwd, "ralplan", sessionId);
 	const receipt = persistedWorkflowReceipt(state.receipt, "ralplan");
 	const checksum = receipt?.content_sha256;
+	// Duplicate review artifacts may enrich legacy lane metadata after publication.
+	// These run-bound writers preserve the admission fields while refreshing the
+	// envelope checksum, so their receipts remain valid provenance for the final.
+	const reviewMetadataReceipt =
+		receipt?.owner === "gjc-runtime" &&
+		[
+			"gjc ralplan planner-state",
+			"gjc ralplan architect-state",
+			"gjc ralplan critic-state",
+			"gjc ralplan lane-verdict",
+		].includes(receipt.command ?? "");
 	const phaseMarker = isPlainObject(state.final_admission_phase_transition)
 		? state.final_admission_phase_transition
 		: undefined;
@@ -3902,6 +3930,7 @@ async function verifiedRalplanFinalEvidence(
 		(receipt.command === "gjc state ralplan write" || receipt.command === "gjc state ralplan handoff --to ultragoal");
 	if (
 		(!phaseTransitionReceipt &&
+			!reviewMetadataReceipt &&
 			(receipt?.owner !== "gjc-runtime" || receipt.command !== "gjc ralplan final-admission")) ||
 		checksum?.algorithm !== "sha256" ||
 		typeof checksum.value !== "string" ||

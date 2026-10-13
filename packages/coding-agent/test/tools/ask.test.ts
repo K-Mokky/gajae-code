@@ -28,6 +28,7 @@ import {
 } from "@gajae-code/coding-agent/tools/ask";
 import type { AskToolInput } from "@gajae-code/coding-agent/tools/ask-contract";
 import { ToolAbortError } from "@gajae-code/coding-agent/tools/tool-errors";
+import { formatRalplanUltragoalApprovalQuestion } from "@gajae-code/coding-agent/tools/ultragoal-ask-guard";
 import { logger } from "@gajae-code/utils";
 import type { OpenGateInput } from "../../src/modes/shared/agent-wire/workflow-gate-broker";
 import type { WorkflowGate } from "../../src/modes/shared/agent-wire/workflow-gate-types";
@@ -1173,6 +1174,81 @@ describe("AskTool remote semantic settlements", () => {
 		);
 		expect(result.details?.customInput).toBe("remote custom text");
 		expect(settlements).toEqual([{ kind: "resolve_without_commit", reason: "other_transition" }, { kind: "commit" }]);
+	});
+
+	it("reissues remote Ralplan approval after invalid custom input without committing it", async () => {
+		const presentation = {
+			state_path: "/tmp/ralplan-approval-state.json",
+			state_revision: 1,
+			artifact_path: "/tmp/current-final.md",
+			artifact_sha256: "b".repeat(64),
+			run_id: "current-run",
+		};
+		const question = formatRalplanUltragoalApprovalQuestion(presentation);
+		if (!question) throw new Error("expected canonical Ralplan approval question");
+		spyOn(stateRuntime, "captureExecutionApprovalPresentation").mockResolvedValue(presentation);
+		spyOn(stateRuntime, "revokeDeepInterviewExecutionApproval").mockResolvedValue(undefined);
+		spyOn(stateRuntime, "revokeNonCrystalExecutionApproval").mockResolvedValue(undefined);
+		const values = ["Postgres", "Stop here"];
+		const requests: AskAnswerRequest[] = [];
+		const settlements: AskSettlement[] = [];
+		const source: AskAnswerSource = {
+			awaitAnswer: async () => undefined,
+			awaitAnswerRequest: request => {
+				requests.push(request);
+				const value =
+					requests.length === 1 ? request.options.find(option => option.includes("Other"))! : values.shift()!;
+				return Promise.resolve({
+					source: "remote" as const,
+					interaction: { kind: "value" as const, value },
+					settle: async (settlement: AskSettlement) => {
+						settlements.push(settlement);
+						return settlement.kind === "commit"
+							? { kind: "committed" as const, ack: { status: "delivered" as const, messageId: 77 } }
+							: settlement.kind === "invalid"
+								? { kind: "invalid_closed" as const }
+								: { kind: "resolved_without_commit" as const };
+					},
+				});
+			},
+		};
+		const tool = new AskTool(
+			createSession({
+				cwd: "/tmp/ralplan-approval",
+				getSessionId: () => "ralplan-approval-session",
+				getAskAnswerSource: () => source,
+			}),
+		);
+		const result = await tool.execute(
+			"remote-ralplan-approval",
+			{
+				questions: [
+					{
+						id: "current-final-approval",
+						question,
+						options: [
+							{ label: "Refine further" },
+							{ label: "Approve execution via ultragoal" },
+							{ label: "Stop here" },
+						],
+						recommended: 1,
+						multi: false,
+						workflowGate: { stage: "ralplan", kind: "approval" },
+					},
+				],
+			},
+			undefined,
+			undefined,
+			abortableUi(),
+		);
+
+		expect(result.details?.selectedOptions).toEqual(["Stop here"]);
+		expect(settlements).toEqual([
+			{ kind: "resolve_without_commit", reason: "other_transition" },
+			{ kind: "invalid", reason: "invalid_workflow_gate_answer" },
+			{ kind: "commit" },
+		]);
+		expect(requests[2]?.question).toContain("custom input and clarifications are not accepted");
 	});
 
 	it("commits a real option whose label ends with the synthetic Other text", async () => {
@@ -3141,7 +3217,7 @@ describe("AskTool deep-interview recorder persistence", () => {
 			state_revision: 1,
 			artifact_path: "/tmp/timeout-artifact.md",
 			artifact_sha256: "b".repeat(64),
-			run_id: null,
+			run_id: "timeout-run",
 		});
 		const tool = new AskTool(
 			createSession({
@@ -3159,8 +3235,16 @@ describe("AskTool deep-interview recorder persistence", () => {
 		});
 		const approvalQuestion = {
 			id: "ralplan-approval-timeout",
-			question: "Approve the plan?",
-			options: [{ label: "Approve" }, { label: "Revise" }],
+			question: formatRalplanUltragoalApprovalQuestion({
+				state_path: "/tmp/timeout-state.json",
+				state_revision: 1,
+				artifact_path: "/tmp/timeout-artifact.md",
+				artifact_sha256: "b".repeat(64),
+				run_id: "timeout-run",
+			})!,
+			options: [{ label: "Refine further" }, { label: "Approve execution via ultragoal" }, { label: "Stop here" }],
+			recommended: 1,
+			multi: false,
 			workflowGate: { stage: "ralplan", kind: "approval" } as const,
 		};
 		const result = await tool.execute(
@@ -3722,13 +3806,14 @@ describe("AskTool deep-interview recorder persistence", () => {
 	});
 
 	it("emits deep-interview question gates by default and honors ralplan approval overrides", async () => {
-		spyOn(stateRuntime, "captureExecutionApprovalPresentation").mockResolvedValue({
+		const ralplanPresentation = {
 			state_path: "/tmp/gate-state.json",
 			state_revision: 1,
 			artifact_path: "/tmp/gate-artifact.md",
 			artifact_sha256: "b".repeat(64),
-			run_id: null,
-		});
+			run_id: "gate-run",
+		};
+		spyOn(stateRuntime, "captureExecutionApprovalPresentation").mockResolvedValue(ralplanPresentation);
 		const defaultGateEmitter = {
 			supportsRemoteGateAnswers: () => true,
 			emitGate: vi.fn(async () => ({ selected: ["Budget"] })),
@@ -3814,8 +3899,14 @@ describe("AskTool deep-interview recorder persistence", () => {
 					questions: [
 						{
 							id: "final-approval",
-							question: `Approve finalized plan pass ${pass}?`,
-							options: [{ label: "Refine further" }, { label: "Approve execution via ultragoal" }],
+							question: formatRalplanUltragoalApprovalQuestion(ralplanPresentation)!,
+							options: [
+								{ label: "Refine further" },
+								{ label: "Approve execution via ultragoal" },
+								{ label: "Stop here" },
+							],
+							recommended: 1,
+							multi: false,
 							workflowGate: { stage: "ralplan", kind: "approval" },
 						},
 					],
