@@ -313,7 +313,7 @@ describe("workflow permission policy", () => {
 		expect([...selected.keys()]).toEqual(["eligible-reviewer"]);
 	});
 
-	test("allows maintainers to authorize re-review when the pull request author is deleted", async () => {
+	test("requires the exact command and allows maintainers when the PR author is deleted", async () => {
 		const source = await parsedWorkflow(RE_REVIEW_WORKFLOW);
 		const jobs = documentRecord(source.jobs);
 		const steps = documentRecord(jobs["request-review-on-comment"]).steps as unknown[];
@@ -330,9 +330,15 @@ describe("workflow permission policy", () => {
 				};
 			};
 		};
+		let pullRequestLookups = 0;
 		const github: GithubStub = {
 			rest: {
-				pulls: { get: async () => ({ data: { user: null } }) },
+				pulls: {
+					get: async () => {
+						pullRequestLookups += 1;
+						return { data: { user: null } };
+			},
+			},
 				repos: { getCollaboratorPermissionLevel: async () => ({ data: { permission: "write" } }) },
 			},
 		};
@@ -351,6 +357,15 @@ describe("workflow permission policy", () => {
 		) as (github: GithubStub, context: typeof context) => Promise<string>;
 
 		expect(await executeAuthorizationStep(github, context)).toBe("authorized");
+		const unrelatedPrefixContext = {
+			...context,
+			payload: {
+				...context.payload,
+				comment: { ...context.payload.comment, body: "/re-reviewplease" },
+			},
+		};
+		expect(await executeAuthorizationStep(github, unrelatedPrefixContext)).toBe("no-match");
+		expect(pullRequestLookups).toBe(1);
 	});
 
 	test("re-review filters to requestable reviewers and passes reviewer data through the environment", async () => {
