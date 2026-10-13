@@ -173,9 +173,13 @@ function activeSource(
 	const { authStorage } = session.modelRegistry;
 	const sessionId = session.credentialSessionId;
 	if (activeType === "oauth") {
+		const pinnedRowId = authStorage.getSelectedOAuthCredentialRowId(provider, sessionId, { owner });
+		const sessionRowId = authStorage.getSessionCredentialRowId(provider, sessionId);
 		const rowId =
-			authStorage.getSelectedOAuthCredentialRowId(provider, sessionId, { owner }) ??
-			authStorage.getSessionCredentialRowId(provider, sessionId);
+			pinnedRowId ??
+			(sessionRowId !== undefined && authStorage.isCredentialAvailable(provider, sessionRowId)
+				? sessionRowId
+				: undefined);
 		const selected = rowId === undefined ? undefined : entries.find(entry => entry.id === rowId);
 		if (selected?.credential.type === "oauth") return { kind: "oauth", layer: "stored", label: oauthLabel(selected) };
 		const oauthEntries = entries.filter(entry => entry.credential.type === "oauth");

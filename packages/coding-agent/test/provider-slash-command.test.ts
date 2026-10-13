@@ -233,6 +233,11 @@ describe("provider slash command", () => {
 			expect(afterDispatch).toContain(`kagi: OAuth (account ${selected.credential.accountId})`);
 			expect(afterDispatch).not.toContain("kagi-account-one-secret");
 			expect(afterDispatch).not.toContain("kagi-account-two-secret");
+			authStorage.removeRuntimeCredentialSelector("kagi");
+			await authStorage.markUsageLimitReached("kagi", sessionId, { retryAfterMs: 60_000, rowId });
+			const blockedStatus = await status();
+			expect(blockedStatus).toContain("kagi: OAuth (account selection pending)");
+			expect(blockedStatus).not.toContain(`kagi: OAuth (account ${selected.credential.accountId})`);
 
 			await authStorage.set("openai-codex", {
 				type: "oauth",
