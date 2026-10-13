@@ -1818,6 +1818,4 @@ mod tests {
 		assert!(matches!(third, ReadResult::Line(ref text) if text == "X"));
 		Ok(())
 	}
-
-
 }
