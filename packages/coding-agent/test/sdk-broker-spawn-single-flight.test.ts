@@ -6,7 +6,11 @@ import * as path from "node:path";
 import * as native from "@gajae-code/natives";
 import packageJson from "../package.json" with { type: "json" };
 import Sdk from "../src/commands/sdk";
-import { FileLockAcquireError, FileLockTestHooks } from "../src/config/file-lock";
+import {
+	FILE_LOCK_ORPHAN_TRANSITION_ADOPTION_AGE_MS,
+	FileLockAcquireError,
+	FileLockTestHooks,
+} from "../src/config/file-lock";
 import { Broker } from "../src/sdk/broker/broker";
 import { readBrokerExitRecord, readBrokerStartupExitRecord } from "../src/sdk/broker/broker-exit";
 import type { BrokerDiscovery } from "../src/sdk/broker/discovery";
@@ -734,6 +738,27 @@ it("bounds authorized child fence acquisition by the committed restart expiry", 
 		await fs.rm(dir, { recursive: true, force: true });
 	}
 }, 5_000);
+
+// Removal-transition adoption is POSIX-only; Windows uses native exact removal.
+it.skipIf(process.platform === "win32")(
+	"startup fence waits long enough to adopt a retained removal transition",
+	async () => {
+		const dir = await temp();
+		const transitionPath = path.join(dir, "sdk", "broker.startup.lock.removing");
+		await fs.mkdir(transitionPath, { recursive: true });
+		const old = new Date(Date.now() - 2_000);
+		await fs.utimes(transitionPath, old, old);
+		try {
+			const result = await withBrokerStartupLock(dir, async () => true);
+			expect(result).toBe(true);
+			expect(await fs.readdir(path.join(dir, "sdk"))).not.toContain("broker.startup.lock.removing");
+			expect(Date.now() - old.getTime()).toBeGreaterThanOrEqual(FILE_LOCK_ORPHAN_TRANSITION_ADOPTION_AGE_MS);
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	},
+	20_000,
+);
 
 it("records a startup exit when acquisition is blocked by a retained removal transition", async () => {
 	const dir = await temp();

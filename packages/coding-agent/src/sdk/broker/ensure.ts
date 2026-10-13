@@ -6,7 +6,12 @@ import * as os from "node:os";
 import path from "node:path";
 import { nativeProcessBindings } from "@gajae-code/utils/native-process";
 import packageJson from "../../../package.json" with { type: "json" };
-import { acquireFileLock, type FileLockOptions, withFileLock } from "../../config/file-lock";
+import {
+	acquireFileLock,
+	FILE_LOCK_ORPHAN_TRANSITION_ADOPTION_AGE_MS,
+	type FileLockOptions,
+	withFileLock,
+} from "../../config/file-lock";
 import { loadInstallationHostId, loadLegacyInstallationHostId } from "../../config/machine-identity";
 import { SdkClient, SdkClientError } from "../client/client";
 import { type BrokerStartupExitRecord, clearBrokerStartupExitRecord, readBrokerStartupExitRecord } from "./broker-exit";
@@ -672,13 +677,17 @@ export interface EnsureBrokerSettings {
 }
 
 const BROKER_PUBLICATION_TIMEOUT_MS = 15_000;
-const STARTUP_LOCK_WAIT_MS = 9_000;
 const STALE_BROKER_RETIREMENT_TIMEOUT_MS = 5_000;
+const SPAWN_LOCK_RETRY_DELAY_MS = 50;
+/** Keep the startup fence alive long enough to adopt an ownerless removal transition. */
+const STARTUP_LOCK_WAIT_MS = Math.max(
+	9_000,
+	FILE_LOCK_ORPHAN_TRANSITION_ADOPTION_AGE_MS + SPAWN_LOCK_RETRY_DELAY_MS * 2,
+);
 /** Parent budget covers stale retirement, a full child-fence wait, and one publication attempt. */
 const DISCOVERY_TIMEOUT_MS = STALE_BROKER_RETIREMENT_TIMEOUT_MS + STARTUP_LOCK_WAIT_MS + BROKER_PUBLICATION_TIMEOUT_MS;
 /** A process that loses the spawn lock waits this long for the winner's discovery before giving up. */
 const SPAWN_LOCK_WAIT_MS = STALE_BROKER_RETIREMENT_TIMEOUT_MS + DISCOVERY_TIMEOUT_MS + 5_000;
-const SPAWN_LOCK_RETRY_DELAY_MS = 50;
 const SPAWN_LOCK_TARGET_NAME = "broker.spawn";
 const STARTUP_LOCK_TARGET_NAME = "broker.startup";
 const BROKER_SESSION_ENV_NAMES = new Set([
