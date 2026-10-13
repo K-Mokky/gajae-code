@@ -1,9 +1,9 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, vi } from "bun:test";
 import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AgentToolContext } from "@gajae-code/agent-core";
+import type { AgentTool, AgentToolContext } from "@gajae-code/agent-core";
 import type { AssistantMessage } from "@gajae-code/ai/types";
 import { Settings } from "@gajae-code/coding-agent/config/settings";
 import { crystalSnapshotDigest } from "@gajae-code/coding-agent/gjc-runtime/deep-interview-crystallize";
@@ -24,9 +24,12 @@ import {
 	recordNonCrystalExecutionApproval,
 	runNativeStateCommand,
 } from "@gajae-code/coding-agent/gjc-runtime/state-runtime";
+import { isUltragoalAskBlocked } from "@gajae-code/coding-agent/gjc-runtime/ultragoal-guard";
+import { createUltragoalPlan, getUltragoalPaths } from "@gajae-code/coding-agent/gjc-runtime/ultragoal-runtime";
 import { initTheme } from "@gajae-code/coding-agent/modes/theme/theme";
 import { SessionManager } from "@gajae-code/coding-agent/session/session-manager";
 import { AskTool } from "@gajae-code/coding-agent/tools/ask";
+import { guardToolForUltragoalAsk } from "@gajae-code/coding-agent/tools/ultragoal-ask-guard";
 
 let askInvocationCounter = 0;
 
@@ -113,12 +116,60 @@ async function publish(cwd: string, sessionId: string, stage: ExecutionApprovalS
 	return JSON.parse(await fs.readFile(modeStatePath(cwd, sessionId, stage), "utf8"));
 }
 
+async function publishReviewedRalplanFinal(cwd: string, sessionId: string) {
+	const runId = "reviewed-current-final";
+	const stages = [
+		{
+			stage: "planner",
+			artifact: "# Planner\n\nImplement and test the approved repair.",
+			extra: ["--planner-id", "1-Planner"],
+		},
+		{
+			stage: "architect",
+			artifact: "## Architectural Status\nCLEAR\n\n## Code Review Recommendation\nAPPROVE\n",
+			extra: ["--architect-id", "2-Architect", "--lane-verdict", "CLEAR"],
+		},
+		{
+			stage: "critic",
+			artifact: "## Verdict\n**OKAY**\n",
+			extra: ["--critic-id", "3-Critic", "--lane-verdict", "OKAY"],
+		},
+		{
+			stage: "final",
+			artifact: "# Approved final plan\n\nImplement and test the approved repair.",
+			extra: [],
+		},
+	] as const;
+	for (const row of stages) {
+		const result = await runNativeRalplanCommand(
+			[
+				"--write",
+				"--stage",
+				row.stage,
+				"--stage_n",
+				"1",
+				"--artifact",
+				row.artifact,
+				"--run-id",
+				runId,
+				"--session-id",
+				sessionId,
+				...row.extra,
+				"--json",
+			],
+			cwd,
+		);
+		expect(result.status, result.stderr).toBe(0);
+	}
+}
+
 async function ask(
 	cwd: string,
 	manager: SessionManager,
 	stage: ExecutionApprovalStage,
 	id = "approve-report",
 	consumeRalplan = true,
+	guarded = false,
 ) {
 	const label = "Approve execution via ultragoal";
 	const toolCallId = `provider-${id}-${++askInvocationCounter}`;
@@ -147,7 +198,14 @@ async function ask(
 		getSessionSpawns: () => "*",
 	});
 	const context = { hasUI: true, ui: { select: async () => label }, abort: () => {} } as unknown as AgentToolContext;
-	const result = await tool.execute(toolCallId, args, undefined, undefined, context);
+	const executable = guarded
+		? (guardToolForUltragoalAsk(
+				tool as AgentTool,
+				() => cwd,
+				() => ({ sessionId: manager.getSessionId() }),
+			) as AskTool)
+		: tool;
+	const result = await executable.execute(toolCallId, args, undefined, undefined, context);
 	manager.appendMessage({
 		role: "toolResult",
 		toolCallId,
@@ -231,6 +289,92 @@ async function publishCrystal(cwd: string, sessionId: string) {
 }
 
 describe("non-Crystal user-gated execution approval", () => {
+	it("allows a same-session current-final Ralplan approval during an incomplete Ultragoal", async () => {
+		await withSession(async (cwd, manager, sessionId) => {
+			await createUltragoalPlan({ cwd, brief: "Implement the approved repair" });
+			await publishReviewedRalplanFinal(cwd, sessionId);
+			const presentation = await captureExecutionApprovalPresentation(cwd, sessionId, "ralplan");
+			const paths = getUltragoalPaths(cwd, sessionId);
+			const goalsBefore = await fs.readFile(paths.goalsPath, "utf8");
+			const ledgerBefore = await fs.readFile(paths.ledgerPath, "utf8");
+
+			expect(presentation.artifact_path).toContain("stage-01-final.md");
+			await expect(ask(cwd, manager, "ralplan", "ultragoal-current-final", true, true)).resolves.toBeUndefined();
+
+			const recordedApproval = await approval(cwd, sessionId, "ralplan");
+			expect(recordedApproval).toMatchObject({
+				status: "consumed",
+				artifact_path: presentation.artifact_path,
+				artifact_sha256: presentation.artifact_sha256,
+			});
+			expect(await isUltragoalAskBlocked(cwd, { sessionId })).toMatchObject({ active: true });
+			expect(await fs.readFile(paths.goalsPath, "utf8")).toBe(goalsBefore);
+			expect(await fs.readFile(paths.ledgerPath, "utf8")).toBe(ledgerBefore);
+		});
+	});
+
+	it("does not let Ralplan approval labels bypass the guard without a current final", async () => {
+		await withSession(async (cwd, manager, sessionId) => {
+			await createUltragoalPlan({ cwd, brief: "Implement the approved repair" });
+
+			await expect(ask(cwd, manager, "ralplan", "forged-current-final", false, true)).rejects.toThrow(
+				/Ultragoal try-harder nudge/,
+			);
+			expect(await Bun.file(nonCrystalExecutionApprovalRecordPath(cwd, sessionId, "ralplan")).exists()).toBe(false);
+		});
+	});
+
+	it("blocks ordinary Ask when a current Ralplan final exists during Ultragoal", async () => {
+		await withSession(async (cwd, _manager, sessionId) => {
+			await createUltragoalPlan({ cwd, brief: "Implement the approved repair" });
+			await publishReviewedRalplanFinal(cwd, sessionId);
+			const select = vi.fn(async () => "Continue");
+			const tool = new AskTool({
+				cwd,
+				hasUI: true,
+				settings: Settings.isolated(),
+				getSessionId: () => sessionId,
+				getSessionFile: () => null,
+				getSessionSpawns: () => "*",
+			});
+			const guarded = guardToolForUltragoalAsk(
+				tool as AgentTool,
+				() => cwd,
+				() => ({ sessionId }),
+			) as AskTool;
+			const context = {
+				hasUI: true,
+				ui: { select, editor: async () => undefined },
+				abort: () => {},
+			} as unknown as AgentToolContext;
+
+			await expect(
+				guarded.execute(
+					"ordinary-ask",
+					{ questions: [{ id: "ordinary", question: "Continue?", options: [{ label: "Continue" }] }] },
+					undefined,
+					undefined,
+					context,
+				),
+			).rejects.toThrow(/try-harder nudge/);
+			expect(select).not.toHaveBeenCalled();
+		});
+	});
+
+	it("blocks a tampered Ralplan final before presenting Ultragoal approval", async () => {
+		await withSession(async (cwd, manager, sessionId) => {
+			await createUltragoalPlan({ cwd, brief: "Implement the approved repair" });
+			await publishReviewedRalplanFinal(cwd, sessionId);
+			const presentation = await captureExecutionApprovalPresentation(cwd, sessionId, "ralplan");
+			await fs.writeFile(presentation.artifact_path, "# Substituted plan\n");
+
+			await expect(ask(cwd, manager, "ralplan", "tampered-current-final", false, true)).rejects.toThrow(
+				/Ultragoal try-harder nudge/,
+			);
+			expect(await Bun.file(nonCrystalExecutionApprovalRecordPath(cwd, sessionId, "ralplan")).exists()).toBe(false);
+		});
+	});
+
 	for (const stage of ["deep-interview", "ralplan"] as const) {
 		it(`${stage}: real Ask and persistent continuation approve the published artifact before handoff`, async () => {
 			await withSession(async (cwd, manager, sessionId) => {

@@ -1,4 +1,5 @@
 import type { AgentTool } from "@gajae-code/agent-core";
+import { captureExecutionApprovalPresentation } from "../gjc-runtime/state-runtime";
 import {
 	consumeUltragoalAskNudge,
 	isUltragoalAskBlocked,
@@ -9,6 +10,45 @@ import { ToolError } from "./tool-errors";
 const ULTRAGOAL_ASK_GUARD = Symbol.for("gajae-code.ultragoalAskGuard");
 
 type GuardedTool = AgentTool & { [ULTRAGOAL_ASK_GUARD]?: true };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isSingleRalplanUltragoalApproval(params: unknown): boolean {
+	if (!isRecord(params) || !Array.isArray(params.questions) || params.questions.length !== 1) return false;
+	const question = params.questions[0];
+	if (!isRecord(question) || question.multi === true || !isRecord(question.workflowGate)) return false;
+	if (question.workflowGate.stage !== "ralplan" || question.workflowGate.kind !== "approval") return false;
+	if (!Array.isArray(question.options)) return false;
+	return question.options.some(option => {
+		if (!isRecord(option) || typeof option.label !== "string") return false;
+		return option.label.trim().replace(/\s*\(Recommended\)\s*$/i, "") === "Approve execution via ultragoal";
+	});
+}
+
+async function isVerifiedRalplanUltragoalApproval(
+	cwd: string,
+	sessionId: string,
+	diagnostic: UltragoalAskBlockDiagnostic,
+	params: unknown,
+): Promise<boolean> {
+	if (
+		diagnostic.source !== "goals_json" ||
+		(!diagnostic.reason.includes("recorded review blockers") &&
+			!diagnostic.reason.includes("incomplete required goals")) ||
+		!isSingleRalplanUltragoalApproval(params)
+	)
+		return false;
+	try {
+		// The public workflowGate fields are routing hints only. The narrowly exempt
+		// ask also needs a runtime-verified current final publication for this caller.
+		await captureExecutionApprovalPresentation(cwd, sessionId, "ralplan");
+		return true;
+	} catch {
+		return false;
+	}
+}
 
 export interface UltragoalAskGuardContext {
 	/**
@@ -33,6 +73,7 @@ export async function assertUltragoalAskAllowed(
 	cwd: string,
 	context: UltragoalAskGuardContext = {},
 	agentDir?: string,
+	params?: unknown,
 ): Promise<void> {
 	// Durable Ultragoal state is session-scoped, so only the caller's own run may
 	// block `ask`. An anonymous caller has no run attributable to it, so the guard
@@ -43,6 +84,7 @@ export async function assertUltragoalAskAllowed(
 	if (!sessionId) return;
 	const diagnostic = await isUltragoalAskBlocked(cwd, { sessionId });
 	if (!diagnostic.active) return;
+	if (await isVerifiedRalplanUltragoalApproval(cwd, sessionId, diagnostic, params)) return;
 	const nudge = await consumeUltragoalAskNudge(cwd, sessionId, agentDir);
 	if (nudge.nudged) throw new ToolError(nudge.message);
 	throw new ToolError(formatUltragoalAskBlockMessage(diagnostic));
@@ -66,7 +108,7 @@ export function guardToolForUltragoalAsk<T extends AgentTool>(
 				// budget against the SESSION profile, never the process-global one.
 				// The caller session id is the only binding, so a foreign session's
 				// durable run can never gate this ask.
-				await assertUltragoalAskAllowed(getCwd(), getContext(), getSessionAgentDir());
+				await assertUltragoalAskAllowed(getCwd(), getContext(), getSessionAgentDir(), args[1]);
 				return Reflect.apply(target.execute, target, args);
 			};
 		},
