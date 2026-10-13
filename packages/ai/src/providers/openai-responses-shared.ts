@@ -18,6 +18,7 @@ import {
 	type AssistantMessage,
 	type ImageContent,
 	type Model,
+	parseResolvedServiceTier,
 	resolveServiceTier,
 	type ServiceTier,
 	type StopReason,
@@ -992,7 +993,8 @@ export async function processResponsesStream<TApi extends Api>(
 			populateResponsesUsageFromResponse(output, response?.usage);
 			calculateCost(model, output.usage);
 			// Apply service tier cost multiplier (ultrafast = 6x, priority = 2x, flex = 0.5x)
-			const multiplier = getResponsesServiceTierCostMultiplier(options?.serviceTier);
+			const effectiveServiceTier = parseResolvedServiceTier(response?.service_tier) ?? options?.serviceTier;
+			const multiplier = getResponsesServiceTierCostMultiplier(effectiveServiceTier);
 			if (multiplier !== 1) {
 				output.usage.cost.input *= multiplier;
 				output.usage.cost.output *= multiplier;

@@ -36,6 +36,7 @@ import {
 	modelSupportsUltrafastTier,
 	type OpenAICompat,
 	type ProviderSessionState,
+	parseResolvedServiceTier,
 	type RepetitionGuardOptions,
 	resolveServiceTier,
 	type ServiceTier,
@@ -697,7 +698,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
 			);
 			let disableStrictTools = providerSessionState?.strictToolsDisabled ?? false;
 			let strictFallbackErrorMessage: string | undefined;
-			let lastServiceTier: ServiceTier | undefined;
+			let effectiveServiceTier: ServiceTier | undefined;
 			const createCompletionsStream = async (toolStrictModeOverride?: ToolStrictModeOverride) => {
 				clearCapturedErrorResponse();
 				const effectiveToolStrictModeOverride = disableStrictTools ? "none" : toolStrictModeOverride;
@@ -720,7 +721,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
 					params = replacementPayload as typeof params;
 				}
 				// Capture the service tier for use in cost calculations
-				lastServiceTier = (params as Record<string, unknown>).service_tier as ServiceTier | undefined;
+				effectiveServiceTier = (params as Record<string, unknown>).service_tier as ServiceTier | undefined;
 				rawRequestDump = {
 					provider: model.provider,
 					api: output.api,
@@ -1153,7 +1154,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
 			let hasExplicitUsageReport = false;
 			let hasNonzeroUsageEvidence = false;
 			const applyUsage = (rawUsage: object): void => {
-				const usage = parseChunkUsage(rawUsage, model, premiumRequestsTotal, lastServiceTier);
+				const usage = parseChunkUsage(rawUsage, model, premiumRequestsTotal, effectiveServiceTier);
 				const hasExplicitTotal = getOptionalNumberProperty(rawUsage, "total_tokens") !== undefined;
 				const hasExplicitComponents =
 					getOptionalNumberProperty(rawUsage, "prompt_tokens") !== undefined &&
@@ -1191,6 +1192,8 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
 				// `choices`-less or malformed chunks after a trip never spends the
 				// budget and the request hangs open (#5627 review r5).
 				if (chunk && typeof chunk === "object") {
+					const responseServiceTier = parseResolvedServiceTier(Reflect.get(chunk, "service_tier"));
+					if (responseServiceTier !== undefined) effectiveServiceTier = responseServiceTier;
 					// OpenAI documents ChatCompletionChunk.id as the unique chat completion identifier,
 					// and each chunk in a streamed completion carries the same id.
 					output.responseId ||= chunk.id;

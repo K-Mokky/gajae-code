@@ -21,13 +21,11 @@ type UltrafastRestrictionError = { code: "ultrafast_tier_forbidden"; message: st
 function containsUltrafastServiceTier(value: unknown): boolean {
 	if (Array.isArray(value)) return value.some(containsUltrafastServiceTier);
 	if (!value || typeof value !== "object") return false;
-	if (
-		typeof (value as Record<string, unknown>).serviceTier === "string" &&
-		(value as Record<string, unknown>).serviceTier === "ultrafast"
-	) {
-		return true;
-	}
-	return Object.values(value as Record<string, unknown>).some(containsUltrafastServiceTier);
+	return Object.entries(value as Record<string, unknown>).some(
+		([key, nested]) =>
+			((key === "serviceTier" || key.endsWith(".serviceTier")) && nested === "ultrafast") ||
+			containsUltrafastServiceTier(nested),
+	);
 }
 
 function containsSecretField(value: unknown): boolean {

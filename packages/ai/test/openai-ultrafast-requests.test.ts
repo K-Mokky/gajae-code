@@ -15,7 +15,7 @@ const usage = {
 	input_tokens_details: { cached_tokens: 0 },
 };
 
-function completedResponseEvents(): unknown[] {
+function completedResponseEvents(serviceTier?: string): unknown[] {
 	return [
 		{
 			type: "response.output_item.added",
@@ -33,7 +33,39 @@ function completedResponseEvents(): unknown[] {
 				content: [{ type: "output_text", text: "ok" }],
 			},
 		},
-		{ type: "response.completed", response: { id: "resp_1", status: "completed", usage } },
+		{
+			type: "response.completed",
+			response: {
+				id: "resp_1",
+				status: "completed",
+				usage,
+				...(serviceTier === undefined ? {} : { service_tier: serviceTier }),
+			},
+		},
+	];
+}
+
+function completionsResponseEvents(serviceTier?: string): unknown[] {
+	const reportedTier = serviceTier === undefined ? {} : { service_tier: serviceTier };
+	return [
+		{
+			id: "chatcmpl_1",
+			object: "chat.completion.chunk",
+			created: 0,
+			model: "gpt-6-astra",
+			...reportedTier,
+			choices: [{ index: 0, delta: { content: "ok" }, finish_reason: "stop" }],
+		},
+		{
+			id: "chatcmpl_1",
+			object: "chat.completion.chunk",
+			created: 0,
+			model: "gpt-6-astra",
+			...reportedTier,
+			choices: [],
+			usage: { prompt_tokens: 5, completion_tokens: 1, total_tokens: 6 },
+		},
+		"[DONE]",
 	];
 }
 
@@ -96,6 +128,48 @@ describe("ultrafast request serialization for bundled models", () => {
 
 		expect(result.stopReason).toBe("stop");
 		expect(bodies[0]?.service_tier).toBe("ultrafast");
+	});
+
+	it("prices Responses usage using its effective tier and falls back when the response omits it", async () => {
+		const model = getBundledModel("opencode-zen", "gpt-6.1-sol") as Model<"openai-responses">;
+		const scenarios = [
+			{ requestedTier: "ultrafast", responseTier: "default", expectedCost: 0.00002 },
+			{ requestedTier: "priority", responseTier: "ultrafast", expectedCost: 0.00012 },
+			{ requestedTier: "ultrafast", responseTier: undefined, expectedCost: 0.00012 },
+		] as const;
+
+		for (const scenario of scenarios) {
+			const bodies = captureRequests(completedResponseEvents(scenario.responseTier));
+			const result = await streamOpenAIResponses(model, testContext, {
+				apiKey: "test-key",
+				serviceTier: scenario.requestedTier,
+			}).result();
+
+			expect(result.stopReason).toBe("stop");
+			expect(bodies[0]?.service_tier).toBe(scenario.requestedTier);
+			expect(result.usage.cost.total).toBeCloseTo(scenario.expectedCost, 12);
+		}
+	});
+
+	it("prices Completions usage using its effective tier and falls back when the response omits it", async () => {
+		const model = getBundledModel("github-copilot", "gpt-6-astra") as Model<"openai-completions">;
+		const scenarios = [
+			{ requestedTier: "ultrafast", responseTier: "default", expectedCost: 0.0001 },
+			{ requestedTier: "priority", responseTier: "ultrafast", expectedCost: 0.0006 },
+			{ requestedTier: "ultrafast", responseTier: undefined, expectedCost: 0.0006 },
+		] as const;
+
+		for (const scenario of scenarios) {
+			const bodies = captureRequests(completionsResponseEvents(scenario.responseTier));
+			const result = await streamOpenAICompletions(model, testContext, {
+				apiKey: "ghu_test_copilot_token",
+				serviceTier: scenario.requestedTier,
+			}).result();
+
+			expect(result.stopReason).toBe("stop");
+			expect(bodies[0]?.service_tier).toBe(scenario.requestedTier);
+			expect(result.usage.cost.total).toBeCloseTo(scenario.expectedCost, 12);
+		}
 	});
 
 	it("sends ultrafast for a Codex catalog model explicitly opted into the tier", async () => {

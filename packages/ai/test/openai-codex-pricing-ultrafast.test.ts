@@ -5,7 +5,7 @@ import { modelSupportsUltrafastTier } from "../src/types";
 // These tests validate that the ultrafast service tier pricing multiplier
 // is correctly applied in the OpenAI Codex responses provider.
 // The multiplier is 6x the standard pricing for ultrafast tier.
-// Additionally, gpt-5.6-sol (Fast-only) and Codex variants are excluded from ultrafast support.
+// gpt-5.6-sol is Fast-only and excluded from ultrafast support.
 
 describe("OpenAI Codex ultrafast pricing", () => {
 	test("ultrafast multiplier is 6x", () => {
@@ -62,34 +62,19 @@ describe("Codex gpt-5.6-sol ultrafast exclusion", () => {
 		}
 	});
 
-	test("gpt-6-astra and gpt-6.1-sol support ultrafast (except Codex)", async () => {
+	test("gpt-6-astra and gpt-6.1-sol support ultrafast on each bundled provider", async () => {
 		const providers = getBundledProviders();
 		for (const provider of providers) {
 			const providerModels = getBundledModels(provider as never);
-			if (provider === "openai-codex") {
-				// Codex should not have ultrafast support at all
-				const codexGpt6Astra = providerModels.find(m => m.id === "gpt-6-astra");
-				if (codexGpt6Astra) {
-					const supportsUltrafast = modelSupportsUltrafastTier(codexGpt6Astra);
-					expect(supportsUltrafast).toBe(false);
-				}
-				const codexGpt61Sol = providerModels.find(m => m.id === "gpt-6.1-sol");
-				if (codexGpt61Sol) {
-					const supportsUltrafast = modelSupportsUltrafastTier(codexGpt61Sol);
-					expect(supportsUltrafast).toBe(false);
-				}
-			} else {
-				// Non-Codex providers should have ultrafast support for gpt-6-astra and gpt-6.1-sol
-				const gpt6Astra = providerModels.find(m => m.id === "gpt-6-astra");
-				if (gpt6Astra) {
-					const supportsUltrafast = modelSupportsUltrafastTier(gpt6Astra);
-					expect(supportsUltrafast).toBe(true);
-				}
-				const gpt61Sol = providerModels.find(m => m.id === "gpt-6.1-sol");
-				if (gpt61Sol) {
-					const supportsUltrafast = modelSupportsUltrafastTier(gpt61Sol);
-					expect(supportsUltrafast).toBe(true);
-				}
+			const gpt6Astra = providerModels.find(m => m.id === "gpt-6-astra");
+			if (gpt6Astra) {
+				const supportsUltrafast = modelSupportsUltrafastTier(gpt6Astra);
+				expect(supportsUltrafast).toBe(true);
+			}
+			const gpt61Sol = providerModels.find(m => m.id === "gpt-6.1-sol");
+			if (gpt61Sol) {
+				const supportsUltrafast = modelSupportsUltrafastTier(gpt61Sol);
+				expect(supportsUltrafast).toBe(true);
 			}
 		}
 	});

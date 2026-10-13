@@ -273,6 +273,21 @@ export type ServiceTier =
 /** Resolved tier — one of the values that providers actually consume on the wire. */
 export type ResolvedServiceTier = Exclude<ServiceTier, "openai-only" | "claude-only">;
 
+/** Parse a provider-reported service tier, leaving unknown response values for request fallback. */
+export function parseResolvedServiceTier(value: unknown): ResolvedServiceTier | undefined {
+	switch (value) {
+		case "auto":
+		case "default":
+		case "flex":
+		case "scale":
+		case "priority":
+		case "ultrafast":
+			return value;
+		default:
+			return undefined;
+	}
+}
+
 /**
  * Resolves a possibly scoped `ServiceTier` to the effective tier for the
  * given provider. Scoped values match their target family and otherwise
@@ -1207,7 +1222,7 @@ export interface OpenAICompat extends ToolChoiceCompat {
 	/**
 	 * Whether the model explicitly supports the ultrafast service tier (6x premium tier).
 	 * Only models that set this flag will send ultrafast tier to the API.
-	 * Models: gpt-6-astra, gpt-6.1-sol, gpt-5.6-sol (preview).
+	 * Models: gpt-6-astra and gpt-6.1-sol.
 	 */
 	supportsUltrafastTier?: boolean;
 	/**

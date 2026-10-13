@@ -25,6 +25,13 @@ describe("validateAdapterSecretFields - ultrafast tier restriction", () => {
 		expect(result?.code).toBe("ultrafast_tier_forbidden");
 	});
 
+	test("rejects config.patch with a dotted task.serviceTier key", () => {
+		const result = validateAdapterSecretFields("config.patch", {
+			patch: { "task.serviceTier": "ultrafast" },
+		});
+		expect(result?.code).toBe("ultrafast_tier_forbidden");
+	});
+
 	test("rejects config.patch with serviceTier ultrafast in array", () => {
 		const result = validateAdapterSecretFields("config.patch", {
 			items: [
