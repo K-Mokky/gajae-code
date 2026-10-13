@@ -344,7 +344,7 @@ export class PromptImageUploadStore {
 	}
 	#renewBatch(owner: string, id: string, current: Upload): void {
 		this.#reapExpired();
-		if (this.#uploads.get(id) !== current) return;
+		if (this.#uploads.get(id) !== current) throw new TypedControlError("resource_gone", "Image upload expired.");
 		if (current.batchId === undefined) {
 			this.#resetLease(id, current);
 			return;

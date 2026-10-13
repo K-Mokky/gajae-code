@@ -504,16 +504,16 @@ test("elapsed leases allow access at 119999 ms and reject append, finish, discar
 				now = 0;
 				const store = new PromptImageUploadStore(alwaysConnected);
 				try {
-					const id = operation === "redeem"
-						? await stage(store, "sender", bytes)
-						: operation === "finish"
-							? upload(store, "sender", bytes)
-							: store.begin("sender", descriptor(bytes)).id;
+					const id =
+						operation === "redeem"
+							? await stage(store, "sender", bytes)
+							: operation === "finish"
+								? upload(store, "sender", bytes)
+								: store.begin("sender", descriptor(bytes)).id;
 					now = elapsed;
 					if (operation === "finish") {
 						const finishing = store.finish("sender", { id });
-						if (elapsed === 120_000)
-							await expect(finishing).rejects.toMatchObject({ code: "resource_gone" });
+						if (elapsed === 120_000) await expect(finishing).rejects.toMatchObject({ code: "resource_gone" });
 						else await expect(finishing).resolves.toMatchObject({ id, mimeType: "image/png" });
 					} else if (operation === "redeem") {
 						if (elapsed === 120_000)
@@ -530,13 +530,11 @@ test("elapsed leases allow access at 119999 ms and reject append, finish, discar
 						}
 					} else if (operation === "append") {
 						const append = () => store.append("sender", { id, sequence: 0, data: bytes.toString("base64") });
-						if (elapsed === 120_000)
-							expect(append).toThrow(expect.objectContaining({ code: "resource_gone" }));
+						if (elapsed === 120_000) expect(append).toThrow(expect.objectContaining({ code: "resource_gone" }));
 						else expect(append()).toEqual({ id, nextSequence: 1, receivedBytes: bytes.length });
 					} else {
 						const discard = () => store.discard("sender", { id });
-						if (elapsed === 120_000)
-							expect(discard).toThrow(expect.objectContaining({ code: "resource_gone" }));
+						if (elapsed === 120_000) expect(discard).toThrow(expect.objectContaining({ code: "resource_gone" }));
 						else expect(discard()).toEqual({ discarded: true });
 					}
 				} finally {
@@ -545,6 +543,52 @@ test("elapsed leases allow access at 119999 ms and reject append, finish, discar
 			}
 		}
 	} finally {
+		clock.mockRestore();
+	}
+});
+
+test("append rejects when the current lease expires between owned access and renewal", () => {
+	const clock = vi.spyOn(performance, "now").mockReturnValue(0);
+	const store = new PromptImageUploadStore(alwaysConnected);
+	const bytes = tinyPng();
+	try {
+		const { id } = store.begin("sender", descriptor(bytes));
+		const reads: number[] = [];
+		clock.mockImplementation(() => {
+			const now = reads.length === 0 ? 119_999 : 120_000;
+			reads.push(now);
+			return now;
+		});
+		expect(() => store.append("sender", { id, sequence: 0, data: bytes.toString("base64") })).toThrow(
+			expect.objectContaining({ code: "resource_gone" }),
+		);
+		// Owned access passes; renewal reaps the current upload instead of returning success.
+		expect(reads).toEqual([119_999, 120_000]);
+		expect(() => store.redeem("sender", [{ id }])).toThrow(expect.objectContaining({ code: "resource_gone" }));
+	} finally {
+		store.close();
+		clock.mockRestore();
+	}
+});
+
+test("finish rejects when the current lease expires between post-decode validation and renewal", async () => {
+	const clock = vi.spyOn(performance, "now").mockReturnValue(0);
+	const store = new PromptImageUploadStore(alwaysConnected);
+	const bytes = tinyPng();
+	try {
+		const id = upload(store, "sender", bytes);
+		const reads: number[] = [];
+		clock.mockImplementation(() => {
+			const now = reads.length < 2 ? 119_999 : 120_000;
+			reads.push(now);
+			return now;
+		});
+		await expect(store.finish("sender", { id })).rejects.toMatchObject({ code: "resource_gone" });
+		// Owned access and post-decode validation pass; renewal reaps the current upload.
+		expect(reads).toEqual([119_999, 119_999, 120_000]);
+		expect(() => store.redeem("sender", [{ id }])).toThrow(expect.objectContaining({ code: "resource_gone" }));
+	} finally {
+		store.close();
 		clock.mockRestore();
 	}
 });
@@ -568,7 +612,10 @@ test("elapsed batch siblings cannot be revived by begin, append or finish and re
 		const progress = upload(store, "sender", bytes, "shared");
 		await store.finish("sender", { id: progress });
 		now = 240_000;
-		for (const [owner, id] of [["sender", otherBatch], ["other", otherOwner]] as const)
+		for (const [owner, id] of [
+			["sender", otherBatch],
+			["other", otherOwner],
+		] as const)
 			expect(() => store.redeem(owner, [{ id }])).toThrow(expect.objectContaining({ code: "resource_gone" }));
 		const accepted = store.redeem("sender", [{ id: current }, { id: progress }]);
 		try {
@@ -614,10 +661,16 @@ test("mixed valid and elapsed redemption leaves the valid image unconsumed", asy
 		now = 1;
 		const valid = await stage(store, "sender", bytes);
 		now = 120_000;
-		for (const ids of [[valid, expired], [expired, valid]])
-			expect(() => store.redeem("sender", ids.map(id => ({ id })))).toThrow(
-				expect.objectContaining({ code: "resource_gone" }),
-			);
+		for (const ids of [
+			[valid, expired],
+			[expired, valid],
+		])
+			expect(() =>
+				store.redeem(
+					"sender",
+					ids.map(id => ({ id })),
+				),
+			).toThrow(expect.objectContaining({ code: "resource_gone" }));
 		const accepted = store.redeem("sender", [{ id: valid }]);
 		try {
 			expect(Buffer.from(accepted.images[0]!.data, "base64").equals(bytes)).toBe(true);
