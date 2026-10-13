@@ -20,6 +20,7 @@ const FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})(.*)$/;
 const SVG_TEXT = /svg/i;
 const MAX_SVG_SOURCE_BYTES = 1024 * 1024;
 const MAX_SVG_ELEMENTS = 20_000;
+const MAX_SVG_NESTING_DEPTH = 256;
 const MAX_SVG_ATTRIBUTES_PER_ELEMENT = 64;
 const MAX_CSS_FUNCTION_DEPTH = 32;
 const svgMarkdownParser = new Marked();
@@ -290,6 +291,7 @@ function validateSvgSource(svg: string): void {
 	}
 
 	let elements = 0;
+	let depth = 0;
 	let index = 0;
 	while (index < svg.length) {
 		const lt = svg.indexOf("<", index);
@@ -310,7 +312,9 @@ function validateSvgSource(svg: string): void {
 		const end = constructEnd(svg, lt);
 		if (end < 0) break;
 		const tag = svg.slice(lt, end);
-		if (!/^<\s*\//.test(tag) && /^<\s*[^!?/\s>]/.test(tag)) {
+		const closing = /^<\s*\//.test(tag);
+		const startTag = !closing && /^<\s*[^!?/\s>]/.test(tag);
+		if (startTag) {
 			elements++;
 			if (elements > MAX_SVG_ELEMENTS) {
 				throw new Error(`SVG source exceeds the ${MAX_SVG_ELEMENTS}-element limit`);
@@ -319,6 +323,14 @@ function validateSvgSource(svg: string): void {
 			if (attributes > MAX_SVG_ATTRIBUTES_PER_ELEMENT) {
 				throw new Error(`SVG elements may not have more than ${MAX_SVG_ATTRIBUTES_PER_ELEMENT} attributes`);
 			}
+			if (!/\/\s*>$/.test(tag)) {
+				depth++;
+				if (depth > MAX_SVG_NESTING_DEPTH) {
+					throw new Error(`SVG source exceeds the ${MAX_SVG_NESTING_DEPTH}-element nesting limit`);
+				}
+			}
+		} else if (closing) {
+			depth = Math.max(0, depth - 1);
 		}
 		index = end;
 	}

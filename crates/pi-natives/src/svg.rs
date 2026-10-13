@@ -21,6 +21,7 @@ use crate::task;
 const MAX_RENDER_PIXELS: u64 = 16 * 1024 * 1024;
 const MAX_SVG_SOURCE_BYTES: usize = 1024 * 1024;
 const MAX_SVG_ELEMENTS: usize = 20_000;
+const MAX_SVG_NESTING_DEPTH: usize = 256;
 const MAX_SVG_ATTRIBUTES_PER_ELEMENT: usize = 64;
 
 static FONT_DB: LazyLock<Arc<usvg::fontdb::Database>> = LazyLock::new(|| {
@@ -175,6 +176,7 @@ fn validate_svg_source(input: &[u8]) -> Result<()> {
 	}
 
 	let mut element_count = 0;
+	let mut depth: usize = 0;
 	let mut index = 0;
 	while index < input.len() {
 		let Some(offset) = input[index..].iter().position(|byte| *byte == b'<') else {
@@ -254,6 +256,22 @@ fn validate_svg_source(input: &[u8]) -> Result<()> {
 		}
 		if cursor == input.len() {
 			return Err(napi::Error::from_reason("Malformed SVG start tag"));
+		}
+		if closing {
+			depth = depth.saturating_sub(1);
+		} else {
+			let mut tag_end = cursor;
+			while tag_end > lt && is_xml_space(input[tag_end - 1]) {
+				tag_end -= 1;
+			}
+			if tag_end == lt || input[tag_end - 1] != b'/' {
+				depth += 1;
+				if depth > MAX_SVG_NESTING_DEPTH {
+					return Err(napi::Error::from_reason(format!(
+						"SVG source exceeds the {MAX_SVG_NESTING_DEPTH}-element nesting limit"
+					)));
+				}
+			}
 		}
 		index = cursor + 1;
 	}
@@ -359,6 +377,20 @@ mod tests {
 			error
 				.reason
 				.contains(&format!("{MAX_SVG_ELEMENTS}-element limit"))
+		);
+	}
+
+	#[test]
+	fn rejects_excessive_element_nesting_before_xml_parsing() {
+		let nested = "<g>".repeat(MAX_SVG_NESTING_DEPTH);
+		let closing = "</g>".repeat(MAX_SVG_NESTING_DEPTH);
+		let svg = format!("<svg>{nested}<rect/>{closing}</svg>");
+		let error =
+			rasterize_svg_sync(svg.as_bytes(), 100, 100).expect_err("element nesting is bounded");
+		assert!(
+			error
+				.reason
+				.contains(&format!("{MAX_SVG_NESTING_DEPTH}-element nesting limit"))
 		);
 	}
 

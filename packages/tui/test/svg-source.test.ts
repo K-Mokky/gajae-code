@@ -191,6 +191,9 @@ describe("prepareSvg", () => {
 			const attributes = Array.from({ length: 65 }, (_, index) => `data-${index}="x"`).join(" ");
 			expect(() => prepareSvg(`<svg ${attributes}/>`, palette)).toThrow(/more than 64 attributes/);
 			expect(() => prepareSvg(`<svg>${"<rect/>".repeat(20_000)}</svg>`, palette)).toThrow(/element limit/);
+			expect(() => prepareSvg(`<svg>${"<g>".repeat(256)}<rect/>${"</g>".repeat(256)}</svg>`, palette)).toThrow(
+				/nesting limit/,
+			);
 		});
 
 		it("rejects deeply nested CSS variable fallbacks before repeated rescans", () => {
