@@ -6067,22 +6067,42 @@ export class ModelRegistry {
 
 	/** Environment variable name for a provider API key configured in models.yml. */
 	getProviderConfigApiKeyEnvName(provider: string): string | undefined {
-		const configured = this.#acceptedConfigValue?.providers?.[provider];
+		const normalizedProvider = resolveOAuthStorageProvider(provider);
+		const configuredProviders = this.#acceptedConfigValue?.providers;
+		const configured =
+			configuredProviders?.[provider] ??
+			Object.entries(configuredProviders ?? {}).find(
+				([configuredProvider]) => resolveOAuthStorageProvider(configuredProvider) === normalizedProvider,
+			)?.[1];
 		if (configured?.apiKey && Bun.env[configured.apiKey]) return configured.apiKey;
 		if (configured?.openaiCompat?.apiKey && Bun.env[configured.openaiCompat.apiKey]) {
 			return configured.openaiCompat.apiKey;
 		}
-		return this.#customProviderApiKeyEnvNames.get(provider);
+		return (
+			this.#customProviderApiKeyEnvNames.get(provider) ??
+			[...this.#customProviderApiKeyEnvNames].find(
+				([configuredProvider]) => resolveOAuthStorageProvider(configuredProvider) === normalizedProvider,
+			)?.[1]
+		);
 	}
 
 	/** Environment variable name for a provider API key supplied by runtime setup. */
 	getProviderRuntimeApiKeyEnvName(provider: string): string | undefined {
-		return this.#runtimeProviderApiKeyEnvNames.get(provider);
+		const normalizedProvider = resolveOAuthStorageProvider(provider);
+		return (
+			this.#runtimeProviderApiKeyEnvNames.get(provider) ??
+			[...this.#runtimeProviderApiKeyEnvNames].find(
+				([registeredProvider]) => resolveOAuthStorageProvider(registeredProvider) === normalizedProvider,
+			)?.[1]
+		);
 	}
 
-	/** Whether a provider API key was registered by a runtime extension. */
+	/** Whether a runtime extension's provider API key is currently installed in AuthStorage. */
 	hasRuntimeProviderApiKey(provider: string): boolean {
-		return this.#runtimeProviderApiKeys.has(provider);
+		const normalizedProvider = resolveOAuthStorageProvider(provider);
+		return [...this.#runtimeProviderCredentialInstalled].some(
+			registeredProvider => resolveOAuthStorageProvider(registeredProvider) === normalizedProvider,
+		);
 	}
 
 	/**

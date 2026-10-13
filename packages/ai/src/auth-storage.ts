@@ -2413,6 +2413,14 @@ export class AuthStorage {
 		return candidate.credential.key.startsWith("!") && usable !== true ? undefined : candidate.id;
 	}
 
+	/** Cached usability of a stored API key; never resolves command-backed values. */
+	getStoredApiKeyUsability(provider: string, rowId: number): boolean | undefined {
+		const storageProvider = resolveOAuthStorageProvider(provider);
+		const entry = this.#getStoredCredentials(storageProvider).find(candidate => candidate.id === rowId);
+		if (entry?.credential.type !== "api_key") return undefined;
+		return this.#storedApiKeyUsability(storageProvider, entry.credential.key);
+	}
+
 	/** Whether an enabled stored row is currently available outside quota backoff. */
 	isCredentialAvailable(provider: string, rowId: number): boolean {
 		const storageProvider = resolveOAuthStorageProvider(provider);

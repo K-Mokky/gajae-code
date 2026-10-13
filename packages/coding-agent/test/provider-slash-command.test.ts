@@ -270,6 +270,44 @@ describe("provider slash command", () => {
 		}
 	});
 
+	it("reports the fallback after a stored command key is known unusable", async () => {
+		tempAgentDir = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-provider-slash-"));
+		setAgentDir(tempAgentDir);
+		const originalOpenAiKey = Bun.env.OPENAI_API_KEY;
+		Bun.env.OPENAI_API_KEY = "openai-fallback-secret-test-value";
+		try {
+			const authStorage = await AuthStorage.create(path.join(tempAgentDir, "auth.db"), {
+				configValueResolver: async () => undefined,
+			});
+			authStorages.push(authStorage);
+			await authStorage.set("openai", { type: "api_key", key: "!empty-command-key-secret" });
+			const registry = new ModelRegistry(authStorage, path.join(tempAgentDir, "models.yml"));
+			modelRegistries.push(registry);
+			const command = BUILTIN_SLASH_COMMANDS_INTERNAL.find(entry => entry.name === "provider");
+			const sessionId = "unusable-command-key-session";
+			const status = async (): Promise<string> => {
+				const outputs: string[] = [];
+				await command?.handle?.({ name: "provider", args: "status", text: "/provider status" }, {
+					session: { modelRegistry: registry, credentialSessionId: sessionId },
+					output: (text: string) => outputs.push(text),
+				} as unknown as SlashCommandRuntime);
+				return outputs.join("\n");
+			};
+
+			const beforeResolution = await status();
+			expect(beforeResolution).toContain("openai: API key (stored credential; usability pending)");
+			expect(beforeResolution).not.toContain("empty-command-key-secret");
+			await authStorage.getApiKey("openai", sessionId);
+			const afterResolution = await status();
+			expect(afterResolution).toContain("openai: API key (env OPENAI_API_KEY)");
+			expect(afterResolution).not.toContain("openai-fallback-secret-test-value");
+			expect(afterResolution).not.toContain("empty-command-key-secret");
+		} finally {
+			if (originalOpenAiKey === undefined) delete Bun.env.OPENAI_API_KEY;
+			else Bun.env.OPENAI_API_KEY = originalOpenAiKey;
+		}
+	});
+
 	it("reports the configured --api-key-env name instead of its value", async () => {
 		tempAgentDir = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-provider-slash-"));
 		setAgentDir(tempAgentDir);
@@ -332,10 +370,28 @@ describe("provider slash command", () => {
 					},
 				],
 			};
+			modelsConfig.providers["openai-codex-device"] = {
+				api: "openai-completions",
+				baseUrl: "https://codex-alias-proxy.example.test/v1",
+				apiKeyEnv: TEST_PROVIDER_KEY_ENV,
+				models: [
+					{
+						id: "codex-alias-proxy-model",
+						name: "Codex Alias Proxy Model",
+						reasoning: false,
+						input: ["text"],
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+						contextWindow: 100_000,
+						maxTokens: 8_000,
+					},
+				],
+			};
 			await Bun.write(path.join(tempAgentDir, "models.yml"), YAML.stringify(modelsConfig));
 			await registry.refresh("offline");
 			const legacyStatus = await status();
 			expect(legacyStatus).toContain(`status-legacy: API key (env ${TEST_PROVIDER_KEY_ENV})`);
+			expect(legacyStatus).toContain(`openai-codex: API key (env ${TEST_PROVIDER_KEY_ENV})`);
+			expect(legacyStatus).not.toContain("openai-codex-device:");
 			expect(legacyStatus).not.toContain("custom-provider-secret-test-value");
 
 			delete Bun.env[TEST_PROVIDER_KEY_ENV];
@@ -382,6 +438,21 @@ describe("provider slash command", () => {
 			const runtimeStatus = await status();
 			expect(runtimeStatus).toContain(`status-runtime: API key (env ${TEST_PROVIDER_KEY_ENV})`);
 			expect(runtimeStatus).not.toContain("custom-provider-secret-test-value");
+
+			await authStorage.set("status-runtime", {
+				type: "oauth",
+				access: "runtime-oauth-secret",
+				refresh: "runtime-oauth-refresh-secret",
+				expires: Date.now() + 60 * 60_000,
+				accountId: "runtime-oauth-account",
+			});
+			delete Bun.env[TEST_PROVIDER_KEY_ENV];
+			const runtimeEnvRemovedStatus = await status();
+			expect(runtimeEnvRemovedStatus).toContain("status-runtime: OAuth (account runtime-oauth-account)");
+			expect(runtimeEnvRemovedStatus).not.toContain(`API key (env ${TEST_PROVIDER_KEY_ENV})`);
+			Bun.env[TEST_PROVIDER_KEY_ENV] = "custom-provider-secret-test-value";
+			const runtimeEnvRestoredStatus = await status();
+			expect(runtimeEnvRestoredStatus).toContain(`status-runtime: API key (env ${TEST_PROVIDER_KEY_ENV})`);
 
 			await authStorage.set("status-command", { type: "api_key", key: "!empty-command-key-secret" });
 			const commandKeyStatus = await status();

@@ -80,17 +80,28 @@ function addSource(sources: CredentialSource[], source: CredentialSource): void 
 }
 
 function storedApiKeySource(
+	authStorage: ProviderAuthStatusSession["modelRegistry"]["authStorage"],
+	provider: string,
 	entries: AuthCredentialSnapshotEntry[],
 	rowId: number | undefined,
 ): Omit<CredentialSource, "kind"> | undefined {
 	const apiKeys = entries.filter(entry => entry.credential.type === "api_key");
 	const selected = rowId === undefined ? undefined : apiKeys.find(entry => entry.id === rowId);
 	if (selected) return { layer: "stored", label: `API key (stored credential id:${selected.id})` };
-	if (apiKeys.some(entry => entry.credential.type === "api_key" && entry.credential.key.startsWith("!"))) {
+	const unknownCommandKey = apiKeys.some(
+		entry =>
+			entry.credential.type === "api_key" &&
+			entry.credential.key.startsWith("!") &&
+			authStorage.getStoredApiKeyUsability(provider, entry.id) === undefined,
+	);
+	if (unknownCommandKey) {
 		return { layer: "pending", label: "API key (stored credential; usability pending)" };
 	}
-	if (apiKeys.length === 1) return { layer: "stored", label: `API key (stored credential id:${apiKeys[0]!.id})` };
-	if (apiKeys.length > 1) return { layer: "pending", label: "API key (stored credential; selection pending)" };
+	const usableApiKeys = apiKeys.filter(entry => authStorage.getStoredApiKeyUsability(provider, entry.id) !== false);
+	if (usableApiKeys.length === 1) {
+		return { layer: "stored", label: `API key (stored credential id:${usableApiKeys[0]!.id})` };
+	}
+	if (usableApiKeys.length > 1) return { layer: "pending", label: "API key (stored credential; selection pending)" };
 	return undefined;
 }
 
@@ -101,11 +112,13 @@ function collectSources(
 	owner: object,
 ): CredentialSource[] {
 	const sources: CredentialSource[] = [];
+	const authStorage = registry.authStorage;
 	const envProvider = resolveOAuthStorageProvider(provider);
 	for (const entry of entries) {
 		if (entry.credential.type === "oauth") {
 			addSource(sources, { kind: "oauth", layer: "stored", label: oauthLabel(entry) });
 		} else {
+			if (authStorage.getStoredApiKeyUsability(provider, entry.id) === false) continue;
 			addSource(sources, {
 				kind: "api_key",
 				layer: "stored",
@@ -114,7 +127,6 @@ function collectSources(
 		}
 	}
 
-	const authStorage = registry.authStorage;
 	if (authStorage.hasRuntimeApiKey(provider)) {
 		const envName = registry.getProviderRuntimeApiKeyEnvName(provider);
 		addSource(sources, {
@@ -193,7 +205,7 @@ function activeSource(
 		const envName = session.modelRegistry.getProviderConfigApiKeyEnvName(provider);
 		if (!authStorage.hasLiteralConfigApiKey(provider, owner)) {
 			const rowId = authStorage.getProspectiveApiKeyCredentialRowId(provider, sessionId, { owner });
-			const storedSource = storedApiKeySource(entries, rowId);
+			const storedSource = storedApiKeySource(authStorage, provider, entries, rowId);
 			if (storedSource) return { kind: "api_key", ...storedSource };
 		}
 		return {
@@ -203,7 +215,7 @@ function activeSource(
 		};
 	}
 	const rowId = authStorage.getProspectiveApiKeyCredentialRowId(provider, sessionId, { owner });
-	const storedSource = storedApiKeySource(entries, rowId);
+	const storedSource = storedApiKeySource(authStorage, provider, entries, rowId);
 	if (storedSource) return { kind: "api_key", ...storedSource };
 
 	const envProvider = resolveOAuthStorageProvider(provider);
