@@ -143,7 +143,11 @@ test("thinking.set uses the control setter and reports the applied session level
 	const transport = memoryTransport(frame => {
 		if (frame.type === "control_response" && frame.id === "thinking-set") response.resolve(frame);
 	});
-	createSdkSessionRuntimeExtension(api, { agentDir: cwd, createTransport: async () => transport });
+	createSdkSessionRuntimeExtension(api, {
+		agentDir: cwd,
+		ensureBrokerImpl: async () => testBrokerDiscovery,
+		createTransport: async () => transport,
+	});
 	const ctx = extensionContext(transport.sessionId, cwd);
 	try {
 		await handlers.get("session_start")?.({}, ctx);
@@ -4443,7 +4447,10 @@ describe("SessionSdkSessionRuntime", () => {
 function createTestRuntimeExtension(api: ExtensionAPI, options: CreateSdkSessionRuntimeOptions): void {
 	createSdkSessionRuntimeExtension(api, {
 		...options,
-		ensureBrokerImpl: options.ensureBrokerImpl ?? (async () => testBrokerDiscovery),
+		ensureBrokerImpl: async input => {
+			if (options.ensureBrokerImpl) return await options.ensureBrokerImpl(input);
+			return testBrokerDiscovery;
+		},
 	});
 }
 
@@ -8794,7 +8801,9 @@ describe("accepted-control zero-execution bound (#4668)", () => {
 								: key === "sdk.flushWorktreeOnDeadline"
 									? true
 									: undefined,
-					has: (key: string) => key === "sdk.flushWorktreeOnDeadline",
+					// Primary checkout: only a user/global true opts in. `has()` would
+					// also be true for a project file, which must not authorize this.
+					getGlobal: (key: string) => (key === "sdk.flushWorktreeOnDeadline" ? true : undefined),
 					getAgentDir: () => path.join(cwd, ".gjc", "agent"),
 				} as unknown as Settings,
 				sendUserMessage: async (_content, options) => {
@@ -9003,8 +9012,11 @@ describe("accepted-control zero-execution bound (#4668)", () => {
 			expect(await harness.query("turn.prompt_status", queuedIds)).toMatchObject({ result: { status: "accepted" } });
 			expect(abortCalls).toBe(0);
 			expect(correlatedFrames(harness, queuedIds).filter(frame => frame.kind === "agent_failed")).toHaveLength(0);
-			promoted?.({ startsOwnRun: true });
+			// The lease is captured when the follow-up is promoted, not when the
+			// setting later changes. Restore the long deadline first so this run
+			// does not inherit the 100ms queue probe and expire under settledStatus.
 			promptDeadlineMs = 600_000;
+			promoted?.({ startsOwnRun: true });
 			await Bun.sleep(150);
 			expect((await harness.query("turn.prompt_status", queuedIds)).result?.status).toMatch(/accepted|in_flight/);
 			expect(await harness.query("turn.prompt_status", activeIds)).toMatchObject({
@@ -11489,6 +11501,7 @@ test.each([
 	let transportCreations = 0;
 	createSdkSessionRuntimeExtension(api, {
 		agentDir: cwd,
+		ensureBrokerImpl: async () => testBrokerDiscovery,
 		createTransport: async () => {
 			transportCreations++;
 			return transport;
@@ -11665,6 +11678,7 @@ test.each([
 			get: (key: string) =>
 				key === "sdk.promptDeadlineMs" ? 1_500 : key === "sdk.promptMaxRuntimeMs" ? 15_000 : undefined,
 		} as unknown as Settings,
+		ensureBrokerImpl: async () => testBrokerDiscovery,
 		createTransport: async () => {
 			creations++;
 			transport = memoryTransport();
