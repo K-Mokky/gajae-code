@@ -758,7 +758,9 @@ function validateProviderConfiguration(
 		}
 	}
 	if (config.streamIdleTimeoutMs !== undefined) {
-		if (configuredApi) {
+		if (models.length === 0 && !config.discovery && getKnownProviderApis(providerName).size > 0) {
+			assertStreamIdleTimeoutSupportedForKnownProvider(providerName, '"streamIdleTimeoutMs"');
+		} else if (configuredApi) {
 			if (!isRequestTransformApi(configuredApi)) {
 				throw new Error(
 					`Provider ${providerName}: "streamIdleTimeoutMs" is only supported with openai-completions or openai-responses APIs.`,

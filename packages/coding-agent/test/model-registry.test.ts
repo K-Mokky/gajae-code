@@ -6651,6 +6651,22 @@ describe("ModelRegistry", () => {
 		);
 	});
 
+	test("validates provider stream idle timeouts against bundled APIs before provider API overrides", () => {
+		writeRawModelsConfig({
+			providers: {
+				anthropic: {
+					api: "openai-completions",
+					streamIdleTimeoutMs: 300_000,
+				},
+			},
+		});
+
+		const registry = new ModelRegistry(authStorage, modelsJsonPath);
+		expect(String(registry.getError()?.message)).toContain(
+			'"streamIdleTimeoutMs" is only supported with openai-completions or openai-responses APIs',
+		);
+	});
+
 	test("applies provider stream idle timeouts only to OpenAI models in mixed built-ins", () => {
 		writeRawModelsConfig({
 			providers: {
