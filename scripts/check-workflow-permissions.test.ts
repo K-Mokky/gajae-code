@@ -277,13 +277,13 @@ describe("workflow permission policy", () => {
 		expect(!REQUIRED_READ_DEFAULT.includes(RE_REVIEW_WORKFLOW)).toBe(true);
 	});
 
-	test("skips deleted-author reviews and still discovers later reviewers", async () => {
+	test("skips deleted-author and PR-author reviews while discovering other reviewers", async () => {
 		const source = await parsedWorkflow(RE_REVIEW_WORKFLOW);
 		const jobs = documentRecord(source.jobs);
 		const steps = documentRecord(jobs["request-review-on-comment"]).steps as unknown[];
 		const getReviewers = steps.map(documentRecord).find(step => step.id === "get-reviewers");
 		const reviewerScript = documentRecord(documentRecord(getReviewers).with).script as string;
-		const helper = reviewerScript.match(/function latestReviewByUser\(reviews\) \{[\s\S]*?^\}/m);
+		const helper = reviewerScript.match(/function latestReviewByUser\(reviews, prAuthor\) \{[\s\S]*?^\}/m);
 		expect(helper).not.toBeNull();
 
 		type Review = {
@@ -293,19 +293,64 @@ describe("workflow permission policy", () => {
 		};
 		const createLatestReviewByUser = new Function(
 			`${helper?.[0]}\nreturn latestReviewByUser;`,
-		) as () => (reviews: Review[]) => Map<string, Review>;
+		) as () => (reviews: Review[], prAuthor: string | undefined) => Map<string, Review>;
 		const latestReviewByUser = createLatestReviewByUser();
 
 		const selected = latestReviewByUser([
 			{ user: null, state: "COMMENTED", submitted_at: "2026-10-13T00:00:00Z" },
 			{
+				user: { login: "pr-author", type: "User" },
+				state: "COMMENTED",
+				submitted_at: "2026-10-13T00:00:30Z",
+			},
+			{
 				user: { login: "eligible-reviewer", type: "User" },
 				state: "COMMENTED",
 				submitted_at: "2026-10-13T00:01:00Z",
 			},
-		]);
+		], "pr-author");
 
 		expect([...selected.keys()]).toEqual(["eligible-reviewer"]);
+	});
+
+	test("allows maintainers to authorize re-review when the pull request author is deleted", async () => {
+		const source = await parsedWorkflow(RE_REVIEW_WORKFLOW);
+		const jobs = documentRecord(source.jobs);
+		const steps = documentRecord(jobs["request-review-on-comment"]).steps as unknown[];
+		const authorizeStep = steps.map(documentRecord).find(step => step.id === "authorize");
+		const authorizeScript = documentRecord(documentRecord(authorizeStep).with).script as string;
+
+		type GithubStub = {
+			rest: {
+				pulls: {
+					get: (params: { owner: string; repo: string; pull_number: number }) => Promise<{ data: { user: null } }>;
+				};
+				repos: {
+					getCollaboratorPermissionLevel: (params: { owner: string; repo: string; username: string }) => Promise<{ data: { permission: string } }>;
+				};
+			};
+		};
+		const github: GithubStub = {
+			rest: {
+				pulls: { get: async () => ({ data: { user: null } }) },
+				repos: { getCollaboratorPermissionLevel: async () => ({ data: { permission: "write" } }) },
+			},
+		};
+		const context = {
+			payload: {
+				comment: { user: { login: "maintainer" }, body: "/re-review" },
+				issue: { pull_request: { url: "https://api.github.com/repos/Yeachan-Heo/gajae-code/pulls/6599" } },
+			},
+			repo: { owner: "Yeachan-Heo", repo: "gajae-code" },
+			issue: { number: 6599 },
+		};
+		const executeAuthorizationStep = new Function(
+			"github",
+			"context",
+			`return (async () => { ${authorizeScript} })();`,
+		) as (github: GithubStub, context: typeof context) => Promise<string>;
+
+		expect(await executeAuthorizationStep(github, context)).toBe("authorized");
 	});
 
 	test("re-review filters to requestable reviewers and passes reviewer data through the environment", async () => {
@@ -329,6 +374,12 @@ describe("workflow permission policy", () => {
 		expect(requestScript).toContain("JSON.parse(process.env.REVIEWERS_JSON)");
 		expect(requestScript).not.toContain("${{");
 		expect(requestScript).toContain("requested_reviewers/rerequest");
+	});
+
+	test("documents the default-branch activation point for issue_comment workflows", async () => {
+		const contributing = await Bun.file(`${repoRoot}/CONTRIBUTING.md`).text();
+		expect(contributing).toContain("default branch, `main`");
+		expect(contributing).toContain("Merging this PR to `dev` alone does not activate `/re-review`");
 	});
 
 	test("allows re-requesting reviewers with read and triage access", async () => {

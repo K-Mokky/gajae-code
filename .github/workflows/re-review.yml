@@ -46,10 +46,10 @@ jobs:
             });
 
             const commentAuthor = comment.user.login;
-            const prAuthor = pr.data.user.login;
+            const prAuthor = pr.data.user?.login;
 
             // Check if comment author is PR author
-            if (commentAuthor === prAuthor) {
+            if (prAuthor && commentAuthor === prAuthor) {
               return 'authorized';
             }
 
@@ -84,6 +84,7 @@ jobs:
               repo: context.repo.repo,
               pull_number: context.issue.number,
             });
+            const prAuthor = pr.data.user?.login;
 
             // Get all reviews on the PR with pagination
             const reviews = await github.paginate(github.rest.pulls.listReviews, {
@@ -98,7 +99,7 @@ jobs:
             );
 
             // Find reviewers with CHANGES_REQUESTED or COMMENTED (latest review only)
-            function latestReviewByUser(reviews) {
+            function latestReviewByUser(reviews, prAuthor) {
               const reviewerMap = new Map();
 
               for (const review of reviews) {
@@ -107,6 +108,12 @@ jobs:
                 }
 
                 const reviewer = review.user.login;
+
+                // GitHub does not allow a pull-request author to be requested
+                // as a reviewer, even when they submitted a self-review.
+                if (reviewer === prAuthor) {
+                  continue;
+                }
 
                 // Skip bots (check if user type is Bot)
                 if (review.user.type === 'Bot') {
@@ -127,7 +134,7 @@ jobs:
               return reviewerMap;
             }
 
-            const reviewerMap = latestReviewByUser(reviews);
+            const reviewerMap = latestReviewByUser(reviews, prAuthor);
 
             // Find reviewers whose latest review is CHANGES_REQUESTED or COMMENTED
             // and who are not currently requested
