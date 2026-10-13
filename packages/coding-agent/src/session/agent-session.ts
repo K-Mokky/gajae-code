@@ -221,6 +221,7 @@ import {
 	type SubagentLifecycle,
 } from "../async";
 import { asyncJobEndpointId as deriveAsyncJobEndpointId } from "../async/endpoint-id";
+import { formatAsyncResultForFollowUp } from "../async/result-formatting";
 import { reset as resetCapabilities } from "../capability";
 import type { Rule } from "../capability/rule";
 import type { CasReceipt } from "../config/atomic-yaml-patch";
@@ -580,31 +581,6 @@ import {
 import { ToolChoiceQueue } from "./tool-choice-queue";
 import { pruneSupersededMaintenanceReminders, pruneSupersededVolatileProjectContext } from "./volatile-context-pruning";
 import { YieldQueue } from "./yield-queue";
-
-const ASYNC_INLINE_RESULT_MAX_CHARS = 12_000;
-const ASYNC_PREVIEW_MAX_CHARS = 4_000;
-
-async function formatParkedAsyncResult(
-	sessionManager: SessionManager,
-	result: string,
-	allowArtifact = true,
-): Promise<string> {
-	if (result.length <= ASYNC_INLINE_RESULT_MAX_CHARS) return result;
-	const preview = `${result.slice(0, ASYNC_PREVIEW_MAX_CHARS)}\n\n[Output truncated. Showing first ${ASYNC_PREVIEW_MAX_CHARS.toLocaleString()} characters.]`;
-	try {
-		if (!allowArtifact) return preview;
-		const { path: artifactPath, id: artifactId } = await sessionManager.allocateArtifactPath("async");
-		if (artifactPath && artifactId) {
-			await Bun.write(artifactPath, result);
-			return `${preview}\nFull output: artifact://${artifactId}`;
-		}
-	} catch (error) {
-		logger.warn("Failed to persist parked async follow-up artifact", {
-			error: error instanceof Error ? error.message : String(error),
-		});
-	}
-	return preview;
-}
 
 /**
  * #4560: structured workflow recovery projection from canonical durable
@@ -3797,7 +3773,7 @@ export class AgentSession {
 					}
 				: undefined;
 			const allowArtifact = ownedCompletion === undefined || isOwnedCompletionEnvelopeAllowed(ownedCompletion);
-			void formatParkedAsyncResult(this.sessionManager, disposition.text, allowArtifact)
+			void formatAsyncResultForFollowUp(this.sessionManager, disposition.text, allowArtifact)
 				.then(formattedResult => {
 					const manager = this.#ownedAsyncJobManager;
 					if (manager?.isDeliverySuppressed(job.id, job.generation)) {
@@ -5280,16 +5256,26 @@ export class AgentSession {
 	}
 
 	#flushPendingAgentEnd(): void {
+		// Collect SDK agent_ends to publish before modifying the set to avoid iterator issues (PR #6388).
+		// Publish only SDK agent_ends that have been decided by their handler.
+		const sdkPendingsToPublish: Array<[AgentSessionEvent, RunResourceProducerLease | undefined]> = [];
 		for (const sdkPending of this.#pendingSdkAgentEnds) {
+			// Skip if the handler hasn't decided yet (decision is recorded by handler finally block).
 			if (!this.#agentEndContinuationDecisions.has(sdkPending)) continue;
+			// Also skip if it's being held for a continuation
 			if ([...this.#pendingAgentEndContinuationHolds.values()].includes(sdkPending)) continue;
+			const sdkLease = this.#deferredAgentEndLeases.get(sdkPending);
+			sdkPendingsToPublish.push([sdkPending, sdkLease]);
+		}
+		// Now publish collected items.
+		for (const [sdkPending, sdkLease] of sdkPendingsToPublish) {
 			this.#pendingSdkAgentEnds.delete(sdkPending);
 			if (this.#pendingAgentEndEmit === sdkPending) this.#pendingAgentEndEmit = undefined;
-			const sdkLease = this.#deferredAgentEndLeases.get(sdkPending);
 			this.#deferredAgentEndLeases.delete(sdkPending);
 			this.#startAgentEndPublication(sdkPending, sdkLease);
 		}
 		const pending = this.#pendingAgentEndEmit;
+		// Skip fallback publish if there are still SDK agent_ends pending (they will be handled by the loop above once decided).
 		if (pending && this.#pendingSdkAgentEnds.has(pending)) return;
 		if (
 			this.#livePromptsInFlight() > 0 ||
@@ -10573,6 +10559,8 @@ export class AgentSession {
 			const publicationFailure = Object.assign(new Error("Session disposed before SDK terminal publication."), {
 				code: "cancelled",
 			});
+			// Reject every SDK caller even if internal terminal or extension delivery is
+			// already in flight; the publication task can still drain independently.
 			for (const publication of this.#sdkTerminalPublications.values()) publication.reject(publicationFailure);
 			this.#sdkTerminalPublications.clear();
 			// Invalidate every coordinator event admitted before disposal. Handlers may
