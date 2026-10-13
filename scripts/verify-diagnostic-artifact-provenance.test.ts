@@ -197,6 +197,7 @@ describe("diagnostic artifact provenance transfer (C2)", () => {
 				(await run(["--stage-check", staged, "--trusted-native-dir", fixture.native], workspace)).exitCode,
 			).toBe(0);
 
+			await Bun.write(`${path.join(staged, "pi_natives.darwin-arm64.node")}.build.json`, JSON.stringify({ profile: "local" }));
 			await Bun.write(path.join(staged, "pi_natives.darwin-arm64.node"), "different-bytes");
 			const mismatch = await run(["--stage-check", staged, "--trusted-native-dir", fixture.native], workspace);
 			expect(mismatch.exitCode).not.toBe(0);

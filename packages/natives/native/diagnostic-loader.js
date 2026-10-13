@@ -21,9 +21,12 @@
  *     so an account that owns none of the path cannot swap the artifact out;
  *   - proves the bytes on a retained descriptor: SHA-256 equal to the digest this
  *     package records in `diagnostic-artifact.json`, which is part of the module
- *     graph so a compiled binary carries it too. An addon's own
- *     `nativeBuildInfo()` is self-reported by code that has already executed, so
- *     it is only a consistency check afterwards, never the trust anchor;
+ *     graph so a compiled binary carries it too. A source checkout uses its
+ *     gitignored local manifest only when the adjacent build metadata explicitly
+ *     identifies a local build, after applying the same namespace and descriptor
+ *     checks. An addon's own `nativeBuildInfo()` is self-reported by code that has
+ *     already been executed, so it is only a consistency check afterwards, never the
+ *     trust anchor;
  *   - activates the verified bytes through that same retained descriptor
  *     (`process.dlopen` on `/dev/fd/<fd>`), so a pathname replaced between
  *     verification and activation cannot change what is loaded. On this runtime the
@@ -75,6 +78,7 @@ import * as fs from "node:fs";
 import { createRequire } from "node:module";
 import * as os from "node:os";
 import * as nodePath from "node:path";
+import { fileURLToPath } from "node:url";
 import trustedArtifacts from "./diagnostic-artifact.json" with { type: "json" };
 import packageManifest from "../package.json" with { type: "json" };
 
@@ -127,14 +131,71 @@ function cachedArtifactPath() {
 }
 
 /**
- * The package-owned expected digest for this artifact, or null when this package
- * ships no trusted record for it.
+ * The package-owned expected digest, or null when this package ships no trusted
+ * record. A source checkout's explicitly local build may instead use its
+ * gitignored local manifest; compiled and installed packages always use the shipped
+ * record.
  *
+ * @param {string} file
  * @returns {string | null}
  */
-function trustedDigest() {
+function trustedDigest(file) {
+	const localDigest = sourceLocalBuildDigest(file);
+	if (localDigest !== undefined) return localDigest;
 	if (trustedArtifacts?.version !== packageManifest.version) return null;
 	const digest = trustedArtifacts?.artifacts?.[ARTIFACT_BASENAME];
+	return typeof digest === "string" && /^[0-9a-f]{64}$/.test(digest) ? digest : null;
+}
+
+/**
+ * Read one bounded JSON file only after proving its path and retained descriptor are
+ * in the same trusted namespace used for the native artifact.
+ *
+ * @param {string} file
+ * @returns {Record<string, unknown> | null}
+ */
+function readTrustedLocalJson(file) {
+	let fd = -1;
+	try {
+		if (!trustedNamespace(file)) return null;
+		fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+		const stat = fs.fstatSync(fd);
+		if (!stat.isFile() || stat.size === 0 || stat.size > 1 << 20) return null;
+		if ((stat.mode & 0o022) !== 0) return null;
+		if (stat.uid !== process.geteuid?.() && stat.uid !== 0) return null;
+		if (inspectAclOnDescriptor(fd) !== "absent") return null;
+		const value = JSON.parse(fs.readFileSync(fd, "utf8"));
+		return typeof value === "object" && value !== null && !Array.isArray(value) ? value : null;
+	} catch {
+		return null;
+	} finally {
+		if (fd >= 0) closeDescriptor(fd);
+	}
+}
+
+/**
+ * A source-mode local build has an explicit profile marker and a gitignored digest
+ * record. Never consult these files for a compiled binary, an installed platform
+ * package, or a release/CI addon.
+ *
+ * @param {string} file
+ * @returns {string | null | undefined} Undefined means this is not a local source build.
+ */
+function sourceLocalBuildDigest(file) {
+	if (runningFromCompiledBinary()) return undefined;
+	const sourceAddon = nodePath.join(nodePath.dirname(fileURLToPath(import.meta.url)), ARTIFACT_BASENAME);
+	if (nodePath.resolve(file) !== sourceAddon) return undefined;
+	const buildMetadata = readTrustedLocalJson(`${sourceAddon}.build.json`);
+	if (buildMetadata?.profile !== "local") return undefined;
+
+	const localManifest = readTrustedLocalJson(
+		nodePath.join(nodePath.dirname(sourceAddon), "diagnostic-artifact.local.json"),
+	);
+	if (localManifest?.schema !== "gjc.diagnostic-artifact") return null;
+	if (localManifest.version !== packageManifest.version) return null;
+	const artifacts = localManifest.artifacts;
+	if (typeof artifacts !== "object" || artifacts === null || Array.isArray(artifacts)) return null;
+	const digest = /** @type {Record<string, unknown>} */ (artifacts)[ARTIFACT_BASENAME];
 	return typeof digest === "string" && /^[0-9a-f]{64}$/.test(digest) ? digest : null;
 }
 
@@ -674,7 +735,7 @@ function consumeHandle(handle) {
  * @returns {{ ok: true, token: string } | { ok: false, reason: "unsupported" }}
  */
 export function verifyDiagnosticArtifact(file) {
-	const expectedDigest = trustedDigest();
+	const expectedDigest = trustedDigest(file);
 	if (expectedDigest === null) return unsupported;
 	let fd = -1;
 	try {

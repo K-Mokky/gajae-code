@@ -372,16 +372,74 @@ console.log(JSON.stringify(loaded.ok ? { ok: true } : { ok: false, reason: loade
 		return JSON.parse(stdout) as { ok: boolean; reason?: string };
 	}
 
-	it.skipIf(!SUPPORTED_RUNTIME)("ships a package-owned trusted digest for the built artifact", async () => {
-		const manifest = (await Bun.file(TRUSTED_MANIFEST).json()) as {
-			version: string;
-			artifacts: Record<string, string>;
-		};
-		expect(manifest.version).toBe(await packageVersion());
-		expect(manifest.artifacts[ADDON_BASENAME]).toBe(await sha256(ARTIFACT));
+	it.skipIf(!SUPPORTED_RUNTIME)("ships a trusted digest for the built artifact", async () => {
+		const buildMetadataPath = `${ARTIFACT}.build.json`;
+		const buildMetadata = (await Bun.file(buildMetadataPath).exists())
+			? ((await Bun.file(buildMetadataPath).json()) as { profile?: string })
+			: undefined;
+		if (buildMetadata?.profile === "local") {
+			const manifest = (await Bun.file(path.join(NATIVE_DIR, "diagnostic-artifact.local.json")).json()) as {
+				version: string;
+				artifacts: Record<string, string>;
+			};
+			expect(manifest.version).toBe(await packageVersion());
+			expect(manifest.artifacts[ADDON_BASENAME]).toBe(await sha256(ARTIFACT));
+		} else {
+			const manifest = (await Bun.file(TRUSTED_MANIFEST).json()) as {
+				version: string;
+				artifacts: Record<string, string>;
+			};
+			expect(manifest.version).toBe(await packageVersion());
+			expect(manifest.artifacts[ADDON_BASENAME]).toBe(await sha256(ARTIFACT));
+		}
 		const packed = (await Bun.file(path.join(PACKAGE_ROOT_DIR, "package.json")).json()) as { files: string[] };
 		expect(packed.files).toContain("native/diagnostic-artifact.json");
 	});
+
+	it.skipIf(!SUPPORTED_RUNTIME)(
+		"verifies a local source addon against its gitignored local manifest",
+		async () => {
+			const workspace = await fs.mkdtemp(path.join(await fs.realpath(os.tmpdir()), "gjc-diag-local-source-"));
+			try {
+				const fixture = await fixtureNatives(workspace, { digest: "0".repeat(64) });
+				const localAddon = path.join(fixture.native, ADDON_BASENAME);
+				const localMetadata = `${localAddon}.build.json`;
+				const localManifestPath = path.join(fixture.native, "diagnostic-artifact.local.json");
+				await Bun.write(localAddon, await Bun.file(ARTIFACT).bytes());
+				await Bun.write(localMetadata, JSON.stringify({ profile: "local" }));
+				await Bun.write(
+					localManifestPath,
+					JSON.stringify({
+						schema: "gjc.diagnostic-artifact",
+						version: await packageVersion(),
+						artifacts: { [ADDON_BASENAME]: await sha256(localAddon) },
+					}),
+				);
+				const harness = path.join(workspace, "verify-local.ts");
+				await Bun.write(
+					harness,
+					`const { verifyDiagnosticArtifact } = await import(${JSON.stringify(fixture.loader)});
+const result = verifyDiagnosticArtifact(${JSON.stringify(localAddon)});
+console.log(JSON.stringify(result.ok ? { ok: true } : result));`,
+				);
+				const child = Bun.spawnSync({
+					cmd: [process.execPath, harness],
+					cwd: workspace,
+					env: { PATH: "/usr/bin:/bin", HOME: workspace, TMPDIR: workspace },
+					stdout: "pipe",
+					stderr: "pipe",
+				});
+				const stdout = new TextDecoder().decode(child.stdout ?? new Uint8Array()).trim();
+				const admissible = [localAddon, localMetadata, localManifestPath].every(
+					file => expectedLoadOutcome(file).ok,
+				);
+				expect(JSON.parse(stdout)).toEqual(admissible ? { ok: true } : { ok: false, reason: "unsupported" });
+			} finally {
+				await fs.rm(workspace, { recursive: true, force: true });
+			}
+		},
+		120_000,
+	);
 
 	it.skipIf(!SUPPORTED_RUNTIME)(
 		"refuses an artifact whose bytes are not the trusted ones, even when it self-reports the right version",

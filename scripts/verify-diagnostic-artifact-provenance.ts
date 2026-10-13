@@ -62,9 +62,10 @@ async function packageVersionFor(nativeDir: string): Promise<string> {
 	return version;
 }
 
-async function addonsIn(dir: string): Promise<string[]> {
+async function addonsIn(dir: string, excludeLocalBuilds = false): Promise<string[]> {
 	const entries = await fs.readdir(dir).catch(() => fail(`cannot read native directory ${dir}`));
 	const addons = entries.filter(entry => entry.endsWith(".node")).sort();
+	if (!excludeLocalBuilds) return addons;
 	const releaseAddons: string[] = [];
 	for (const addon of addons) {
 		const buildMetadataPath = `${path.join(dir, addon)}.build.json`;
@@ -89,7 +90,7 @@ async function readTrustedRecord(nativeDir: string): Promise<TrustedRecord> {
 
 async function rebuildFromSidecars(nativeDir: string): Promise<void> {
 	const version = await packageVersionFor(nativeDir);
-	const addons = await addonsIn(nativeDir);
+	const addons = await addonsIn(nativeDir, true);
 	if (addons.length === 0) fail(`no native addons found in ${nativeDir}`);
 	const artifacts: Record<string, string> = {};
 	const buildVersions: Record<string, string> = {};
@@ -144,7 +145,7 @@ async function verify(nativeDir: string): Promise<void> {
 	if (record.version !== version) {
 		fail(`record version ${record.version} does not match package version ${version}`);
 	}
-	const addons = await addonsIn(nativeDir);
+	const addons = await addonsIn(nativeDir, true);
 	for (const addon of addons) {
 		const expected = record.artifacts[addon];
 		if (expected === undefined) fail(`${addon} is present but has no trusted digest`);
