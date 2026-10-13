@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import { getBundledModel } from "../src/models";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { resolveProviderModels } from "../src/model-manager";
+import { getBundledModel, getBundledModels } from "../src/models";
+import { githubCopilotModelManagerOptions } from "../src/provider-models/openai-compat";
 import { streamOpenAICodexResponses } from "../src/providers/openai-codex-responses";
 import { streamOpenAICompletions } from "../src/providers/openai-completions";
 import { streamOpenAIResponses } from "../src/providers/openai-responses";
@@ -45,14 +50,14 @@ function completedResponseEvents(serviceTier?: string): unknown[] {
 	];
 }
 
-function completionsResponseEvents(serviceTier?: string): unknown[] {
+function completionsResponseEvents(serviceTier?: string, modelId = "gpt-6-astra"): unknown[] {
 	const reportedTier = serviceTier === undefined ? {} : { service_tier: serviceTier };
 	return [
 		{
 			id: "chatcmpl_1",
 			object: "chat.completion.chunk",
 			created: 0,
-			model: "gpt-6-astra",
+			model: modelId,
 			...reportedTier,
 			choices: [{ index: 0, delta: { content: "ok" }, finish_reason: "stop" }],
 		},
@@ -60,7 +65,7 @@ function completionsResponseEvents(serviceTier?: string): unknown[] {
 			id: "chatcmpl_1",
 			object: "chat.completion.chunk",
 			created: 0,
-			model: "gpt-6-astra",
+			model: modelId,
 			...reportedTier,
 			choices: [],
 			usage: { prompt_tokens: 5, completion_tokens: 1, total_tokens: 6 },
@@ -115,6 +120,48 @@ describe("ultrafast request serialization for bundled models", () => {
 
 		expect(result.stopReason).toBe("stop");
 		expect(bodies[0]?.service_tier).toBe("ultrafast");
+	});
+
+	it("retains ultrafast through authenticated Copilot discovery and serializes it for both GPT-6 models", async () => {
+		const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "copilot-ultrafast-refresh-"));
+		const modelIds = ["gpt-6-astra", "gpt-6.1-sol"];
+		try {
+			const discoveryFetch = vi.fn(async (_input: string | URL | Request) =>
+				Response.json({
+					data: modelIds.map(id => ({ id, name: id, context_length: 1_050_000, max_completion_tokens: 128_000 })),
+				}),
+			);
+			global.fetch = Object.assign(discoveryFetch, { preconnect: originalFetch.preconnect }) as typeof fetch;
+
+			const result = await resolveProviderModels(
+				{
+					...githubCopilotModelManagerOptions({ apiKey: "ghu_test_copilot_token" }),
+					staticModels: getBundledModels("github-copilot"),
+					cacheDbPath: path.join(cacheDir, "models.db"),
+				},
+				"online",
+			);
+			expect(discoveryFetch).toHaveBeenCalledTimes(1);
+
+			for (const modelId of modelIds) {
+				const model = result.models.find(candidate => candidate.id === modelId);
+				if (!model) throw new Error(`expected refreshed Copilot model ${modelId}`);
+				expect(model.compat).toMatchObject({ supportsUltrafastTier: true });
+				expect(
+					model.compat && "supportsServiceTier" in model.compat ? model.compat.supportsServiceTier : undefined,
+				).toBeUndefined();
+
+				const bodies = captureRequests(completionsResponseEvents(undefined, modelId));
+				const response = await streamOpenAICompletions(model as Model<"openai-completions">, testContext, {
+					apiKey: "ghu_test_copilot_token",
+					serviceTier: "ultrafast",
+				}).result();
+				expect(response.stopReason).toBe("stop");
+				expect(bodies[0]?.service_tier).toBe("ultrafast");
+			}
+		} finally {
+			fs.rmSync(cacheDir, { recursive: true, force: true });
+		}
 	});
 
 	it("keeps GitHub Copilot fail-closed for existing service tiers", async () => {
