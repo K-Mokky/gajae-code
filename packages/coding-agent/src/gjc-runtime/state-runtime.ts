@@ -2219,14 +2219,23 @@ export function nonCrystalExecutionApprovalRecordPath(
 	return path.join(sessionStateDir(cwd, sessionId), `${stage}-ordinary-execution-approval.json`);
 }
 
-async function nonCrystalApprovalPublication(cwd: string, sessionId: string, stage: ExecutionApprovalStage) {
+async function nonCrystalApprovalPublication(
+	cwd: string,
+	sessionId: string,
+	stage: ExecutionApprovalStage,
+	allowHandoff = false,
+) {
 	if ((await executionApprovalLineage(cwd, sessionId, stage)) !== "ordinary")
 		throw new StateCommandError(2, "ordinary execution approval cannot authorize Crystal lineage");
 	const statePath = modeStateFile(cwd, stage, sessionId);
 	const read = await readExistingStateForMutation(statePath);
 	if (read.kind !== "valid") throw new StateCommandError(2, "execution approval state is unavailable");
 	const state = read.value;
-	if (state.active !== true || !["final", "handoff"].includes(String(state.current_phase)))
+	const phaseIsAllowed =
+		stage === "deep-interview"
+			? ["final", "handoff"].includes(String(state.current_phase))
+			: state.current_phase === "final" || (allowHandoff && state.current_phase === "handoff");
+	if (state.active !== true || !phaseIsAllowed)
 		throw new StateCommandError(2, "execution approval requires an active final publication");
 	if (stage === "ralplan") {
 		const final = await verifiedRalplanFinalEvidence(cwd, sessionId, state);
@@ -2286,6 +2295,8 @@ export async function captureExecutionApprovalPresentation(
 		const ralplanRead = await readExistingStateForMutation(modeStateFile(cwd, "ralplan", sessionId));
 		if (ralplanRead.kind !== "valid")
 			throw new StateCommandError(2, "Ralplan execution approval requires valid final state");
+		if (ralplanRead.value.active !== true || ralplanRead.value.current_phase !== "final")
+			throw new StateCommandError(2, "Ralplan execution approval requires current final plan");
 		const final = await verifiedRalplanFinalEvidence(cwd, sessionId, ralplanRead.value);
 		if (!final) throw new StateCommandError(2, "execution approval requires verified Ralplan final evidence");
 		await assertRalplanManualApprovalReadiness(cwd, sessionId, ralplanRead.value, final);
@@ -2490,7 +2501,7 @@ async function assertNonCrystalApprovalCurrent(
 	const record = await readNonCrystalApproval(cwd, sessionId, stage);
 	if (!record || record.status !== status || (status === "pending" && Date.parse(record.expires_at) <= Date.now()))
 		throw new StateCommandError(2, "ordinary execution approval is missing, expired or consumed");
-	const publication = await nonCrystalApprovalPublication(cwd, sessionId, stage);
+	const publication = await nonCrystalApprovalPublication(cwd, sessionId, stage, true);
 	for (const key of ["state_path", "artifact_path", "artifact_sha256", "run_id"] as const)
 		if (record[key] !== publication[key])
 			throw new StateCommandError(2, "ordinary execution approval publication is stale");

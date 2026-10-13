@@ -28,6 +28,7 @@ import { isUltragoalAskBlocked } from "@gajae-code/coding-agent/gjc-runtime/ultr
 import { createUltragoalPlan, getUltragoalPaths } from "@gajae-code/coding-agent/gjc-runtime/ultragoal-runtime";
 import { initTheme } from "@gajae-code/coding-agent/modes/theme/theme";
 import { SessionManager } from "@gajae-code/coding-agent/session/session-manager";
+import { createTools, type ToolSession } from "@gajae-code/coding-agent/tools";
 import { AskTool } from "@gajae-code/coding-agent/tools/ask";
 import {
 	formatRalplanUltragoalApprovalQuestion,
@@ -331,6 +332,77 @@ describe("non-Crystal user-gated execution approval", () => {
 		});
 	});
 
+	it("keeps the built-in Ask approval exception through the production LazyAgentTool facade", async () => {
+		await withSession(async (cwd, _manager, sessionId) => {
+			await createUltragoalPlan({ cwd, brief: "Implement the approved repair" });
+			await publishReviewedRalplanFinal(cwd, sessionId);
+			const presentation = await captureExecutionApprovalPresentation(cwd, sessionId, "ralplan");
+			const question = formatRalplanUltragoalApprovalQuestion(presentation);
+			if (!question) throw new Error("expected canonical Ralplan approval question");
+			const session = {
+				cwd,
+				hasUI: true,
+				settings: Settings.isolated(),
+				getSessionId: () => sessionId,
+				getSessionFile: () => null,
+				getSessionSpawns: () => "*",
+			} as unknown as ToolSession;
+			const askFacade = (await createTools(session, ["ask"])).find(tool => tool.name === "ask");
+			if (!askFacade) throw new Error("built-in Ask LazyAgentTool was not created");
+			const guarded = guardToolForUltragoalAsk(
+				askFacade,
+				() => cwd,
+				() => ({ sessionId }),
+			);
+			const context = {
+				hasUI: true,
+				ui: { select: async () => "Stop here", editor: async () => undefined },
+				abort: () => {},
+			} as unknown as AgentToolContext;
+
+			const result = await guarded.execute(
+				"production-ask-facade",
+				{
+					questions: [
+						{
+							id: "ralplan-approval",
+							question,
+							options: [
+								{ label: "Refine further" },
+								{ label: "Approve execution via ultragoal" },
+								{ label: "Stop here" },
+							],
+							recommended: 1,
+							multi: false,
+							workflowGate: { stage: "ralplan", kind: "approval" },
+						},
+					],
+				},
+				undefined,
+				undefined,
+				context,
+			);
+			expect(result.details?.question).toBe(question);
+			expect(result.details?.selectedOptions).toEqual(["Stop here"]);
+		});
+	});
+
+	it("does not present a second Ralplan approval after handoff begins", async () => {
+		await withSession(async (cwd, _manager, sessionId) => {
+			await createUltragoalPlan({ cwd, brief: "Implement the approved repair" });
+			await publishReviewedRalplanFinal(cwd, sessionId);
+			const handoffReady = await runNativeStateCommand(
+				["write", "--mode", "ralplan", "--input", JSON.stringify({ current_phase: "handoff" }), "--json"],
+				cwd,
+			);
+			expect(handoffReady.status, handoffReady.stderr).toBe(0);
+
+			await expect(captureExecutionApprovalPresentation(cwd, sessionId, "ralplan")).rejects.toThrow(
+				/execution approval requires an active final publication/,
+			);
+		});
+	});
+
 	it("requires runtime-recorded same-pass accepted reviews and an off admission target", async () => {
 		for (const invalidJoin of ["missing", "rejected", "mismatched", "unapproved-architect"] as const) {
 			await withSession(async (cwd, manager, sessionId) => {
@@ -386,20 +458,14 @@ describe("non-Crystal user-gated execution approval", () => {
 				2,
 				"# Revised plan\n\nChange the repair.",
 			);
-			const ready = await runNativeStateCommand(
-				[
-					"write",
-					"--mode",
-					"ralplan",
-					"--input",
-					JSON.stringify({ current_phase: "handoff" }),
-					"--session-id",
-					sessionId,
-					"--json",
-				],
+			await writeRalplanStage(
 				cwd,
+				sessionId,
+				"reviewed-current-final",
+				"final",
+				2,
+				"# Revised final plan\n\nChange the repair.",
 			);
-			expect(ready.status, ready.stderr).toBe(0);
 
 			await expect(captureExecutionApprovalPresentation(cwd, sessionId, "ralplan")).rejects.toThrow(
 				/verified same-pass Architect\/Critic review join/,
