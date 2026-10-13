@@ -717,36 +717,39 @@ describe("doctor broker restart protocol", () => {
 		}
 	}, 10_000);
 
-	it("ordinary session-index startup waits until a fresh removal transition is reclaimable", async () => {
-		const dir = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-doctor-fresh-index-transition-"));
-		const indexPath = path.join(dir, "sdk", "sessions", "index.jsonl");
-		const transitionPath = `${indexPath}.lock.removing`;
-		await fs.mkdir(transitionPath, { recursive: true });
-		const initialTime = Date.now();
-		let now = initialTime;
-		const dateNow = spyOn(Date, "now").mockImplementation(() => now);
-		const sleep = spyOn(Bun, "sleep").mockImplementation(async milliseconds => {
-			now += typeof milliseconds === "number" ? milliseconds : Math.max(0, milliseconds.getTime() - now);
-		});
-		try {
-			const options = sessionIndexStartupLockOptions(performance.now() + 30_000, undefined, "ordinary");
-			const index = await new SessionIndex(dir).open(options);
-			expect(index.indexSeq).toBe(0);
-			expect(now - initialTime).toBeGreaterThanOrEqual(FILE_LOCK_ORPHAN_TRANSITION_ADOPTION_AGE_MS);
-			const transitionPresent = await fs.stat(transitionPath).then(
-				() => true,
-				error => {
-					if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
-					throw error;
-				},
-			);
-			expect(transitionPresent).toBe(false);
-		} finally {
-			sleep.mockRestore();
-			dateNow.mockRestore();
-			await fs.rm(dir, { recursive: true, force: true });
-		}
-	});
+	it.skipIf(process.platform === "win32")(
+		"ordinary session-index startup waits until a fresh removal transition is reclaimable",
+		async () => {
+			const dir = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-doctor-fresh-index-transition-"));
+			const indexPath = path.join(dir, "sdk", "sessions", "index.jsonl");
+			const transitionPath = `${indexPath}.lock.removing`;
+			await fs.mkdir(transitionPath, { recursive: true });
+			const initialTime = Date.now();
+			let now = initialTime;
+			const dateNow = spyOn(Date, "now").mockImplementation(() => now);
+			const sleep = spyOn(Bun, "sleep").mockImplementation(async milliseconds => {
+				now += typeof milliseconds === "number" ? milliseconds : Math.max(0, milliseconds.getTime() - now);
+			});
+			try {
+				const options = sessionIndexStartupLockOptions(performance.now() + 30_000, undefined, "ordinary");
+				const index = await new SessionIndex(dir).open(options);
+				expect(index.indexSeq).toBe(0);
+				expect(now - initialTime).toBeGreaterThanOrEqual(FILE_LOCK_ORPHAN_TRANSITION_ADOPTION_AGE_MS);
+				const transitionPresent = await fs.stat(transitionPath).then(
+					() => true,
+					error => {
+						if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+						throw error;
+					},
+				);
+				expect(transitionPresent).toBe(false);
+			} finally {
+				sleep.mockRestore();
+				dateNow.mockRestore();
+				await fs.rm(dir, { recursive: true, force: true });
+			}
+		},
+	);
 
 	it("retry/successor race: adopting an already-prepared request replays the same lease instead of double-preparing", async () => {
 		const { broker, discovery } = await fixture();
