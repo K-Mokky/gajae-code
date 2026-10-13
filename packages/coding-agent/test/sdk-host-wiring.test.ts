@@ -1,4 +1,4 @@
-import { afterEach, expect, spyOn, test } from "bun:test";
+import { afterEach, expect, mock, spyOn, test } from "bun:test";
 import { AsyncLocalStorage } from "node:async_hooks";
 import * as fs from "node:fs";
 import * as fsPromises from "node:fs/promises";
@@ -17,7 +17,7 @@ import {
 import { type AssistantMessage, closeModelCache, getBundledModel } from "@gajae-code/ai";
 import { createMockModel } from "@gajae-code/ai/providers/mock";
 import { NotificationServer } from "@gajae-code/natives";
-import { logger } from "@gajae-code/utils";
+import { getAgentDir, logger } from "@gajae-code/utils";
 import * as z from "zod/v4";
 import { ModelRegistry } from "../src/config/model-registry";
 import { Settings } from "../src/config/settings";
@@ -148,19 +148,30 @@ type SdkPermissionProvider =
 
 const dirs: string[] = [];
 const sockets: WebSocket[] = [];
+const extensionCleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
-	await Promise.all(sockets.splice(0).map(closeSocket));
-	for (const dir of dirs) await brokerOwnerForTest(dir)?.stop();
-	if (process.platform === "win32") {
-		Bun.gc(true);
-		await Bun.sleep(50);
+	mock.restore();
+	const ownedDirs = dirs.splice(0);
+	const ownedExtensions = extensionCleanups.splice(0);
+	try {
+		await Promise.all(sockets.splice(0).map(closeSocket));
+		const shutdowns = await Promise.allSettled(ownedExtensions.map(cleanup => cleanup()));
+		const failures = shutdowns.flatMap(result => (result.status === "rejected" ? [result.reason] : []));
+		if (failures.length > 0)
+			throw new AggregateError(failures, "Test-owned SDK extensions did not shut down cleanly.");
+		for (const dir of new Set([...ownedDirs, getAgentDir()])) await brokerOwnerForTest(dir)?.stop();
+		if (process.platform === "win32") {
+			Bun.gc(true);
+			await Bun.sleep(50);
+		}
+		for (const dir of ownedDirs) await removeTempDir(dir);
+	} finally {
+		delete process.env.GJC_SDK_DISABLE;
+		delete process.env.GJC_NOTIFICATIONS;
+		delete process.env.GJC_LIFECYCLE_TEST_TOKEN;
+		delete process.env.GJC_LIFECYCLE_TEST_SECRET;
+		delete process.env.GJC_LIFECYCLE_TEST_API_KEY;
 	}
-	for (const dir of dirs.splice(0)) await removeTempDir(dir);
-	delete process.env.GJC_SDK_DISABLE;
-	delete process.env.GJC_NOTIFICATIONS;
-	delete process.env.GJC_LIFECYCLE_TEST_TOKEN;
-	delete process.env.GJC_LIFECYCLE_TEST_SECRET;
-	delete process.env.GJC_LIFECYCLE_TEST_API_KEY;
 });
 
 async function waitFor(predicate: () => boolean, label: string): Promise<void> {
@@ -305,8 +316,45 @@ function start(
 	ensureProviderDaemon?: (provider: "discord" | "slack", settings: Settings) => Promise<unknown>,
 ): Map<string, (event: unknown, context: unknown) => unknown> {
 	const handlers = new Map<string, (event: unknown, context: unknown) => unknown>();
+	const ownedContexts = new Map<string, Record<string, unknown>>();
+	const pendingStarts = new Set<Promise<unknown>>();
+	const rememberContext = (value: unknown): void => {
+		const current = value as Record<string, unknown> & {
+			sessionManager: { getSessionId: () => string };
+		};
+		const id = current.sessionManager.getSessionId();
+		ownedContexts.set(id, {
+			...current,
+			sessionManager: { ...current.sessionManager, getSessionId: () => id },
+		});
+	};
+	rememberContext(ctx);
+	extensionCleanups.push(async () => {
+		await Promise.allSettled(pendingStarts);
+		// Shutdown owns one identity, not every runtime in an extension. Mutable
+		// session contexts must not redirect predecessor cleanup to their successor.
+		const shutdowns = await Promise.allSettled(
+			[...ownedContexts.values()].map(owned =>
+				Promise.resolve(handlers.get("session_shutdown")?.({ type: "session_shutdown" }, owned)),
+			),
+		);
+		const failures = shutdowns.flatMap(result => (result.status === "rejected" ? [result.reason] : []));
+		if (failures.length > 0) throw new AggregateError(failures, "SDK extension owner cleanup failed.");
+	});
 	const api = {
-		on: (event: string, handler: (event: unknown, context: unknown) => unknown) => handlers.set(event, handler),
+		on: (event: string, handler: (event: unknown, context: unknown) => unknown) =>
+			handlers.set(event, (payload, current) => {
+				if (event !== "session_start" && event !== "session_switch" && event !== "session_branch")
+					return handler(payload, current);
+				rememberContext(current);
+				const started = Promise.resolve(handler(payload, current));
+				pendingStarts.add(started);
+				void started.then(
+					() => pendingStarts.delete(started),
+					() => pendingStarts.delete(started),
+				);
+				return started;
+			}),
 		registerCommand: (name: string, command: { handler: (args: string, ctx: unknown) => Promise<void> }) =>
 			commands.set(name, command),
 		getThinkingLevel: () =>
@@ -3055,8 +3103,9 @@ test("SDK host text-only stop/restart isolates late predecessor progress and ter
 		pendingSubmissions.delete(completion.resolve);
 	};
 	let handlers = new Map<string, (event: unknown, context: unknown) => unknown>();
+	const realNow = Date.now;
 	let clockNow = Date.now();
-	const leaseClock = spyOn(Date, "now").mockImplementation(() => clockNow);
+	const leaseClock = spyOn(Date, "now").mockImplementation(realNow);
 	const openClient = async (): Promise<{
 		socket: WebSocket;
 		frames: Record<string, unknown>[];
@@ -3165,6 +3214,8 @@ test("SDK host text-only stop/restart isolates late predecessor progress and ter
 			resourceRunId: "successor-deadline-run",
 			domain: deadlineSuccessorDomain,
 		});
+		clockNow = realNow();
+		leaseClock.mockImplementation(() => clockNow);
 		await handlers.get("agent_start")?.(successorStart, sessionContext);
 		const acceptedAt = Date.now();
 		clockNow = acceptedAt + 350;
@@ -3251,6 +3302,7 @@ test("SDK host text-only stop/restart isolates late predecessor progress and ter
 		expect(abortHandles.every(handle => handle === "predecessor-run" || handle === "successor-deadline-run")).toBe(
 			true,
 		);
+		leaseClock.mockImplementation(realNow);
 
 		settleSubmissions();
 		const deadlineEnd = { type: "agent_end" as const, messages: [], stopReason: "cancelled" };
@@ -7182,7 +7234,21 @@ for (const eventType of ["session_switch", "session_branch"] as const) {
 		};
 		// Fail A's owner release exactly once so the rotate-time stopSession(prevId)
 		// throws the retained-retry AggregateError.
-		const stop = spyOn(SessionSdkHost.prototype, "stop").mockRejectedValueOnce(new Error("host stop failed"));
+		const originalStop = SessionSdkHost.prototype.stop;
+		let predecessorStopRejected = false;
+		const stop = spyOn(SessionSdkHost.prototype, "stop").mockImplementation(async function (
+			this: SessionSdkHost,
+			...args: Parameters<SessionSdkHost["stop"]>
+		) {
+			const ownsPredecessor = this.events
+				.replay(0)
+				.events.some(event => event.name === "session_ready" && event.sessionId === sessionA);
+			if (ownsPredecessor && !predecessorStopRejected) {
+				predecessorStopRejected = true;
+				throw new Error("host stop failed");
+			}
+			return await originalStop.apply(this, args);
+		});
 		let handlers = new Map<string, (event: unknown, context: unknown) => unknown>();
 		try {
 			const startupCapability = new SdkStartupCapability(undefined, "immediate", "rotation-failure-marker");
