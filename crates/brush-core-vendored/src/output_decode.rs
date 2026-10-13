@@ -22,7 +22,6 @@
 
 use std::str;
 
-const REPLACEMENT: &str = "\u{FFFD}";
 /// UTF-8 console / system code page. Fallback is a no-op: invalid UTF-8 stays
 /// replacement characters rather than being re-decoded as itself.
 #[cfg(windows)]
@@ -98,53 +97,47 @@ impl OutputDecoder {
 
 	fn drain_utf8(&mut self, eof: bool) -> String {
 		let mut out = String::new();
-		loop {
-			if self.pending.is_empty() {
-				return out;
-			}
-			match str::from_utf8(&self.pending) {
-				Ok(text) => {
-					out.push_str(text);
-					self.pending.clear();
-					return out;
-				},
-				Err(err) => {
-					let valid_up_to = err.valid_up_to();
-					if valid_up_to > 0 {
-						// SAFETY: [..valid_up_to] is valid UTF-8 by valid_up_to().
-						out.push_str(unsafe { str::from_utf8_unchecked(&self.pending[..valid_up_to]) });
-						self.pending.drain(..valid_up_to);
-					}
-					if let Some(invalid_len) = err.error_len() {
-						#[cfg(windows)]
-						if self.can_fallback_to_acp() {
-							// One encoding per command. Do not resume UTF-8 after
-							// a bad byte: later UTF-8 would be ACP-mojibake, but
-							// cmd/chcp emit ACP for the whole stream.
-							self.mode = Mode::Acp;
-							out.push_str(&self.drain_acp(eof));
-							return out;
-						}
-
-						out.push_str(REPLACEMENT);
-						self.pending.drain(..invalid_len);
-					} else {
-						if eof {
-							#[cfg(windows)]
-							if self.can_fallback_to_acp() {
-								self.mode = Mode::Acp;
-								out.push_str(&self.drain_acp(true));
-								return out;
-							}
-
-							out.push_str(REPLACEMENT);
-							self.pending.clear();
-						}
-						return out;
-					}
-				},
-			}
+		if self.pending.is_empty() {
+			return out;
 		}
+
+		match str::from_utf8(&self.pending) {
+			Ok(text) => {
+				out.push_str(text);
+				self.pending.clear();
+			},
+			Err(error) => {
+				let valid_up_to = error.valid_up_to();
+				let error_len = error.error_len();
+				if valid_up_to > 0 {
+					// SAFETY: [..valid_up_to] is valid UTF-8 by valid_up_to().
+					out.push_str(unsafe { str::from_utf8_unchecked(&self.pending[..valid_up_to]) });
+				}
+
+				if error_len.is_none() && !eof {
+					self.pending.drain(..valid_up_to);
+					return out;
+				}
+
+				#[cfg(windows)]
+				if self.can_fallback_to_acp() {
+					// One encoding per command. Do not resume UTF-8 after
+					// a bad byte: later UTF-8 would be ACP-mojibake, but
+					// cmd/chcp emit ACP for the whole stream.
+					self.pending.drain(..valid_up_to);
+					self.mode = Mode::Acp;
+					out.push_str(&self.drain_acp(eof));
+					return out;
+				}
+
+				// Decode the malformed suffix in one pass; repeated front-drains
+				// would shift the remaining line once for every invalid sequence.
+				out.push_str(&String::from_utf8_lossy(&self.pending[valid_up_to..]));
+				self.pending.clear();
+			},
+		}
+
+		out
 	}
 
 	#[cfg(windows)]

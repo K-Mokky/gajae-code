@@ -3727,6 +3727,28 @@ mod tests {
 		(result, output)
 	}
 
+	#[test]
+	fn duplicated_open_files_share_the_builtin_reader_lock_and_pushback() {
+		let input = OpenFile::from(tempfile::tempfile().expect("temporary file"));
+		let first = input
+			.held_input()
+			.expect("readable file holds input")
+			.clone();
+		let duplicate = input.try_clone().expect("duplicate file");
+		let second = duplicate
+			.held_input()
+			.expect("duplicate holds input")
+			.clone();
+
+		let guard = first.lock_reader();
+		assert!(second.try_lock_reader().is_none());
+		first.put_back(b"next");
+		drop(guard);
+
+		let _guard = second.try_lock_reader().expect("reader lock was released");
+		assert_eq!(second.pop(), Some(b'n'));
+	}
+
 	/// Contract: `read` from a file consumes exactly one line of the shared
 	/// offset — the next `read`, and any later reader of the same descriptor,
 	/// resumes right after it.

@@ -124,27 +124,34 @@ impl MapFileCommand {
 		};
 
 		let terminal = input_file.is_terminal();
+		let held_input = input_file.held_input().cloned();
 		// Bytes are read one at a time, so a -C callback, a failed assignment
 		// or a later command finds the input right after the last line
 		// stored (bash's mapfile reads a pipe unbuffered too).
 		let mut input = LineInput::new(input_file);
 
 		while max_count == 0 || entry_count < max_count {
-			let mut line = vec![];
-			let mut saw_delimiter = false;
+			let (mut line, saw_delimiter) = {
+				// Release before running a callback so it can read the same
+				// descriptor without deadlocking on this mapfile operation.
+				let _read_guard = held_input.as_ref().map(|held| held.lock_reader());
+				let mut line = vec![];
+				let mut saw_delimiter = false;
 
-			while let Some(byte) = input.next_byte()? {
-				// Interactive keys end input only on a terminal; in a file or
-				// pipe they are data.
-				if terminal && (byte == CTRL_C || byte == CTRL_D && line.is_empty()) {
-					break;
+				while let Some(byte) = input.next_byte()? {
+					// Interactive keys end input only on a terminal; in a file or
+					// pipe they are data.
+					if terminal && (byte == CTRL_C || byte == CTRL_D && line.is_empty()) {
+						break;
+					}
+					line.push(byte);
+					if byte == delimiter {
+						saw_delimiter = true;
+						break;
+					}
 				}
-				line.push(byte);
-				if byte == delimiter {
-					saw_delimiter = true;
-					break;
-				}
-			}
+				(line, saw_delimiter)
+			};
 
 			if line.is_empty() && !saw_delimiter {
 				break;

@@ -30,6 +30,21 @@ mod tests {
 	}
 
 	#[test]
+	fn large_malformed_input_preserves_each_replacement() {
+		const INVALID_BYTES: usize = 64 * 1024;
+
+		#[cfg(windows)]
+		let mut decoder = OutputDecoder::with_fallback_codepage(65001);
+		#[cfg(not(windows))]
+		let mut decoder = OutputDecoder::new();
+
+		let input = vec![0xff; INVALID_BYTES];
+		let decoded = decoder.push(&input);
+		assert_eq!(decoded, "\u{FFFD}".repeat(INVALID_BYTES));
+		assert_eq!(decoder.finish(), "");
+	}
+
+	#[test]
 	fn complete_utf8_buffer_decodes() {
 		assert_eq!(decode_bytes("hello 中文".as_bytes()), "hello 中文");
 	}

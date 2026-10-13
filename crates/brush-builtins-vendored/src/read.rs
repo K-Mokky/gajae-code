@@ -2,10 +2,11 @@
 use std::{
 	collections::VecDeque,
 	io::Write,
+	sync::MutexGuard,
 	time::{Duration, Instant},
 };
 
-use brush_core::{ErrorKind, builtins, env, error, openfiles::OpenFile, variables};
+use brush_core::{ErrorKind, builtins, env, error, openfiles::{HeldInput, OpenFile}, variables};
 use clap::Parser;
 use itertools::Itertools;
 
@@ -338,17 +339,46 @@ where
 	Ok(())
 }
 
+fn acquire_read_lock<'a, F>(
+	held_input: &'a HeldInput,
+	deadline: Option<Instant>,
+	is_cancelled: &F,
+) -> Result<Option<MutexGuard<'a, ()>>, brush_core::Error>
+where
+	F: Fn() -> bool,
+{
+	const RETRY_INTERVAL: Duration = Duration::from_millis(10);
+
+	loop {
+		ensure_not_cancelled(is_cancelled)?;
+		if let Some(guard) = held_input.try_lock_reader() {
+			return Ok(Some(guard));
+		}
+
+		let sleep_for = if let Some(deadline) = deadline {
+			let remaining = deadline.saturating_duration_since(Instant::now());
+			if remaining.is_zero() {
+				return Ok(None);
+			}
+			remaining.min(RETRY_INTERVAL)
+		} else {
+			RETRY_INTERVAL
+		};
+		std::thread::sleep(sleep_for);
+	}
+}
+
 impl InputReader {
-	/// Creates a new input reader with optional timeout.
+	/// Creates a new input reader with an absolute timeout deadline.
 	fn new(
 		input: OpenFile,
-		timeout: Option<Duration>,
+		deadline: Option<Instant>,
 		term_mode: Option<brush_core::terminal::AutoModeGuard>,
 	) -> Self {
 		let terminal = input.is_terminal();
 		Self {
 			source: LineInput::new(input),
-			deadline: timeout.map(|t| Instant::now() + t),
+			deadline,
 			terminal,
 			_term_mode: term_mode,
 		}
@@ -691,8 +721,10 @@ impl ReadCommand {
 			.return_after_n_chars_no_delimiter
 			.or(self.return_after_n_chars);
 
-		// Create the input reader.
-		let mut reader = InputReader::new(input_file, timeout, term_mode);
+		// Start the timeout before acquiring the shared reader guard so waiting
+		// behind another builtin does not extend `-t`.
+		let deadline = timeout.map(|duration| Instant::now() + duration);
+		let mut reader = InputReader::new(input_file, deadline, term_mode);
 
 		// Handle -t 0 special case: just check if input is available without reading.
 		if timeout == Some(Duration::ZERO) {
@@ -703,6 +735,19 @@ impl ReadCommand {
 				ReadResult::InputNotReady
 			});
 		}
+
+		// Duplicated descriptors share this guard with other builtin readers.
+		// Keeping it through line assembly and any pushback prevents a second
+		// builtin from blocking on the descriptor while unread bytes are queued.
+		let held_input = reader.source.input().held_input().cloned();
+		let _read_guard = if let Some(held_input) = held_input.as_ref() {
+			let Some(guard) = acquire_read_lock(held_input, reader.deadline, &is_cancelled)? else {
+				return Ok(ReadResult::TimedOut(None));
+			};
+			Some(guard)
+		} else {
+			None
+		};
 
 		// Configure and perform the read.
 		let config = LineReaderConfig { delimiter, char_limit, process_escapes: !self.raw_mode };
@@ -1127,6 +1172,78 @@ mod tests {
 			let result = plain.read_line(pipe.try_clone()?, Vec::<u8>::new(), None, || false)?;
 			assert!(matches!(result, ReadResult::Line(ref line) if line == "AB"));
 		}
+		Ok(())
+	}
+
+	/// Contract: concurrent reads of duplicated pipe descriptors serialize
+	/// around a character-limit pushback, so a waiting reader gets the byte
+	/// from the held queue instead of timing out on an empty pipe.
+	#[test]
+	#[expect(clippy::panic_in_result_fn)]
+	fn test_concurrent_reads_see_character_limit_pushback() -> anyhow::Result<()> {
+		use std::io::Write;
+
+		let (reader, mut writer) = std::io::pipe()?;
+		let first_input = brush_core::openfiles::OpenFile::from(reader);
+		let held = first_input.held_input().expect("pipe holds input").clone();
+		let second_input = first_input.try_clone()?;
+		let first_command = ReadCommand { raw_mode: true, return_after_n_chars: Some(1), ..test_command() };
+		let expected_first = decode_line(vec![0xc3]);
+		let (first_sender, first_receiver) = std::sync::mpsc::channel();
+		let first = std::thread::spawn(move || {
+			let result = first_command.read_line(first_input, Vec::<u8>::new(), None, || false);
+			let _ = first_sender.send(matches!(result, Ok(ReadResult::Line(line)) if line == expected_first));
+		});
+
+		let lock_deadline = Instant::now() + Duration::from_secs(5);
+		loop {
+			if held.try_lock_reader().is_none() {
+				break;
+			}
+			assert!(Instant::now() < lock_deadline, "first read did not acquire the descriptor lock");
+			std::thread::sleep(Duration::from_millis(1));
+		}
+
+		let (second_waiting_sender, second_waiting_receiver) = std::sync::mpsc::channel();
+		let (second_sender, second_receiver) = std::sync::mpsc::channel();
+		let second = std::thread::spawn(move || {
+			let result = test_command().read_line(
+				second_input,
+				Vec::<u8>::new(),
+				Some(Duration::from_secs(2)),
+				move || {
+					let _ = second_waiting_sender.send(());
+					false
+				},
+			);
+			let _ = second_sender.send(matches!(result, Ok(ReadResult::Line(line)) if line == "A"));
+		});
+
+		second_waiting_receiver.recv_timeout(Duration::from_secs(5))?;
+		writer.write_all(b"\xC3A\nB\n")?;
+		drop(writer);
+		assert_eq!(first_receiver.recv_timeout(Duration::from_secs(5)), Ok(true));
+		assert_eq!(second_receiver.recv_timeout(Duration::from_secs(5)), Ok(true));
+		first.join().expect("first read thread");
+		second.join().expect("second read thread");
+		Ok(())
+	}
+
+	#[test]
+	#[expect(clippy::panic_in_result_fn)]
+	fn test_read_timeout_includes_waiting_for_the_shared_reader_lock() -> anyhow::Result<()> {
+		let (reader, _writer) = std::io::pipe()?;
+		let input = brush_core::openfiles::OpenFile::from(reader);
+		let held = input.held_input().expect("pipe holds input").clone();
+		let _guard = held.lock_reader();
+
+		let result = test_command().read_line(
+			input,
+			Vec::<u8>::new(),
+			Some(Duration::from_millis(50)),
+			|| false,
+		)?;
+		assert!(matches!(result, ReadResult::TimedOut(None)));
 		Ok(())
 	}
 

@@ -4,7 +4,7 @@ use std::{
 	collections::{HashMap, VecDeque},
 	io::IsTerminal,
 	process::Stdio,
-	sync::{Arc, Mutex, MutexGuard, PoisonError},
+	sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError},
 };
 
 use crate::{ShellFd, error, ioutils, sys};
@@ -38,17 +38,20 @@ pub trait Stream: std::io::Read + std::io::Write + Send + Sync {
 /// `try_clone` lineage, so an `OpenFile` built from a raw descriptor starts
 /// with an empty store.
 #[derive(Clone, Default)]
-pub struct HeldInput(Arc<Mutex<VecDeque<u8>>>);
+pub struct HeldInput {
+	bytes:      Arc<Mutex<VecDeque<u8>>>,
+	read_lock:  Arc<Mutex<()>>,
+}
 
 impl HeldInput {
 	/// Takes the first held byte, if any.
 	pub fn pop(&self) -> Option<u8> {
-		self.lock().pop_front()
+		self.lock_bytes().pop_front()
 	}
 
 	/// Holds `bytes` ahead of anything already held, in input order.
 	pub fn put_back(&self, bytes: &[u8]) {
-		let mut held = self.lock();
+		let mut held = self.lock_bytes();
 		for &byte in bytes.iter().rev() {
 			held.push_front(byte);
 		}
@@ -56,11 +59,28 @@ impl HeldInput {
 
 	/// Whether nothing is held.
 	pub fn is_empty(&self) -> bool {
-		self.lock().is_empty()
+		self.lock_bytes().is_empty()
 	}
 
-	fn lock(&self) -> MutexGuard<'_, VecDeque<u8>> {
-		self.0.lock().unwrap_or_else(PoisonError::into_inner)
+	/// Serializes builtin readers of this open file description. A reader holds
+	/// this guard until it has either consumed a line or put back any byte it
+	/// read past its limit, so another reader cannot wait on the descriptor while
+	/// that byte moves into the held-input queue.
+	pub fn lock_reader(&self) -> MutexGuard<'_, ()> {
+		self.read_lock.lock().unwrap_or_else(PoisonError::into_inner)
+	}
+
+	/// Tries to serialize a builtin reader without blocking.
+	pub fn try_lock_reader(&self) -> Option<MutexGuard<'_, ()>> {
+		match self.read_lock.try_lock() {
+			Ok(guard) => Some(guard),
+			Err(TryLockError::WouldBlock) => None,
+			Err(TryLockError::Poisoned(error)) => Some(error.into_inner()),
+		}
+	}
+
+	fn lock_bytes(&self) -> MutexGuard<'_, VecDeque<u8>> {
+		self.bytes.lock().unwrap_or_else(PoisonError::into_inner)
 	}
 }
 
