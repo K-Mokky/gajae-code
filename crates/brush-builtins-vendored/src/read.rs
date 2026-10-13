@@ -701,8 +701,9 @@ where
 					line.push(BACKSLASH);
 					raw_backslashes.push(false);
 				}
+				// Decode without finalizing partial character state or persisting ACP fallback.
 				return Ok(ReadResult::TimedOut(
-					(!line.is_empty()).then(|| reader.source.decode_line(line)),
+					(!line.is_empty()).then(|| reader.source.decode_bytes_temporary(&line)),
 				));
 			},
 
@@ -1577,4 +1578,6 @@ mod tests {
 		assert!(b.held_input().expect("a pipe holds input").is_empty());
 		Ok(())
 	}
+
+
 }

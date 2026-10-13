@@ -5,7 +5,7 @@ use std::io::{self, Read};
 
 use brush_core::{
 	openfiles::OpenFile,
-	output_decode::{OutputDecoderState, decode_owned_bytes, decode_owned_bytes_with_state},
+	output_decode::{OutputDecoderState, decode_owned_bytes, decode_owned_bytes_with_state, decode_bytes_without_eof},
 };
 
 /// ASCII control character for Ctrl+C (ETX - End of Text).
@@ -93,6 +93,12 @@ impl LineInput {
 		let decoded = decode_owned_bytes_with_state(line, &mut state);
 		self.set_decoder_state(state);
 		decoded
+	}
+
+	/// Decodes a buffer without finalizing partial characters or persisting ACP selection.
+	/// Used for timeout cases where input is incomplete.
+	pub(crate) fn decode_bytes_temporary(&self, line: &[u8]) -> String {
+		decode_bytes_without_eof(line)
 	}
 }
 
@@ -210,6 +216,38 @@ mod tests {
 
 		let second = LineInput::new(input);
 		assert_eq!(second.decode_line(vec![0xd2, 0xbb]), "一");
+		Ok(())
+	}
+
+	#[cfg(windows)]
+	#[test]
+	fn temporary_decode_does_not_persist_acp_fallback() -> Result<()> {
+		// Regression: on timeout, decode_bytes_temporary must not persist ACP selection.
+		// Simulate: timeout on leading byte [0x80], then later read completes as UTF-8.
+		let (reader, _writer) = std::io::pipe()?;
+		let input = OpenFile::from(reader);
+		let held = input.held_input().expect("pipe holds input");
+
+		// Initial state is UTF-8.
+		let line_input = LineInput::new(input.try_clone()?);
+		let initial_state = line_input.decoder_state();
+		assert!(!initial_state.uses_acp(), "initial state should be UTF-8");
+
+		// Temporary decode (as on timeout) with a leading byte that could be ACP.
+		// This byte (0x80) is invalid UTF-8 but valid in many ACPs.
+		line_input.decode_bytes_temporary(&[0x80]);
+
+		// State should still be UTF-8, not ACP (even though 0x80 triggers ACP fallback in decode_line).
+		let state_after_temp = line_input.decoder_state();
+		assert!(
+			!state_after_temp.uses_acp(),
+			"temporary decode should not persist ACP selection"
+		);
+
+		// Verify that a later read still uses UTF-8, not ACP.
+		let second = LineInput::new(input);
+		// A complete UTF-8 char should decode as UTF-8, not ACP.
+		assert_eq!(second.decode_line(vec![0xe4, 0xb8, 0xad]), "中");
 		Ok(())
 	}
 }

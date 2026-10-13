@@ -178,42 +178,60 @@ impl OutputDecoder {
 			return out;
 		}
 
-		match str::from_utf8(&self.pending) {
-			Ok(text) => {
-				out.push_str(text);
-				self.pending.clear();
-			},
-			Err(error) => {
-				let valid_up_to = error.valid_up_to();
-				let error_len = error.error_len();
-				if valid_up_to > 0 {
-					// SAFETY: [..valid_up_to] is valid UTF-8 by valid_up_to().
-					out.push_str(unsafe { str::from_utf8_unchecked(&self.pending[..valid_up_to]) });
-				}
-
-				if error_len.is_none() && !eof {
-					self.pending.drain(..valid_up_to);
+		loop {
+			match str::from_utf8(&self.pending) {
+				Ok(text) => {
+					out.push_str(text);
+					self.pending.clear();
 					return out;
-				}
+				},
+				Err(error) => {
+					let valid_up_to = error.valid_up_to();
+					let error_len = error.error_len();
+					if valid_up_to > 0 {
+						// SAFETY: [..valid_up_to] is valid UTF-8 by valid_up_to().
+						out.push_str(unsafe { str::from_utf8_unchecked(&self.pending[..valid_up_to]) });
+					}
 
-				#[cfg(windows)]
-				if self.state.select_acp_fallback() {
-					// One encoding per command. Do not resume UTF-8 after
-					// a bad byte: later UTF-8 would be ACP-mojibake, but
-					// cmd/chcp emit ACP for the whole stream.
-					self.pending.drain(..valid_up_to);
-					out.push_str(&self.drain_acp(eof));
-					return out;
-				}
+					if error_len.is_none() && !eof {
+						self.pending.drain(..valid_up_to);
+						return out;
+					}
 
-				// Decode the malformed suffix in one pass; repeated front-drains
-				// would shift the remaining line once for every invalid sequence.
-				out.push_str(&String::from_utf8_lossy(&self.pending[valid_up_to..]));
-				self.pending.clear();
-			},
+					#[cfg(windows)]
+					if self.state.select_acp_fallback() {
+						// One encoding per command. Do not resume UTF-8 after
+						// a bad byte: later UTF-8 would be ACP-mojibake, but
+						// cmd/chcp emit ACP for the whole stream.
+						self.pending.drain(..valid_up_to);
+						out.push_str(&self.drain_acp(eof));
+						return out;
+					}
+
+					// Decode only the error bytes themselves as lossy; keep trailing incomplete
+					// UTF-8 for the next chunk (unless EOF).
+					let error_end = valid_up_to + error_len.unwrap_or(0);
+					if error_end > valid_up_to {
+						out.push_str(&String::from_utf8_lossy(&self.pending[valid_up_to..error_end]));
+					}
+					if eof {
+						// At EOF, lossy-decode any remaining incomplete sequence.
+						if error_end < self.pending.len() {
+							out.push_str(&String::from_utf8_lossy(&self.pending[error_end..]));
+						}
+						self.pending.clear();
+						return out;
+					} else {
+						// Not EOF: keep incomplete sequence for next chunk.
+						self.pending.drain(..error_end);
+						// Loop to process any remaining malformed bytes in pending.
+						if self.pending.is_empty() {
+							return out;
+						}
+					}
+				},
+			}
 		}
-
-		out
 	}
 
 	#[cfg(windows)]
@@ -259,6 +277,13 @@ pub fn decode_owned_bytes_with_state(
 	let decoded = decoder.drain(true);
 	*state = decoder.state();
 	decoded
+}
+
+/// Decode a buffer without finalizing it (not EOF). This is used for timeout cases
+/// where we want to emit what we have without committing partial character state.
+pub fn decode_bytes_without_eof(bytes: &[u8]) -> String {
+	let mut decoder = OutputDecoder::new();
+	decoder.push(bytes)
 }
 
 #[cfg(windows)]
@@ -452,6 +477,17 @@ mod tests {
 	fn invalid_utf8_becomes_replacement() {
 		let mut decoder = OutputDecoder::new();
 		assert_eq!(decoder.push(&[0xff]), "\u{FFFD}");
+		assert_eq!(decoder.finish(), "");
+	}
+
+	#[test]
+	fn malformed_byte_keeps_incomplete_utf8_suffix() {
+		// 0xff is an invalid byte, 0xe2 is the start of a 3-byte UTF-8 sequence (€).
+		// Should return replacement for 0xff but keep 0xe2 for the next chunk.
+		let mut decoder = OutputDecoder::new();
+		assert_eq!(decoder.push(&[0xff, 0xe2]), "\u{FFFD}");
+		// Next chunk completes the € character (0xE2 0x82 0xAC).
+		assert_eq!(decoder.push(&[0x82, 0xac]), "€");
 		assert_eq!(decoder.finish(), "");
 	}
 }
