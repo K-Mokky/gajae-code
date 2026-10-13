@@ -31,6 +31,7 @@ static FONT_DB: LazyLock<Arc<usvg::fontdb::Database>> = LazyLock::new(|| {
 });
 
 /// Rasterize bounded SVG/SVGZ bytes into a PNG without resolving local files.
+///
 /// DTD/entity declarations and SVG image elements are rejected rather than
 /// allowing unbounded expansion or silently returning an incomplete preview.
 ///
@@ -286,7 +287,7 @@ fn skip_markup(input: &[u8], start: usize, terminator: &[u8], name: &str) -> Res
 		.ok_or_else(|| napi::Error::from_reason(format!("Unterminated SVG {name}")))
 }
 
-fn is_xml_space(byte: u8) -> bool {
+const fn is_xml_space(byte: u8) -> bool {
 	matches!(byte, b' ' | b'\t' | b'\r' | b'\n')
 }
 
