@@ -35,6 +35,10 @@ type Fixture = {
 	promptDelivered: Promise<void>;
 	busyResponseEntered: Promise<void>;
 	imageBeginEntered: Promise<void>;
+	imageStagingEntered: Promise<void>;
+	imageStagingAcknowledged: Promise<void>;
+	releaseImageStaging(): void;
+	abortConnection(): void;
 	abortAcknowledgementEntered: Promise<void>;
 	thirdPromptDelivered: Promise<void>;
 	idleWaitScheduled: Promise<void>;
@@ -45,6 +49,8 @@ type Fixture = {
 	terminalReservationEntered: Promise<void>;
 	retryBackoffScheduled: Promise<void>;
 	fireRetryBackoff(): void;
+	fireCancelledRetryBackoff(): void;
+	cancelledRetryBackoffCount(): number;
 	advancePromptWatchdog(ms: number): void;
 	promptDeliveryCount(): number;
 	sendStopped(reason: StoppedReason): void;
@@ -128,6 +134,7 @@ async function createFixture(
 		rejectBlockedWorkingUpdate?: boolean;
 		blockFailureDiagnosticUpdate?: boolean;
 		blockedAgentMessageText?: string;
+		rejectBlockedAgentMessageUpdate?: boolean;
 		deferSecondPromptAcknowledgement?: boolean;
 		deferFirstPromptAcknowledgement?: boolean;
 		deferredPromptAcknowledgementError?: { code: string; message: string };
@@ -142,6 +149,7 @@ async function createFixture(
 		busyUntilIdle?: boolean;
 		busyAfterCancel?: boolean;
 		blockSecondImageBegin?: boolean;
+		blockInitialImageOperation?: "turn.image.begin" | "turn.image.append" | "turn.image.finish";
 		priorTranscriptUserTurn?: boolean;
 		promptAcknowledgementError?: {
 			code: string;
@@ -183,6 +191,7 @@ async function createFixture(
 	const terminalReservationEntered = Promise.withResolvers<void>();
 	const retryBackoffScheduled = Promise.withResolvers<void>();
 	const retryBackoffHandlers: Array<() => void> = [];
+	const cancelledRetryBackoffHandlers: Array<() => void> = [];
 	const deferredAbortAcknowledgements: Array<() => void> = [];
 
 	let promptWatchdogNow = 0;
@@ -193,6 +202,10 @@ async function createFixture(
 	const busyResponseEntered = Promise.withResolvers<void>();
 	const imageBeginEntered = Promise.withResolvers<void>();
 	const imageBeginRelease = Promise.withResolvers<void>();
+	const imageStagingEntered = Promise.withResolvers<void>();
+	const imageStagingRelease = Promise.withResolvers<void>();
+	const imageStagingAcknowledged = Promise.withResolvers<void>();
+	let heldInitialImageOperation = false;
 	const thirdPromptDelivered = Promise.withResolvers<void>();
 	const idleWaitScheduled = Promise.withResolvers<void>();
 	const abortAcknowledgementEntered = Promise.withResolvers<void>();
@@ -425,7 +438,14 @@ async function createFixture(
 									await imageBeginRelease.promise;
 								}
 							}
+							const held = !heldInitialImageOperation && frame.operation === options.blockInitialImageOperation;
+							if (held) {
+								heldInitialImageOperation = true;
+								imageStagingEntered.resolve();
+								await imageStagingRelease.promise;
+							}
 							socket.send(JSON.stringify({ type: "control_response", id: frame.id, ok: true, result }));
+							if (held) imageStagingAcknowledged.resolve();
 						} catch (error) {
 							const failure = error as Error & { code?: string };
 							socket.send(
@@ -641,6 +661,7 @@ async function createFixture(
 				) {
 					agentMessageUpdateEntered.resolve();
 					await agentMessageUpdateRelease.promise;
+					if (options.rejectBlockedAgentMessageUpdate) throw new Error("blocked agent message update rejected");
 				}
 				if (
 					blockNextIdleUpdate &&
@@ -708,7 +729,10 @@ async function createFixture(
 									retryBackoffScheduled.resolve();
 									return () => {
 										const index = retryBackoffHandlers.indexOf(handler);
-										if (index >= 0) retryBackoffHandlers.splice(index, 1);
+										if (index >= 0) {
+											retryBackoffHandlers.splice(index, 1);
+											cancelledRetryBackoffHandlers.push(handler);
+										}
 									};
 								}
 								const timer = setTimeout(handler, delayMs);
@@ -742,6 +766,10 @@ async function createFixture(
 		promptDelivered: delivered.promise,
 		busyResponseEntered: busyResponseEntered.promise,
 		imageBeginEntered: imageBeginEntered.promise,
+		imageStagingEntered: imageStagingEntered.promise,
+		imageStagingAcknowledged: imageStagingAcknowledged.promise,
+		releaseImageStaging: () => imageStagingRelease.resolve(),
+		abortConnection: () => abort.abort(),
 		abortAcknowledgementEntered: abortAcknowledgementEntered.promise,
 		thirdPromptDelivered: thirdPromptDelivered.promise,
 		idleWaitScheduled: idleWaitScheduled.promise,
@@ -755,6 +783,8 @@ async function createFixture(
 			const handler = retryBackoffHandlers.shift();
 			handler?.();
 		},
+		fireCancelledRetryBackoff: () => cancelledRetryBackoffHandlers.shift()?.(),
+		cancelledRetryBackoffCount: () => cancelledRetryBackoffHandlers.length,
 		advancePromptWatchdog: (ms: number) => {
 			promptWatchdogNow += ms;
 			for (const entry of promptWatchdogHandlers.splice(0)) {
@@ -822,6 +852,7 @@ async function createFixture(
 			agentMessageUpdateRelease.resolve();
 			failureDiagnosticRelease.resolve();
 			imageBeginRelease.resolve();
+			imageStagingRelease.resolve();
 			abort.abort();
 			imageUploads?.close();
 			server.stop(true);
@@ -995,6 +1026,59 @@ for (const method of ["uploadImageBegin", "uploadImageAppend", "uploadImageFinis
 			fixture.dispose();
 		}
 	});
+}
+
+for (const operation of ["turn.image.begin", "turn.image.append", "turn.image.finish"] as const) {
+	for (const interruption of ["none", "cancel", "connection abort"] as const) {
+		test(`ACP held initial ${operation} fences echo and dispatch (${interruption})`, async () => {
+			const fixture = await createFixture({ acceptStagedImages: true, blockInitialImageOperation: operation });
+			try {
+				const bytes = Buffer.from(
+					await Bun.file(path.join(import.meta.dir, "fixtures/sdk-inline-image-large.png")).arrayBuffer(),
+				);
+				const pending = imagePrompt(fixture, bytes);
+				const outcome = pending.then(
+					value => ({ value }),
+					error => ({ error }),
+				);
+				await bounded(fixture.imageStagingEntered, "held initial image staging");
+				expect(fixture.promptDeliveryCount()).toBe(0);
+				expect(fixture.updates.filter(update => update.update.sessionUpdate === "user_message_chunk")).toHaveLength(
+					0,
+				);
+				if (interruption === "cancel") {
+					await bounded(fixture.agent.cancel({ sessionId: fixture.sessionId }), "initial image cancel");
+					expect(await bounded(outcome, "cancel before image acknowledgement")).toEqual({
+						value: { stopReason: "cancelled" },
+					});
+				} else if (interruption === "connection abort") {
+					fixture.abortConnection();
+					expect(await bounded(outcome, "abort before image acknowledgement")).toMatchObject({
+						error: { code: "connection_closed" },
+					});
+				}
+				fixture.releaseImageStaging();
+				await bounded(fixture.imageStagingAcknowledged, "late image acknowledgement sent");
+				if (interruption === "none") {
+					await bounded(fixture.promptDelivered, "validated image prompt delivery");
+					fixture.sendStopped("end_turn");
+					expect(await bounded(outcome, "validated image prompt settlement")).toEqual({
+						value: { stopReason: "end_turn" },
+					});
+					expect(fixture.redeemedImages).toEqual([bytes]);
+				} else {
+					await Bun.sleep(20);
+					expect(fixture.promptDeliveryCount()).toBe(0);
+					expect(
+						fixture.updates.filter(update => update.update.sessionUpdate === "user_message_chunk"),
+					).toHaveLength(0);
+				}
+			} finally {
+				fixture.releaseImageStaging();
+				fixture.dispose();
+			}
+		});
+	}
 }
 
 test("ACP staged envelope overflow cannot leave a user echo", async () => {
@@ -1777,6 +1861,127 @@ test("ACP first-turn retry waits out a failure diagnostic still publishing after
 	}
 });
 
+for (const interruption of [
+	"cancel",
+	"failed cancel",
+	"close",
+	"delete",
+	"connection abort",
+	"publication failure",
+] as const) {
+	test(`ACP interrupts first-turn retry behind a held diagnostic (${interruption})`, async () => {
+		const fixture = await createFixture({
+			controlledRetryBackoff: true,
+			blockFailureDiagnosticUpdate: true,
+			...(interruption === "failed cancel" ? { abortAcknowledgement: { ok: true, result: {} } } : {}),
+			...(interruption === "publication failure"
+				? { blockedAgentMessageText: "fail publication", rejectBlockedAgentMessageUpdate: true }
+				: {}),
+		});
+		try {
+			const pending = prompt(fixture, "first turn readiness race");
+			const outcome = pending.then(
+				value => ({ value }),
+				error => ({ error }),
+			);
+			await bounded(fixture.promptDelivered, "first prompt delivery");
+			fixture.sendTerminal({
+				type: "agent_start",
+				sessionId: fixture.sessionId,
+				commandId: "prompt-terminal-command",
+				turnId: "prompt-terminal-turn",
+			});
+			fixture.sendDiagnostic();
+			fixture.sendReadinessFailure();
+			await bounded(fixture.failureDiagnosticEntered, "held original failure diagnostic");
+			await bounded(fixture.retryBackoffScheduled, "retry backoff scheduled");
+			fixture.fireRetryBackoff();
+			await Bun.sleep(0);
+			if (interruption === "cancel" || interruption === "failed cancel") {
+				const cancellation = bounded(fixture.agent.cancel({ sessionId: fixture.sessionId }), "retry cancel");
+				if (interruption === "failed cancel")
+					await expect(cancellation).rejects.toThrow("SDK did not acknowledge cancellation");
+				else await cancellation;
+			} else if (interruption === "close") {
+				expect(await bounded(fixture.agent.closeSession({ sessionId: fixture.sessionId }), "retry close")).toEqual(
+					{},
+				);
+			} else if (interruption === "delete") {
+				expect(
+					await bounded(fixture.agent.deleteSession({ sessionId: fixture.sessionId }), "retry delete"),
+				).toEqual({});
+			} else if (interruption === "connection abort") {
+				fixture.abortConnection();
+			} else {
+				// A session frame's publication failure reaches failSession, not voluntary teardown.
+				fixture.sendAssistantMessage("fail publication");
+				await bounded(fixture.agentMessageUpdateEntered, "held failing publication");
+				fixture.releaseAgentMessageUpdate();
+			}
+			const settled = await bounded(outcome, "retry interruption before diagnostic release");
+			if (interruption === "connection abort")
+				expect(settled).toMatchObject({ error: { code: "connection_closed" } });
+			else if (interruption === "publication failure")
+				expect(settled).toMatchObject({ error: { code: "frame_processing_failed" } });
+			else expect(settled).toEqual({ value: { stopReason: "cancelled" } });
+			expect(fixture.promptDeliveryCount()).toBe(1);
+			expect(fixture.updates.filter(update => update.update.sessionUpdate === "user_message_chunk")).toHaveLength(1);
+			fixture.releaseFailureDiagnostic();
+			await Bun.sleep(20);
+			expect(fixture.promptDeliveryCount()).toBe(1);
+			expect(fixture.updates.filter(update => update.update.sessionUpdate === "user_message_chunk")).toHaveLength(1);
+		} finally {
+			fixture.releaseAgentMessageUpdate();
+			fixture.releaseFailureDiagnostic();
+			fixture.dispose();
+		}
+	});
+}
+
+test("ACP cancelled retry backoff cannot affect a same-id replacement prompt", async () => {
+	const fixture = await createFixture({ controlledRetryBackoff: true });
+	try {
+		const pending = prompt(fixture, "first turn readiness race");
+		await bounded(fixture.promptDelivered, "first prompt delivery");
+		fixture.sendTerminal({
+			type: "agent_start",
+			sessionId: fixture.sessionId,
+			commandId: "prompt-terminal-command",
+			turnId: "prompt-terminal-turn",
+		});
+		fixture.sendReadinessFailure();
+		await bounded(fixture.retryBackoffScheduled, "retry backoff scheduled");
+		await bounded(fixture.agent.closeSession({ sessionId: fixture.sessionId }), "close during unexpired backoff");
+		expect(await bounded(pending, "cancelled retry without firing backoff")).toEqual({ stopReason: "cancelled" });
+		expect(fixture.cancelledRetryBackoffCount()).toBe(1);
+		expect(fixture.promptDeliveryCount()).toBe(1);
+		await bounded(
+			fixture.agent.loadSession({ sessionId: fixture.sessionId, cwd: fixture.cwd, mcpServers: [] }),
+			"same-id replacement session",
+		);
+		let replacementSettled = false;
+		const replacement = prompt(fixture, "replacement prompt");
+		void replacement.then(
+			() => {
+				replacementSettled = true;
+			},
+			() => {
+				replacementSettled = true;
+			},
+		);
+		await waitFor(() => fixture.promptDeliveryCount() === 2, "replacement delivery");
+		fixture.fireCancelledRetryBackoff();
+		await Bun.sleep(20);
+		expect(replacementSettled).toBe(false);
+		expect(fixture.promptDeliveryCount()).toBe(2);
+		expect(fixture.updates.filter(update => update.update.sessionUpdate === "user_message_chunk")).toHaveLength(2);
+		fixture.sendStopped("end_turn");
+		expect(await bounded(replacement, "replacement settlement")).toEqual({ stopReason: "end_turn" });
+	} finally {
+		fixture.dispose();
+	}
+});
+
 test("ACP admits a prompt after the first-turn retry completes (reservation released)", async () => {
 	const fixture = await createFixture();
 	try {
@@ -1852,10 +2057,9 @@ test("ACP settles the first-turn retry as cancelled when a cancel arrives during
 		// is acknowledged (no active turn to stop), so the cancel intent is retained for the
 		// retry owner to observe.
 		await bounded(fixture.agent.cancel({ sessionId: fixture.sessionId }), "backoff cancel acknowledgement");
-		// Firing the backoff must NOT resubmit a fresh turn: the retry observes the cancel and
-		// settles as cancelled instead.
-		fixture.fireRetryBackoff();
+		// Cancellation wakes the retry without manually firing its scheduled backoff.
 		expect(await bounded(pending, "cancelled first-turn retry")).toEqual({ stopReason: "cancelled" });
+		expect(fixture.cancelledRetryBackoffCount()).toBe(1);
 		expect(fixture.promptDeliveryCount()).toBe(1);
 	} finally {
 		fixture.dispose();
@@ -1885,8 +2089,8 @@ test("ACP settles the first-turn retry as cancelled even when the adapter cancel
 		await expect(
 			bounded(fixture.agent.cancel({ sessionId: fixture.sessionId }), "unacknowledged backoff cancel"),
 		).rejects.toThrow("SDK did not acknowledge cancellation");
-		fixture.fireRetryBackoff();
 		expect(await bounded(pending, "cancelled first-turn retry")).toEqual({ stopReason: "cancelled" });
+		expect(fixture.cancelledRetryBackoffCount()).toBe(1);
 		expect(fixture.promptDeliveryCount()).toBe(1);
 	} finally {
 		fixture.dispose();

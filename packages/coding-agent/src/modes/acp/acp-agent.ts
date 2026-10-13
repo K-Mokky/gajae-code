@@ -349,6 +349,8 @@ type SessionRecord = {
  */
 type FirstPromptRetryReservation = {
 	readonly firstPromptRetry: true;
+	readonly woken: Promise<void>;
+	readonly wake: () => void;
 	/**
 	 * Set once `#submitPrompt` dispatched a turn for this prompt. Distinguishes a prompt that
 	 * genuinely owned the session's first turn from a preflight rejection, so only the former
@@ -2255,7 +2257,8 @@ export class AcpAgent implements Agent {
 		if (!record) return await this.#submitPrompt(params, true);
 		// Identity of THIS caller's first-turn retry. Held on the record across the backoff so a
 		// concurrent prompt racing the gap is rejected as a conflict rather than admitted (review P1).
-		const retryReservation: FirstPromptRetryReservation = { firstPromptRetry: true };
+		const { promise: woken, resolve: wake } = Promise.withResolvers<void>();
+		const retryReservation: FirstPromptRetryReservation = { firstPromptRetry: true, woken, wake };
 		try {
 			let echoUserMessage = true;
 			for (let attempt = 0; ; attempt++) {
@@ -2275,7 +2278,7 @@ export class AcpAgent implements Agent {
 						attempt: attempt + 1,
 						maxRetries: ACP_FIRST_PROMPT_MAX_RETRIES,
 					});
-					await this.#delayFirstPromptRetry(attempt);
+					await this.#delayFirstPromptRetry(attempt, retryReservation);
 					// The failed attempt publishes its final text and its failure diagnostic on async
 					// tails, and `#submitPrompt` rejects any prompt while one of them is still in
 					// flight. A slow or backpressured ACP client keeps a tail running well past a
@@ -2283,7 +2286,7 @@ export class AcpAgent implements Agent {
 					// `conflict` raised by its own predecessor's publications. Wait the tails out
 					// here instead of weakening those guards, which still have to reject prompts
 					// racing in from other callers (review P1).
-					await this.#drainPromptPublicationTails(params.sessionId);
+					await this.#drainPromptPublicationTails(params.sessionId, retryReservation);
 					// A session/close or session/delete that won the backoff gap tore the record
 					// down without a waiter to settle, leaving its outcome on this reservation.
 					// Honor it here: resubmitting would only reach `#submitPrompt`'s not_found,
@@ -2303,6 +2306,11 @@ export class AcpAgent implements Agent {
 						record.cancelRequested = false;
 						return { stopReason: "cancelled" };
 					}
+					if (
+						this.#sessions.get(params.sessionId) !== record ||
+						record.pendingFirstPromptRetry !== retryReservation
+					)
+						throw new AcpSdkAdapterError("connection_closed", "ACP first-turn retry lost its session.");
 				}
 			}
 		} finally {
@@ -2377,8 +2385,11 @@ export class AcpAgent implements Agent {
 	 * conflict guards, and a tail can start another (the failure diagnostic awaits the final text),
 	 * so this drains until none is left rather than sampling once.
 	 */
-	async #drainPromptPublicationTails(id: string): Promise<void> {
+	async #drainPromptPublicationTails(id: string, reservation: FirstPromptRetryReservation): Promise<void> {
 		for (;;) {
+			const record = this.#sessions.get(id);
+			if (record?.pendingFirstPromptRetry !== reservation || record.cancelRequested || reservation.settlement)
+				return;
 			const tails = [
 				this.#finalTextTails.get(id),
 				this.#terminalMetadataTails.get(id),
@@ -2387,16 +2398,20 @@ export class AcpAgent implements Agent {
 			if (tails.length === 0) return;
 			// A publication failure is the tail's own business; it is logged where it happens and
 			// must not decide the retry.
-			await Promise.allSettled(tails);
+			await Promise.race([Promise.allSettled(tails), reservation.woken]);
 		}
 	}
 
 	/** Backoff between first-prompt retries, on the injectable watchdog clock so tests can advance it. */
-	#delayFirstPromptRetry(attempt: number): Promise<void> {
+	async #delayFirstPromptRetry(attempt: number, reservation: FirstPromptRetryReservation): Promise<void> {
 		const delayMs = ACP_FIRST_PROMPT_RETRY_BASE_DELAY_MS * (attempt + 1);
-		return new Promise<void>(resolve => {
-			this.#promptWatchdogClock.schedule(resolve, delayMs);
-		});
+		const { promise, resolve } = Promise.withResolvers<void>();
+		const cancel = this.#promptWatchdogClock.schedule(resolve, delayMs);
+		try {
+			await Promise.race([promise, reservation.woken]);
+		} finally {
+			cancel();
+		}
 	}
 
 	async #submitPrompt(
@@ -3300,6 +3315,7 @@ export class AcpAgent implements Agent {
 		// mid-cancel (e.g. preflight `busy`) can still settle as `cancelled`.
 		const pendingAdmission = record.pendingPromptAdmission;
 		record.cancelRequested = true;
+		record.pendingFirstPromptRetry?.wake();
 		const localCommand = !record.activePrompt && record.pendingPromptAdmission?.localCommand === true;
 		this.#settlePendingPromptAdmission(record, { kind: "cancelled" });
 		const waiter = record.activePrompt;
@@ -4606,6 +4622,7 @@ export class AcpAgent implements Agent {
 								kind: "rejected",
 								error: new AcpSdkAdapterError("connection_closed", `ACP session was ${reason}.`),
 							};
+					reservation.wake();
 					record.pendingFirstPromptRetry = undefined;
 				}
 				const admissionReservation = record.pendingPromptAdmission;
@@ -4676,6 +4693,11 @@ export class AcpAgent implements Agent {
 			record.pendingPromptAdmission.settlement = { kind: "rejected", error };
 			record.pendingPromptAdmission.wake();
 			record.pendingPromptAdmission = undefined;
+		}
+		if (record.pendingFirstPromptRetry) {
+			record.pendingFirstPromptRetry.settlement ??= { kind: "rejected", error };
+			record.pendingFirstPromptRetry.wake();
+			record.pendingFirstPromptRetry = undefined;
 		}
 		waiter?.reject(error);
 		try {
