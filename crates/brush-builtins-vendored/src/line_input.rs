@@ -226,7 +226,6 @@ mod tests {
 		// Simulate: timeout on leading byte [0x80], then later read completes as UTF-8.
 		let (reader, _writer) = std::io::pipe()?;
 		let input = OpenFile::from(reader);
-		let held = input.held_input().expect("pipe holds input");
 
 		// Initial state is UTF-8.
 		let line_input = LineInput::new(input.try_clone()?);

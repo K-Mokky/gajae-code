@@ -570,7 +570,7 @@ mod tests {
 		if std::env::var_os(CHILD_ENV).is_some() {
 			// Child: take one byte through `OpenFile::Stdin`, then read the rest from a
 			// duplicate of fd 0, the way a forked command inheriting stdin would.
-			let mut stdin = OpenFile::Stdin(std::io::stdin());
+			let mut stdin = OpenFile::from(std::io::stdin());
 			let mut first = [0u8; 1];
 			stdin.read_exact(&mut first)?;
 
