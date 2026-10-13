@@ -435,6 +435,13 @@ describe("immutable stable release contracts", () => {
 		expect(releaseScript).not.toContain('git(["add", "."])');
 
 	});
+	test("rebuilds release native addons with the distribution provenance profile", async () => {
+		const releaseScript = await Bun.file(path.join(repoRoot, "scripts/release.ts")).text();
+
+		expect(releaseScript).toContain(
+			'await $`bun --cwd=packages/natives run build`.env({ ...process.env, PI_NATIVE_PROFILE: "dist" });',
+		);
+	});
 	test("release entrypoints accept only their declared mode-specific arguments", () => {
 		expect(parseReleasePublishCli(["--dry-run"])).toEqual({ mode: "dry-run" });
 		expect(parseReleasePublishCli(["--prepare-evidence", "--evidence-dir", "release-evidence"])).toEqual({
