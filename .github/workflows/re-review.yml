@@ -131,12 +131,41 @@ jobs:
               }
             }
             
-            console.log('Reviewers to request:', reviewersToRequest);
-            return JSON.stringify(reviewersToRequest);
+            // GitHub's request-reviewers endpoint only accepts current write
+            // collaborators. A single ineligible user would reject a batch,
+            // so filter candidates before submitting the request.
+            const eligibleReviewers = [];
+            for (const reviewer of reviewersToRequest) {
+              try {
+                const collaborator = await github.rest.repos.getCollaboratorPermissionLevel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  username: reviewer,
+                });
+
+                if (['admin', 'maintain', 'write'].includes(collaborator.data.permission)) {
+                  eligibleReviewers.push(reviewer);
+                } else {
+                  console.log(`Skipping ${reviewer}: permission ${collaborator.data.permission} cannot be requested`);
+                }
+              } catch (error) {
+                if (error.status === 404) {
+                  console.log(`Skipping ${reviewer}: no current collaborator access`);
+                  continue;
+                }
+                throw error;
+              }
+            }
+
+            console.log('Eligible reviewers to request:', eligibleReviewers);
+            return JSON.stringify(eligibleReviewers);
 
       - name: Request reviews
+        id: request-reviewers
         if: steps.get-reviewers.outcome == 'success' && steps.get-reviewers.outputs.result != '[]'
         uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea  # v7
+        env:
+          REVIEWERS_JSON: ${{ steps.get-reviewers.outputs.result }}
         with:
           result-encoding: string
           script: |
@@ -147,8 +176,7 @@ jobs:
               pull_number: context.issue.number,
             });
             
-            const reviewersStr = '${{ steps.get-reviewers.outputs.result }}';
-            const reviewers = JSON.parse(reviewersStr);
+            const reviewers = JSON.parse(process.env.REVIEWERS_JSON);
             
             await github.rest.pulls.requestReviewers({
               owner: context.repo.owner,
@@ -182,5 +210,5 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
-              body: 'No reviewers to re-request (all with pending feedback are already requested).',
+              body: 'No eligible reviewers to re-request (reviewers with pending feedback may already be requested or lack write access).',
             });

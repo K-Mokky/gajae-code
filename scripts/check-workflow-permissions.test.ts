@@ -277,6 +277,24 @@ describe("workflow permission policy", () => {
 		expect(!REQUIRED_READ_DEFAULT.includes(RE_REVIEW_WORKFLOW)).toBe(true);
 	});
 
+	test("re-review filters to requestable reviewers and passes reviewer data through the environment", async () => {
+		const source = await parsedWorkflow(RE_REVIEW_WORKFLOW);
+		const jobs = documentRecord(source.jobs);
+		const steps = documentRecord(jobs["request-review-on-comment"]).steps as unknown[];
+		const stepWithId = (id: string) => steps.map(documentRecord).find(step => step.id === id);
+		const reviewerScript = documentRecord(documentRecord(stepWithId("get-reviewers")).with).script as string;
+		const requestStep = documentRecord(stepWithId("request-reviewers"));
+		const requestScript = documentRecord(requestStep.with).script as string;
+
+		expect(reviewerScript).toContain("getCollaboratorPermissionLevel");
+		expect(reviewerScript).toContain("['admin', 'maintain', 'write']");
+		expect(reviewerScript).toContain("eligibleReviewers.push(reviewer)");
+		expect(reviewerScript).toContain("return JSON.stringify(eligibleReviewers)");
+		expect(requestStep.env).toEqual({ REVIEWERS_JSON: "${{ steps.get-reviewers.outputs.result }}" });
+		expect(requestScript).toContain("JSON.parse(process.env.REVIEWERS_JSON)");
+		expect(requestScript).not.toContain("${{");
+	});
+
 	test("detects if re-review.yml has workflow-level write permissions instead of job-level", async () => {
 		const source = await parsedWorkflow(RE_REVIEW_WORKFLOW);
 		const document = structuredClone(source);
