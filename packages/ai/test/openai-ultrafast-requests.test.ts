@@ -200,15 +200,34 @@ describe("ultrafast request serialization for bundled models", () => {
 		const catalogModel = getBundledModel("openai-codex", "gpt-6-astra") as Model<"openai-codex-responses">;
 		expect(catalogModel.compat?.supportsUltrafastTier).toBe(true);
 		const model = { ...catalogModel, preferWebsockets: false };
-		const bodies = captureRequests(completedResponseEvents());
+		const standardBodies = captureRequests(completedResponseEvents());
+		const standardResult = await streamOpenAICodexResponses(model, testContext, {
+			apiKey: codexTestToken(),
+			serviceTier: "default",
+		}).result();
 
-		const result = await streamOpenAICodexResponses(model, testContext, {
+		const ultrafastBodies = captureRequests(completedResponseEvents());
+
+		const ultrafastResult = await streamOpenAICodexResponses(model, testContext, {
 			apiKey: codexTestToken(),
 			serviceTier: "ultrafast",
 		}).result();
 
-		expect(result.stopReason).toBe("stop");
-		expect(result.serviceTier).toBe("ultrafast");
-		expect(bodies[0]?.service_tier).toBe("ultrafast");
+		expect(standardResult.stopReason).toBe("stop");
+		expect(ultrafastResult.stopReason).toBe("stop");
+		expect(standardBodies[0]?.service_tier).toBeUndefined();
+		expect(ultrafastBodies[0]?.service_tier).toBe("ultrafast");
+		expect(ultrafastResult.serviceTier).toBe("ultrafast");
+		expect(ultrafastResult.usage.cost.input).toBeCloseTo(standardResult.usage.cost.input * 6, 12);
+		expect(ultrafastResult.usage.cost.output).toBeCloseTo(standardResult.usage.cost.output * 6, 12);
+		expect(ultrafastResult.usage.cost.cacheRead).toBeCloseTo(standardResult.usage.cost.cacheRead * 6, 12);
+		expect(ultrafastResult.usage.cost.cacheWrite).toBeCloseTo(standardResult.usage.cost.cacheWrite * 6, 12);
+		expect(ultrafastResult.usage.cost.total).toBeCloseTo(standardResult.usage.cost.total * 6, 12);
+		expect(ultrafastResult.usage.cost.total).toBe(
+			ultrafastResult.usage.cost.input +
+				ultrafastResult.usage.cost.output +
+				ultrafastResult.usage.cost.cacheRead +
+				ultrafastResult.usage.cost.cacheWrite,
+		);
 	});
 });
