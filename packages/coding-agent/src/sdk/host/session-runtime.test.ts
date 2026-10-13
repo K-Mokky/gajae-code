@@ -9043,12 +9043,16 @@ describe("accepted-control zero-execution bound (#4668)", () => {
 		await Bun.write(sessionFile, "");
 		const store = createReconciliationStore({ sessionFile, sessionId });
 		const claimCommitted = Promise.withResolvers<void>();
+		let startCommitted = false;
 		const observedStore: ReconciliationStore = {
 			...store,
 			transact: async mutator => {
+				const hadStartCommit = startCommitted;
 				let deadlineClaim = false;
+				let startedPrompt = false;
 				await store.transact(records => {
 					const updated = mutator(records);
+					startedPrompt = updated.some(record => record.kind === "prompt" && record.startedAt !== undefined);
 					deadlineClaim = updated.some(
 						record =>
 							record.kind === "prompt" &&
@@ -9058,7 +9062,10 @@ describe("accepted-control zero-execution bound (#4668)", () => {
 					);
 					return updated;
 				});
-				if (deadlineClaim) claimCommitted.resolve();
+				if (startedPrompt) startCommitted = true;
+				// A queued START transaction can snapshot later in-memory deadline intent.
+				// Only a later successful transaction proves that intent reached the store.
+				if (hadStartCommit && deadlineClaim) claimCommitted.resolve();
 			},
 		};
 		const activeTools = new Set(["unfenced-tool"]);
