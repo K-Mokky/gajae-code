@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import type { MarkdownTheme, SvgFigureResolveContext } from "../src/components/markdown";
-import { clearRenderCache, Markdown } from "../src/components/markdown";
+import { __markdownPerfCounters, clearRenderCache, Markdown } from "../src/components/markdown";
 import type { Component } from "../src/tui";
 import { defaultMarkdownTheme } from "./test-themes";
 
@@ -142,6 +142,28 @@ describe("Markdown asynchronous SVG figures", () => {
 		markdown.setText("```svg\n<svg/>", { streaming: true });
 		markdown.render(80);
 		expect(contexts[1]).toMatchObject({ streaming: true, closed: false });
+		markdown.dispose();
+	});
+
+	it("detects streamed SVG fences in the throttled parse instead of rescanning each update", () => {
+		const figures: DeferredFigure[] = [];
+		const markdown = new Markdown("", 0, 0, figureTheme(figures));
+		markdown.setStreaming(true);
+		__markdownPerfCounters.reset();
+		let source = "";
+		for (let index = 0; index < 40; index++) {
+			source += `SVG is mentioned in streamed prose ${index}.\n`;
+			markdown.setText(source, { streaming: true });
+			markdown.render(80);
+		}
+		expect(__markdownPerfCounters.svgFenceDetectionCalls).toBe(0);
+
+		source += "\n~~~ SVG\n<svg/>\n~~~";
+		markdown.setText(source, { streaming: true });
+		markdown.setStreaming(false);
+		markdown.render(80);
+		expect(figures).toHaveLength(1);
+		expect(__markdownPerfCounters.svgFenceDetectionCalls).toBe(0);
 		markdown.dispose();
 	});
 

@@ -65,6 +65,14 @@ describe("closePartialSvg", () => {
 		const source = `<svg>${"π".repeat(512 * 1024)}`;
 		expect(closePartialSvg(source)).toBeNull();
 	});
+
+	it("returns null before repairing partial sources beyond element, depth, or attribute limits", () => {
+		expect(closePartialSvg(`<svg>${"<rect/>".repeat(20_000)}`)).toBeNull();
+		expect(closePartialSvg(`<svg>${"<g>".repeat(256)}`)).toBeNull();
+
+		const attributes = Array.from({ length: 65 }, (_, index) => `data-${index}="x"`).join(" ");
+		expect(closePartialSvg(`<svg ${attributes}>`)).toBeNull();
+	});
 });
 
 describe("prepareSvg", () => {

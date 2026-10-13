@@ -328,10 +328,12 @@ export function resetMarkdownHighlightCallCount(): void {
 export const __markdownPerfCounters = {
 	lexerInvocations: 0,
 	lexedBytes: 0,
+	svgFenceDetectionCalls: 0,
 	highlightAdmissionScans: 0,
 	reset(): void {
 		this.lexerInvocations = 0;
 		this.lexedBytes = 0;
+		this.svgFenceDetectionCalls = 0;
 		this.highlightAdmissionScans = 0;
 	},
 };
@@ -518,6 +520,8 @@ export class Markdown implements Component {
 	#onStaleThrottle?: () => void;
 	#staleThrottleTimer?: ReturnType<typeof setTimeout>;
 	#mayHaveDynamicSvgFigures: boolean;
+	#svgFenceDetectionPending = false;
+	#svgResolverAvailable: boolean;
 	#hasActiveDynamicSvgFigures = false;
 	#hasRetryableSvgFigureFallback = false;
 	#cachedImageProtocol: typeof TERMINAL.imageProtocol | undefined;
@@ -534,7 +538,9 @@ export class Markdown implements Component {
 		codeBlockIndent: number = 2,
 	) {
 		this.#text = text;
-		this.#mayHaveDynamicSvgFigures = theme.resolveSvgFigure !== undefined && hasSvgFence(text);
+		this.#svgResolverAvailable = theme.resolveSvgFigure !== undefined;
+		if (this.#svgResolverAvailable) __markdownPerfCounters.svgFenceDetectionCalls++;
+		this.#mayHaveDynamicSvgFigures = this.#svgResolverAvailable && hasSvgFence(text);
 		this.#paddingX = paddingX;
 		this.#paddingY = paddingY;
 		this.#theme = theme;
@@ -551,13 +557,23 @@ export class Markdown implements Component {
 			this.setStreaming(options.streaming);
 		}
 		if (this.#text !== text) this.#rejectedParseKey = undefined;
-		const previousText = this.#text;
+		const textChanged = this.#text !== text;
 		this.#text = text;
 		const svgResolverAvailable = this.#theme.resolveSvgFigure !== undefined;
-		// A positive fence decision remains conservative as source is appended; replacements must be rescanned.
-		const canReusePositiveSvgFenceResult =
-			svgResolverAvailable && this.#mayHaveDynamicSvgFigures && text.startsWith(previousText);
-		this.#mayHaveDynamicSvgFigures = svgResolverAvailable && (canReusePositiveSvgFenceResult || hasSvgFence(text));
+		const svgResolverChanged = svgResolverAvailable !== this.#svgResolverAvailable;
+		this.#svgResolverAvailable = svgResolverAvailable;
+		if (!svgResolverAvailable) {
+			this.#mayHaveDynamicSvgFigures = false;
+			this.#svgFenceDetectionPending = false;
+		} else if (this.#streaming) {
+			// Streaming writes already feed the throttled lexer; don't rescan the growing
+			// document here before that parse budget gets a chance to run.
+			if (textChanged || svgResolverChanged) this.#svgFenceDetectionPending = true;
+		} else {
+			__markdownPerfCounters.svgFenceDetectionCalls++;
+			this.#mayHaveDynamicSvgFigures = hasSvgFence(text);
+			this.#svgFenceDetectionPending = false;
+		}
 		if (this.#streaming) {
 			return;
 		}
@@ -722,6 +738,7 @@ export class Markdown implements Component {
 		if (
 			!this.#hasActiveDynamicSvgFigures &&
 			!this.#hasRetryableSvgFigureFallback &&
+			!this.#svgFenceDetectionPending &&
 			this.#cachedLines &&
 			this.#cachedText === this.#text &&
 			this.#cachedWidth === width &&
@@ -796,6 +813,7 @@ export class Markdown implements Component {
 		const cached = renderCache.get(cacheKey);
 		if (
 			!this.#mayHaveDynamicSvgFigures &&
+			!this.#svgFenceDetectionPending &&
 			cached !== undefined &&
 			cached.source === renderCacheSource &&
 			(!includeAnchors || cached.anchorSpans !== undefined)
@@ -825,6 +843,13 @@ export class Markdown implements Component {
 			__markdownPerfCounters.lexedBytes += normalizedText.length;
 			tokens = markdownParser.lexer(normalizedText);
 		}
+		this.#mayHaveDynamicSvgFigures =
+			this.#theme.resolveSvgFigure !== undefined &&
+			tokens.some(token => {
+				if (token.type !== "code") return false;
+				return token.lang?.trim().split(/[ \t]/, 1)[0]?.toLowerCase() === "svg";
+			});
+		this.#svgFenceDetectionPending = false;
 		if (this.#streaming && this.#text === renderedText) {
 			this.#currentParse = { source: normalizedText, tokens };
 		}

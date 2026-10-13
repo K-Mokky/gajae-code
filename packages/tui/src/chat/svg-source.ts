@@ -127,6 +127,7 @@ export function closePartialSvg(source: string): string | null {
 	if (source.length > MAX_SVG_SOURCE_BYTES) return null;
 	if (Buffer.byteLength(source, "utf8") > MAX_SVG_SOURCE_BYTES) return null;
 	const open: string[] = [];
+	let elements = 0;
 	let rootSeen = false;
 	let end = 0;
 	let index = 0;
@@ -149,7 +150,14 @@ export function closePartialSvg(source: string): string | null {
 			const tag = source.slice(lt, close);
 			const name = /^<([^\s/>]+)/.exec(tag)?.[1];
 			if (name !== undefined) {
-				if (!isSelfClosingSvgTag(tag)) open.push(name);
+				elements++;
+				if (elements > MAX_SVG_ELEMENTS || countSvgAttributes(tag) > MAX_SVG_ATTRIBUTES_PER_ELEMENT) {
+					return null;
+				}
+				if (!isSelfClosingSvgTag(tag)) {
+					if (open.length >= MAX_SVG_NESTING_DEPTH) return null;
+					open.push(name);
+				}
 				if (!rootSeen && (name === "svg" || name.endsWith(":svg"))) rootSeen = true;
 			}
 		}
