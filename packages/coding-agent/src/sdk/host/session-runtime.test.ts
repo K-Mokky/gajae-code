@@ -9034,12 +9034,35 @@ describe("accepted-control zero-execution bound (#4668)", () => {
 		const sessionFile = path.join(cwd, ".gjc", "state", `${sessionId}.jsonl`);
 		await Bun.write(sessionFile, "");
 		const store = createReconciliationStore({ sessionFile, sessionId });
+		const claimCommitted = Promise.withResolvers<void>();
+		const observedStore: ReconciliationStore = {
+			...store,
+			transact: async mutator => {
+				let deadlineClaim = false;
+				await store.transact(records => {
+					const updated = mutator(records);
+					deadlineClaim = updated.some(
+						record =>
+							record.kind === "prompt" &&
+							record.pendingOutcome?.kind === "failed" &&
+							record.pendingOutcome.code === "prompt_deadline_exceeded" &&
+							record.pendingOutcome.provenance === "deadline",
+					);
+					return updated;
+				});
+				if (deadlineClaim) claimCommitted.resolve();
+			},
+		};
 		const activeTools = new Set(["unfenced-tool"]);
 		let boundaryWaitStarted = false;
 		let abortCalls = 0;
+		const started = Promise.withResolvers<void>();
 		let harness: InvocationHarness | undefined;
 		try {
 			harness = await invocationHarness(sessionId, cwd, {
+				broadcastInterceptor: frame => {
+					if (frame.kind === "agent_start") started.resolve();
+				},
 				settings: {
 					// This test covers deferred terminal recovery, not deadline-triggered worktree persistence.
 					get: (key: string) =>
@@ -9056,7 +9079,7 @@ describe("accepted-control zero-execution bound (#4668)", () => {
 					await neverSettlingPromise();
 				},
 				terminalAbortSeams: {
-					getReconciliationStore: () => store,
+					getReconciliationStore: () => observedStore,
 					getTerminalTurnEpoch: () => 109,
 					getActivePromptHandle: () => "deadline-captured-uncertain-run",
 					pendingToolExecutions: () => {
@@ -9072,17 +9095,25 @@ describe("accepted-control zero-execution bound (#4668)", () => {
 			const accepted = await harness.control("turn.prompt", { text: "capture uncertain end" });
 			expect(accepted.ok).toBe(true);
 			const correlation = { commandId: accepted.result?.commandId, turnId: accepted.result?.turnId };
-			await harness.emit("agent_start");
+			const sdkRunToken = `${correlation.commandId}:${correlation.turnId}`;
+			await harness.emit("agent_start", { sdkRunToken });
+			await started.promise;
 			await harness.emit("tool_execution_start", {
 				type: "tool_execution_start",
+				sdkRunToken,
 				toolCallId: "unfenced-tool",
 				toolName: "apply_patch",
 				args: {},
 			});
+			// Boundary timing begins after the recovery claim reaches disk, not while fsync is pending.
+			await claimCommitted.promise;
 			const waitDeadline = Date.now() + 2_000;
 			while (!boundaryWaitStarted && Date.now() < waitDeadline) await Bun.sleep(10);
-			expect(boundaryWaitStarted).toBe(true);
-			await harness.emit("agent_end", { stopReason: "cancelled" });
+			expect(
+				boundaryWaitStarted,
+				JSON.stringify({ records: store.snapshot(), frames: correlatedFrames(harness, correlation) }),
+			).toBe(true);
+			await harness.emit("agent_end", { sdkRunToken, stopReason: "cancelled" });
 			await Bun.sleep(5_200);
 			expect(abortCalls).toBe(0);
 			expect((await harness.query("turn.prompt_status", correlation)).result).toMatchObject({ status: "in_flight" });
