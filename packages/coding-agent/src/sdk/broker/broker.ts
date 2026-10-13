@@ -111,6 +111,7 @@ import {
 } from "./managed-task-dag";
 import { reconcileRunningManagedVerification, verifyManagedTaskAttempt } from "./managed-task-verification";
 import { createMasterCapabilityVerifier, readEndpoint } from "./master-capability";
+import { isProcessIncarnation } from "./process-incarnation";
 import { sdkInternalRuntimeImage } from "./runtime";
 import { type IndexedSession, isSessionAuthorityEligible, SessionIndex, type SessionList } from "./session-index";
 import {
@@ -1170,9 +1171,18 @@ const BROKER_LOCK_RETRY_MS = 10;
 type BrokerLockSnapshot = {
 	ownerId?: string;
 	pid: number;
+	incarnation?: string;
 	identity: string;
 	lockIdentity: string;
 };
+
+function isBrokerLockOwnerAlive(snapshot: BrokerLockSnapshot): boolean {
+	if (snapshot.pid <= 0 || !isPidAlive(snapshot.pid)) return false;
+	// A reused PID is not the owner. Missing incarnation evidence remains fail-closed.
+	if (!snapshot.incarnation) return true;
+	const incarnation = brokerProcessIncarnation(snapshot.pid);
+	return !incarnation || incarnation === snapshot.incarnation;
+}
 
 /** Tombstone prefix used by {@link Broker.reclaimStaleLock} when a dead owner's lock is renamed aside. */
 export const BROKER_LOCK_TOMBSTONE_PREFIX = ".broker.lock.stale-";
@@ -3670,7 +3680,7 @@ export class Broker {
 	}
 	async #lockSnapshot(raw: string, lockIdentity: string): Promise<BrokerLockSnapshot> {
 		try {
-			const lock = JSON.parse(raw) as { ownerId?: unknown; pid?: unknown };
+			const lock = JSON.parse(raw) as { ownerId?: unknown; pid?: unknown; incarnation?: unknown };
 			if (
 				typeof lock.ownerId === "string" &&
 				lock.ownerId.length > 0 &&
@@ -3678,7 +3688,13 @@ export class Broker {
 				Number.isInteger(lock.pid) &&
 				lock.pid > 0
 			)
-				return { ownerId: lock.ownerId, pid: lock.pid, identity: `owner:${lock.ownerId}`, lockIdentity };
+				return {
+					ownerId: lock.ownerId,
+					pid: lock.pid,
+					incarnation: isProcessIncarnation(lock.incarnation) ? lock.incarnation : undefined,
+					identity: `owner:${lock.ownerId}`,
+					lockIdentity,
+				};
 		} catch {}
 		return { pid: 0, identity: `contents:${createHash("sha256").update(raw).digest("hex")}`, lockIdentity };
 	}
@@ -3754,7 +3770,7 @@ export class Broker {
 			!current ||
 			current.identity !== snapshot.identity ||
 			current.lockIdentity !== snapshot.lockIdentity ||
-			(current.pid > 0 && isPidAlive(current.pid))
+			isBrokerLockOwnerAlive(current)
 		)
 			return;
 
@@ -3868,7 +3884,7 @@ export class Broker {
 			}
 			const snapshot = await this.#readLock();
 			if (!snapshot) continue;
-			if (snapshot.pid > 0 && isPidAlive(snapshot.pid)) {
+			if (isBrokerLockOwnerAlive(snapshot)) {
 				const starting = await this.#waitForBrokerDiscovery();
 				if (starting) {
 					logger.info(
@@ -3879,7 +3895,7 @@ export class Broker {
 					return starting;
 				}
 				const current = await this.#readLock();
-				if (current && current.identity === snapshot.identity && current.pid > 0 && isPidAlive(current.pid)) {
+				if (current && current.identity === snapshot.identity && isBrokerLockOwnerAlive(current)) {
 					logger.warn(
 						`sdk broker: lock contention, refusing to start because ${this.#lock} is held by live pid ${current.pid} that published no discovery record`,
 					);

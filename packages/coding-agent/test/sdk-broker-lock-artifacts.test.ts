@@ -9,6 +9,7 @@ import {
 	reapStaleBrokerLockArtifacts,
 	setLockArtifactGraceForTest,
 } from "../src/sdk/broker/broker";
+import * as brokerDiscovery from "../src/sdk/broker/discovery";
 import { brokerProcessIncarnation, writeBrokerDiscovery } from "../src/sdk/broker/discovery";
 import { ensureBroker } from "../src/sdk/broker/ensure";
 import { LifecycleLedger } from "../src/sdk/broker/lifecycle-ledger";
@@ -314,6 +315,116 @@ describe("broker lock artifact reaper", () => {
 
 		expect(await exists(stale)).toBe(false);
 		expect(await exists(fresh)).toBe(true);
+	});
+});
+
+describe("broker lock owner incarnation", () => {
+	async function writeOwner(agentDir: string, incarnation: unknown): Promise<string> {
+		const lock = path.join(agentDir, "sdk", "broker.lock");
+		await fs.mkdir(lock, { recursive: true, mode: 0o700 });
+		const record = path.join(lock, "owner.json");
+		await Bun.write(record, JSON.stringify({ version: 1, ownerId: "previous-owner", pid: process.pid, incarnation }));
+		return record;
+	}
+
+	function currentIncarnation(): string {
+		const incarnation = brokerProcessIncarnation(process.pid);
+		if (!incarnation) throw new Error("Test process incarnation is unavailable.");
+		return incarnation;
+	}
+
+	function differentIncarnation(incarnation: string): string {
+		const separator = incarnation.lastIndexOf(":");
+		return `${incarnation.slice(0, separator + 1)}${incarnation.slice(separator + 1) === "0" ? "1" : "0"}`;
+	}
+
+	it("reclaims a lock whose live PID belongs to a different incarnation", async () => {
+		const agentDir = await makeAgentDir();
+		const incarnation = currentIncarnation();
+		const record = await writeOwner(agentDir, differentIncarnation(incarnation));
+		const broker = new Broker({ agentDir });
+		try {
+			const discovery = await broker.start();
+			expect(broker.ownsDiscovery).toBe(true);
+			expect(discovery.ownerId).not.toBe("previous-owner");
+			expect(discovery.incarnation).toBe(incarnation);
+			expect(await Bun.file(record).json()).toMatchObject({ ownerId: discovery.ownerId, incarnation });
+			expect(process.kill(process.pid, 0)).toBe(true);
+		} finally {
+			await broker.stop();
+		}
+	});
+
+	it.each(["matching", "missing", "malformed"])("preserves a live owner's lock with %s incarnation", async kind => {
+		const agentDir = await makeAgentDir();
+		const incarnation = kind === "matching" ? currentIncarnation() : kind === "missing" ? undefined : "invalid";
+		const record = await writeOwner(agentDir, incarnation);
+		const original = await Bun.file(record).text();
+		const broker = new Broker({ agentDir });
+		try {
+			await expect(broker.start()).rejects.toThrow(`Broker lock is held by a live owner (pid ${process.pid})`);
+			expect(await Bun.file(record).text()).toBe(original);
+			expect(broker.ownsDiscovery).toBe(false);
+		} finally {
+			await broker.stop();
+		}
+	});
+
+	it("fails closed when the current process incarnation cannot be read", async () => {
+		const agentDir = await makeAgentDir();
+		const record = await writeOwner(agentDir, differentIncarnation(currentIncarnation()));
+		const original = await Bun.file(record).text();
+		const probe = vi.spyOn(brokerDiscovery, "brokerProcessIncarnation").mockReturnValue(undefined);
+		const broker = new Broker({ agentDir });
+		try {
+			await expect(broker.start()).rejects.toThrow(`Broker lock is held by a live owner (pid ${process.pid})`);
+			expect(await Bun.file(record).text()).toBe(original);
+			expect(broker.ownsDiscovery).toBe(false);
+		} finally {
+			probe.mockRestore();
+			await broker.stop();
+		}
+	});
+
+	it("rechecks incarnation after waiting for discovery", async () => {
+		const agentDir = await makeAgentDir();
+		const incarnation = currentIncarnation();
+		const previous = differentIncarnation(incarnation);
+		await writeOwner(agentDir, previous);
+		const probe = vi
+			.spyOn(brokerDiscovery, "brokerProcessIncarnation")
+			.mockReturnValue(incarnation)
+			.mockReturnValueOnce(previous);
+		const broker = new Broker({ agentDir });
+		try {
+			const discovery = await broker.start();
+			expect(broker.ownsDiscovery).toBe(true);
+			expect(discovery.ownerId).not.toBe("previous-owner");
+			expect(discovery.incarnation).toBe(incarnation);
+		} finally {
+			probe.mockRestore();
+			await broker.stop();
+		}
+	});
+
+	it("does not reclaim when incarnation evidence becomes unavailable before quarantine", async () => {
+		const agentDir = await makeAgentDir();
+		const incarnation = currentIncarnation();
+		const record = await writeOwner(agentDir, differentIncarnation(incarnation));
+		const original = await Bun.file(record).text();
+		const probe = vi
+			.spyOn(brokerDiscovery, "brokerProcessIncarnation")
+			.mockReturnValue(undefined)
+			.mockReturnValueOnce(incarnation);
+		const broker = new Broker({ agentDir });
+		try {
+			await expect(broker.start()).rejects.toThrow(`Broker lock is held by a live owner (pid ${process.pid})`);
+			expect(await Bun.file(record).text()).toBe(original);
+			expect(broker.ownsDiscovery).toBe(false);
+		} finally {
+			probe.mockRestore();
+			await broker.stop();
+		}
 	});
 });
 
