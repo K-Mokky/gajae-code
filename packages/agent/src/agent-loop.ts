@@ -4599,18 +4599,18 @@ async function runLoopBody(
 		}
 
 		// Agent would stop here. Check for follow-up messages.
-		if (loopSignal.aborted) {
-			if (lastAttemptAcceptedFinalAssistantMessage) break;
+		if (loopSignal.aborted && !lastAttemptAcceptedFinalAssistantMessage) {
 			finishCancelled(lastAttemptScope);
 			return;
 		}
-		await config.onBeforeYield?.();
-		if (loopSignal.aborted) {
-			if (lastAttemptAcceptedFinalAssistantMessage) break;
+		if (!loopSignal.aborted) {
+			await config.onBeforeYield?.();
+		}
+		if (loopSignal.aborted && !lastAttemptAcceptedFinalAssistantMessage) {
 			finishCancelled(lastAttemptScope);
 			return;
 		}
-		if (config.shouldPause?.()) {
+		if (!loopSignal.aborted && config.shouldPause?.()) {
 			publishAgentEnd(
 				stream,
 				config,
@@ -4622,7 +4622,8 @@ async function runLoopBody(
 		}
 		// Poll the consume-on-read recovery candidate before follow-ups so a real
 		// user message can supersede it without letting the stale recovery resurface
-		// after that follow-up turn.
+		// after that follow-up turn. An abort from an accepted final message_end must
+		// also see a pending recovery before the run can report successful completion.
 		const syntheticRecoveryMessage = await config.getSyntheticRecoveryMessage?.();
 		if (loopSignal.aborted) {
 			if (lastAttemptAcceptedFinalAssistantMessage && !syntheticRecoveryMessage) break;
