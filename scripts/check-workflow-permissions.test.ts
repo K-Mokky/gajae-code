@@ -277,6 +277,37 @@ describe("workflow permission policy", () => {
 		expect(!REQUIRED_READ_DEFAULT.includes(RE_REVIEW_WORKFLOW)).toBe(true);
 	});
 
+	test("skips deleted-author reviews and still discovers later reviewers", async () => {
+		const source = await parsedWorkflow(RE_REVIEW_WORKFLOW);
+		const jobs = documentRecord(source.jobs);
+		const steps = documentRecord(jobs["request-review-on-comment"]).steps as unknown[];
+		const getReviewers = steps.map(documentRecord).find(step => step.id === "get-reviewers");
+		const reviewerScript = documentRecord(documentRecord(getReviewers).with).script as string;
+		const helper = reviewerScript.match(/function latestReviewByUser\(reviews\) \{[\s\S]*?^\}/m);
+		expect(helper).not.toBeNull();
+
+		type Review = {
+			user: { login: string; type: string } | null;
+			state: string;
+			submitted_at: string;
+		};
+		const createLatestReviewByUser = new Function(
+			`${helper?.[0]}\nreturn latestReviewByUser;`,
+		) as () => (reviews: Review[]) => Map<string, Review>;
+		const latestReviewByUser = createLatestReviewByUser();
+
+		const selected = latestReviewByUser([
+			{ user: null, state: "COMMENTED", submitted_at: "2026-10-13T00:00:00Z" },
+			{
+				user: { login: "eligible-reviewer", type: "User" },
+				state: "COMMENTED",
+				submitted_at: "2026-10-13T00:01:00Z",
+			},
+		]);
+
+		expect([...selected.keys()]).toEqual(["eligible-reviewer"]);
+	});
+
 	test("re-review filters to requestable reviewers and passes reviewer data through the environment", async () => {
 		const source = await parsedWorkflow(RE_REVIEW_WORKFLOW);
 		const jobs = documentRecord(source.jobs);
