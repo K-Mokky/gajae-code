@@ -270,7 +270,17 @@ export function getEnvApiKey(provider: string): string | undefined {
 export function getEnvApiKeyEnvNames(provider: string): string[] {
 	const resolver = serviceProviderMap[provider];
 	const names = typeof resolver === "string" ? [resolver] : getFunctionResolverEnvNames(provider);
-	return names.filter(name => $credentialEnv(name) !== undefined);
+	return names.filter(name => {
+		const value = $credentialEnv(name);
+		if (value === undefined) return false;
+		if (provider === "kiro" && name === "KIRO_API_KEY") {
+			return value.trim().startsWith("ksk_") && !/[\x00-\x1f\x7f]/.test(value);
+		}
+		if (provider === "amazon-bedrock" && name === "AWS_BEARER_TOKEN_BEDROCK") {
+			return isValidBedrockBearerToken(value);
+		}
+		return true;
+	});
 }
 
 /** Describe the source selected by the provider environment resolver without exposing its value. */

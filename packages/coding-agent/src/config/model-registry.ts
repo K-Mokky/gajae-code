@@ -6067,6 +6067,11 @@ export class ModelRegistry {
 
 	/** Environment variable name for a provider API key configured in models.yml. */
 	getProviderConfigApiKeyEnvName(provider: string): string | undefined {
+		const configured = this.#acceptedConfigValue?.providers?.[provider];
+		if (configured?.apiKey && Bun.env[configured.apiKey]) return configured.apiKey;
+		if (configured?.openaiCompat?.apiKey && Bun.env[configured.openaiCompat.apiKey]) {
+			return configured.openaiCompat.apiKey;
+		}
 		return this.#customProviderApiKeyEnvNames.get(provider);
 	}
 

@@ -2368,8 +2368,14 @@ export class AuthStorage {
 		} catch {
 			return undefined;
 		}
-		if (selected?.credential.type === "api_key") return selected.id;
-		return this.#selectApiKeyCredential(storageProvider, sessionId)?.id;
+		if (selected?.credential.type === "api_key") {
+			const usable = this.#storedApiKeyUsability(storageProvider, selected.credential.key);
+			return selected.credential.key.startsWith("!") && usable !== true ? undefined : selected.id;
+		}
+		const candidate = this.#selectApiKeyCredential(storageProvider, sessionId);
+		if (!candidate) return undefined;
+		const usable = this.#storedApiKeyUsability(storageProvider, candidate.credential.key);
+		return candidate.credential.key.startsWith("!") && usable !== true ? undefined : candidate.id;
 	}
 
 	/** Whether an enabled stored row is currently available outside quota backoff. */

@@ -15,6 +15,7 @@ type ProviderAuthStatusSession = Pick<AgentSession, "credentialSessionId"> & {
 		ModelRegistry,
 		| "authStorage"
 		| "getAll"
+		| "getAvailable"
 		| "getConfiguredProviderIds"
 		| "getAuthStorageOwner"
 		| "getProviderConfigApiKeyEnvName"
@@ -25,7 +26,7 @@ type ProviderAuthStatusSession = Pick<AgentSession, "credentialSessionId"> & {
 
 interface CredentialSource {
 	kind: "api_key" | "oauth";
-	layer: "runtime" | "config" | "stored" | "environment" | "fallback";
+	layer: "runtime" | "config" | "stored" | "environment" | "fallback" | "pending";
 	label: string;
 }
 
@@ -78,12 +79,18 @@ function addSource(sources: CredentialSource[], source: CredentialSource): void 
 	}
 }
 
-function storedApiKeyLabel(entries: AuthCredentialSnapshotEntry[], rowId: number | undefined): string | undefined {
+function storedApiKeySource(
+	entries: AuthCredentialSnapshotEntry[],
+	rowId: number | undefined,
+): Omit<CredentialSource, "kind"> | undefined {
 	const apiKeys = entries.filter(entry => entry.credential.type === "api_key");
 	const selected = rowId === undefined ? undefined : apiKeys.find(entry => entry.id === rowId);
-	if (selected) return `API key (stored credential id:${selected.id})`;
-	if (apiKeys.length === 1) return `API key (stored credential id:${apiKeys[0]!.id})`;
-	if (apiKeys.length > 1) return "API key (stored credential; selection pending)";
+	if (selected) return { layer: "stored", label: `API key (stored credential id:${selected.id})` };
+	if (apiKeys.some(entry => entry.credential.type === "api_key" && entry.credential.key.startsWith("!"))) {
+		return { layer: "pending", label: "API key (stored credential; usability pending)" };
+	}
+	if (apiKeys.length === 1) return { layer: "stored", label: `API key (stored credential id:${apiKeys[0]!.id})` };
+	if (apiKeys.length > 1) return { layer: "pending", label: "API key (stored credential; selection pending)" };
 	return undefined;
 }
 
@@ -186,8 +193,8 @@ function activeSource(
 		const envName = session.modelRegistry.getProviderConfigApiKeyEnvName(provider);
 		if (!authStorage.hasLiteralConfigApiKey(provider, owner)) {
 			const rowId = authStorage.getProspectiveApiKeyCredentialRowId(provider, sessionId, { owner });
-			const storedLabel = storedApiKeyLabel(entries, rowId);
-			if (storedLabel) return { kind: "api_key", layer: "stored", label: storedLabel };
+			const storedSource = storedApiKeySource(entries, rowId);
+			if (storedSource) return { kind: "api_key", ...storedSource };
 		}
 		return {
 			kind: "api_key",
@@ -196,8 +203,8 @@ function activeSource(
 		};
 	}
 	const rowId = authStorage.getProspectiveApiKeyCredentialRowId(provider, sessionId, { owner });
-	const storedLabel = storedApiKeyLabel(entries, rowId);
-	if (storedLabel) return { kind: "api_key", layer: "stored", label: storedLabel };
+	const storedSource = storedApiKeySource(entries, rowId);
+	if (storedSource) return { kind: "api_key", ...storedSource };
 
 	const envProvider = resolveOAuthStorageProvider(provider);
 	const envSource = getEnvApiKeyCredentialSource(envProvider);
@@ -208,14 +215,16 @@ function activeSource(
 /** Format credential provenance for `/provider status` without returning credential values. */
 export function buildProviderAuthStatusText(session: ProviderAuthStatusSession): string {
 	const { modelRegistry } = session;
+	// Status must reflect rotating env-backed keys even before another model selection runs.
+	modelRegistry.getAvailable();
 	const authStorage = modelRegistry.authStorage;
 	const owner = modelRegistry.getAuthStorageOwner();
 	const snapshot = authStorage.exportSnapshot();
 	const providerIds = new Set([
-		...modelRegistry.getAll().map(model => model.provider),
-		...modelRegistry.getConfiguredProviderIds(),
-		...snapshot.credentials.map(entry => entry.provider),
-		...listProvidersWithEnvKey(),
+		...modelRegistry.getAll().map(model => resolveOAuthStorageProvider(model.provider)),
+		...modelRegistry.getConfiguredProviderIds().map(provider => resolveOAuthStorageProvider(provider)),
+		...snapshot.credentials.map(entry => resolveOAuthStorageProvider(entry.provider)),
+		...listProvidersWithEnvKey().map(provider => resolveOAuthStorageProvider(provider)),
 	]);
 	const providers = [...providerIds]
 		.filter(provider => authStorage.hasAuth(provider, session.credentialSessionId, { owner }))
@@ -224,7 +233,7 @@ export function buildProviderAuthStatusText(session: ProviderAuthStatusSession):
 
 	const lines = ["Provider credentials (active source per provider):"];
 	for (const provider of providers) {
-		const entries = snapshot.credentials.filter(entry => entry.provider === provider);
+		const entries = snapshot.credentials.filter(entry => resolveOAuthStorageProvider(entry.provider) === provider);
 		const activeType = authStorage.getEffectiveCredentialType(provider, session.credentialSessionId, { owner });
 		const sources = collectSources(provider, entries, modelRegistry, owner);
 		const active =
@@ -232,14 +241,15 @@ export function buildProviderAuthStatusText(session: ProviderAuthStatusSession):
 				? activeSource(provider, entries, session, owner, activeType)
 				: undefined;
 		lines.push(`${sanitizeDisplayLine(provider)}: ${active?.label ?? "credential source unavailable"}`);
-		const shadowed = active
-			? sources
-					.filter(
-						source =>
-							source.label !== active.label && (source.kind !== active.kind || source.layer !== active.layer),
-					)
-					.map(source => source.label)
-			: [];
+		const shadowed =
+			active && active.layer !== "pending"
+				? sources
+						.filter(
+							source =>
+								source.label !== active.label && (source.kind !== active.kind || source.layer !== active.layer),
+						)
+						.map(source => source.label)
+				: [];
 		if (shadowed.length > 0) lines.push(`  shadowed: ${[...new Set(shadowed)].join(", ")}`);
 	}
 	return lines.join("\n");

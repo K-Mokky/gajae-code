@@ -11,6 +11,8 @@ const envNames = [
 	"AWS_BEARER_TOKEN_BEDROCK",
 	"AWS_ACCESS_KEY_ID",
 	"AWS_SECRET_ACCESS_KEY",
+	"KIRO_API_KEY",
+	"AWS_BEARER_TOKEN_KIRO",
 	"GOOGLE_CLOUD_API_KEY",
 	"GOOGLE_APPLICATION_CREDENTIALS",
 	"GOOGLE_CLOUD_PROJECT",
@@ -57,6 +59,24 @@ describe("environment API-key source names", () => {
 			kind: "aws",
 			source: "environment-credentials",
 		});
+	});
+
+	it("omits Kiro environment variables rejected by the provider resolver", () => {
+		Bun.env.KIRO_API_KEY = "\x01invalid-kiro-key";
+		Bun.env.AWS_BEARER_TOKEN_KIRO = "valid-kiro-bearer-test";
+
+		expect(getEnvApiKeyEnvNames("kiro")).toEqual(["AWS_BEARER_TOKEN_KIRO"]);
+		expect(getEnvApiKeyCredentialSource("kiro")).toEqual({
+			kind: "environment",
+			name: "AWS_BEARER_TOKEN_KIRO",
+		});
+	});
+
+	it("omits a Bedrock bearer token rejected by its provider resolver", () => {
+		Bun.env.AWS_BEARER_TOKEN_BEDROCK = "\x01invalid-bedrock-token";
+
+		expect(getEnvApiKeyEnvNames("amazon-bedrock")).toEqual([]);
+		expect(getEnvApiKeyCredentialSource("amazon-bedrock")).toBeUndefined();
 	});
 
 	it("identifies Vertex ADC without exposing the credential file path", () => {

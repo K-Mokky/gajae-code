@@ -154,6 +154,7 @@ describe("provider slash command", () => {
 		const registry = {
 			authStorage: { exportSnapshot: () => ({ credentials: [] }), hasAuth: () => false },
 			getAll: () => [],
+			getAvailable: () => [],
 			getConfiguredProviderIds: () => [],
 			getAuthStorageOwner: () => ({}),
 		};
@@ -229,6 +230,40 @@ describe("provider slash command", () => {
 			expect(afterDispatch).toContain(`kagi: OAuth (account ${selected.credential.accountId})`);
 			expect(afterDispatch).not.toContain("kagi-account-one-secret");
 			expect(afterDispatch).not.toContain("kagi-account-two-secret");
+
+			await authStorage.set("openai-codex", {
+				type: "oauth",
+				access: "codex-account-secret",
+				refresh: "codex-account-refresh-secret",
+				expires: Date.now() + 60 * 60_000,
+				accountId: "codex-account-label",
+			});
+			registry.registerProvider(
+				"openai-codex-device",
+				{
+					baseUrl: "https://chatgpt.com/backend-api",
+					api: "openai-codex-responses",
+					oauth: { name: "Codex Alias Test", login: async () => "unused" },
+					models: [
+						{
+							id: "codex-alias-model",
+							name: "Codex Alias Model",
+							reasoning: false,
+							input: ["text"],
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+							contextWindow: 100_000,
+							maxTokens: 8_000,
+						},
+					],
+				},
+				"provider-status-alias-test",
+			);
+			const aliasStatus = await status();
+			const codexRows = aliasStatus
+				.split("\n")
+				.filter(line => line.startsWith("openai-codex:") || line.startsWith("openai-codex-device:"));
+			expect(codexRows).toEqual(["openai-codex: OAuth (account codex-account-label)"]);
+			expect(aliasStatus).not.toContain("codex-account-secret");
 		} finally {
 			if (originalKagiKey === undefined) delete Bun.env.KAGI_API_KEY;
 			else Bun.env.KAGI_API_KEY = originalKagiKey;
@@ -278,6 +313,38 @@ describe("provider slash command", () => {
 			expect(envStatus).toContain(`status-custom: API key (env ${TEST_PROVIDER_KEY_ENV})`);
 			expect(envStatus).not.toContain("custom-provider-secret-test-value");
 
+			const modelsConfig = YAML.parse(await Bun.file(path.join(tempAgentDir, "models.yml")).text()) as {
+				providers: Record<string, unknown>;
+			};
+			modelsConfig.providers["status-legacy"] = {
+				api: "openai-completions",
+				baseUrl: "https://legacy-proxy.example.test/v1",
+				apiKey: TEST_PROVIDER_KEY_ENV,
+				models: [
+					{
+						id: "legacy-model",
+						name: "Legacy Model",
+						reasoning: false,
+						input: ["text"],
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+						contextWindow: 100_000,
+						maxTokens: 8_000,
+					},
+				],
+			};
+			await Bun.write(path.join(tempAgentDir, "models.yml"), YAML.stringify(modelsConfig));
+			await registry.refresh("offline");
+			const legacyStatus = await status();
+			expect(legacyStatus).toContain(`status-legacy: API key (env ${TEST_PROVIDER_KEY_ENV})`);
+			expect(legacyStatus).not.toContain("custom-provider-secret-test-value");
+
+			delete Bun.env[TEST_PROVIDER_KEY_ENV];
+			const removedEnvStatus = await status();
+			expect(removedEnvStatus).not.toContain("status-custom:");
+			Bun.env[TEST_PROVIDER_KEY_ENV] = "custom-provider-secret-test-value";
+			const restoredEnvStatus = await status();
+			expect(restoredEnvStatus).toContain(`status-custom: API key (env ${TEST_PROVIDER_KEY_ENV})`);
+
 			await authStorage.set("status-custom", [
 				{ type: "api_key", key: "stored-custom-secret-one" },
 				{ type: "api_key", key: "stored-custom-secret-two" },
@@ -315,6 +382,11 @@ describe("provider slash command", () => {
 			const runtimeStatus = await status();
 			expect(runtimeStatus).toContain(`status-runtime: API key (env ${TEST_PROVIDER_KEY_ENV})`);
 			expect(runtimeStatus).not.toContain("custom-provider-secret-test-value");
+
+			await authStorage.set("status-command", { type: "api_key", key: "!empty-command-key-secret" });
+			const commandKeyStatus = await status();
+			expect(commandKeyStatus).toContain("status-command: API key (stored credential; usability pending)");
+			expect(commandKeyStatus).not.toContain("empty-command-key-secret");
 		} finally {
 			if (originalApiKey === undefined) delete Bun.env[TEST_PROVIDER_KEY_ENV];
 			else Bun.env[TEST_PROVIDER_KEY_ENV] = originalApiKey;
