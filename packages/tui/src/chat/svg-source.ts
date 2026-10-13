@@ -18,6 +18,10 @@ export type FigureSegment =
 /** A top-level (≤3-space indent) fenced-code opener. */
 const FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})(.*)$/;
 const SVG_TEXT = /svg/i;
+const MAX_SVG_SOURCE_BYTES = 1024 * 1024;
+const MAX_SVG_ELEMENTS = 20_000;
+const MAX_SVG_ATTRIBUTES_PER_ELEMENT = 64;
+const MAX_CSS_FUNCTION_DEPTH = 32;
 const svgMarkdownParser = new Marked();
 
 /** Whether `markdown` holds a ```svg fence {@link splitSvgFences} would lift. */
@@ -279,7 +283,64 @@ function rejectEmbeddedRasterImages(svg: string): void {
 	}
 }
 
+/** Bound work performed synchronously while preparing assistant-controlled SVG. */
+function validateSvgSource(svg: string): void {
+	if (Buffer.byteLength(svg, "utf8") > MAX_SVG_SOURCE_BYTES) {
+		throw new Error(`SVG source exceeds the ${MAX_SVG_SOURCE_BYTES}-byte limit`);
+	}
+
+	let elements = 0;
+	let index = 0;
+	while (index < svg.length) {
+		const lt = svg.indexOf("<", index);
+		if (lt < 0) break;
+
+		// Comments, CDATA, and processing instructions are not declarations or elements.
+		if (svg.startsWith("<!--", lt) || svg.startsWith("<![CDATA[", lt) || svg.startsWith("<?", lt)) {
+			const end = constructEnd(svg, lt);
+			if (end < 0) break;
+			index = end;
+			continue;
+		}
+		// DTDs and entity declarations can introduce image elements after this scan.
+		if (svg.startsWith("<!", lt)) {
+			throw new Error("SVG DTD and entity declarations are not supported");
+		}
+
+		const end = constructEnd(svg, lt);
+		if (end < 0) break;
+		const tag = svg.slice(lt, end);
+		if (!/^<\s*\//.test(tag) && /^<\s*[^!?/\s>]/.test(tag)) {
+			elements++;
+			if (elements > MAX_SVG_ELEMENTS) {
+				throw new Error(`SVG source exceeds the ${MAX_SVG_ELEMENTS}-element limit`);
+			}
+			const attributes = countSvgAttributes(tag);
+			if (attributes > MAX_SVG_ATTRIBUTES_PER_ELEMENT) {
+				throw new Error(`SVG elements may not have more than ${MAX_SVG_ATTRIBUTES_PER_ELEMENT} attributes`);
+			}
+		}
+		index = end;
+	}
+}
+
+function countSvgAttributes(tag: string): number {
+	let quote: string | undefined;
+	let count = 0;
+	for (const char of tag) {
+		if (quote !== undefined) {
+			if (char === quote) quote = undefined;
+		} else if (char === '"' || char === "'") {
+			quote = char;
+		} else if (char === "=") {
+			count++;
+		}
+	}
+	return count;
+}
+
 export function prepareSvg(svg: string, palette: Readonly<Record<string, string>>): string {
+	validateSvgSource(svg);
 	rejectEmbeddedRasterImages(svg);
 	const fg = palette.fg ?? "currentColor";
 	const resolved = resolveSvgCssVariables(svg, palette, fg);
@@ -503,7 +564,9 @@ function readCssVariableReference(source: string, start: number): CssVariableRef
 		} else if (char === '"' || char === "'") {
 			quote = char;
 		} else if (char === "(") {
-			depth++;
+			if (++depth > MAX_CSS_FUNCTION_DEPTH) {
+				throw new Error(`SVG CSS function nesting exceeds the ${MAX_CSS_FUNCTION_DEPTH}-level limit`);
+			}
 		} else if (char === ")" && --depth === 0) {
 			close = index;
 			break;

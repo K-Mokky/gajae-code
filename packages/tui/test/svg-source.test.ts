@@ -178,6 +178,29 @@ describe("prepareSvg", () => {
 		expect(prepared).toContain('<rect fill="#ff8800"/>');
 	});
 
+	describe("bounds SVG preprocessing", () => {
+		it("rejects DTD and entity declarations before they can expand into markup", () => {
+			const svg =
+				"<!DOCTYPE svg [<!ENTITY hidden \"<image href='data:image/png;base64,AA=='/>\">]>" + "<svg>&hidden;</svg>";
+			expect(() => prepareSvg(svg, palette)).toThrow(/DTD and entity declarations/);
+		});
+
+		it("rejects oversized sources and elements with excessive attributes", () => {
+			expect(() => prepareSvg(`<svg>${"x".repeat(1024 * 1024)}</svg>`, palette)).toThrow(/byte limit/);
+
+			const attributes = Array.from({ length: 65 }, (_, index) => `data-${index}="x"`).join(" ");
+			expect(() => prepareSvg(`<svg ${attributes}/>`, palette)).toThrow(/more than 64 attributes/);
+			expect(() => prepareSvg(`<svg>${"<rect/>".repeat(20_000)}</svg>`, palette)).toThrow(/element limit/);
+		});
+
+		it("rejects deeply nested CSS variable fallbacks before repeated rescans", () => {
+			let fallback = "var(--gjc-accent)";
+			for (let index = 0; index < 40; index++) fallback = `var(--missing-${index}, ${fallback})`;
+
+			expect(() => prepareSvg(`<svg><rect fill="${fallback}"/></svg>`, palette)).toThrow(/nesting exceeds/);
+		});
+	});
+
 	describe("rejects embedded raster images (structural, bypass-proof)", () => {
 		it("rejects <image> elements with data-URI href attributes", () => {
 			const svg = '<svg><image href="data:image/png;base64,iVBORw0KGg" width="1" height="1"/></svg>';
