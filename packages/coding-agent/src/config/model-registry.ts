@@ -6075,6 +6075,11 @@ export class ModelRegistry {
 		return this.#runtimeProviderApiKeyEnvNames.get(provider);
 	}
 
+	/** Whether a provider API key was registered by a runtime extension. */
+	hasRuntimeProviderApiKey(provider: string): boolean {
+		return this.#runtimeProviderApiKeys.has(provider);
+	}
+
 	/**
 	 * Whether this registry can serve a provider id from any active source.
 	 *

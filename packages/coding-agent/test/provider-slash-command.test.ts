@@ -174,6 +174,67 @@ describe("provider slash command", () => {
 		expect(editorText).toBe("");
 	});
 
+	it("defers multi-account OAuth labels until dispatch selects the session row", async () => {
+		tempAgentDir = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-provider-slash-"));
+		setAgentDir(tempAgentDir);
+		const originalKagiKey = Bun.env.KAGI_API_KEY;
+		delete Bun.env.KAGI_API_KEY;
+		try {
+			const authStorage = await AuthStorage.create(path.join(tempAgentDir, "auth.db"));
+			authStorages.push(authStorage);
+			await authStorage.set("kagi", [
+				{
+					type: "oauth",
+					access: "kagi-account-one-secret",
+					refresh: "kagi-account-one-refresh-secret",
+					expires: Date.now() + 60 * 60_000,
+					accountId: "kagi-account-one",
+				},
+				{
+					type: "oauth",
+					access: "kagi-account-two-secret",
+					refresh: "kagi-account-two-refresh-secret",
+					expires: Date.now() + 60 * 60_000,
+					accountId: "kagi-account-two",
+				},
+			]);
+			const registry = new ModelRegistry(authStorage, path.join(tempAgentDir, "models.yml"));
+			modelRegistries.push(registry);
+			const sessionId = "kagi-status-dispatch-session";
+			const command = BUILTIN_SLASH_COMMANDS_INTERNAL.find(entry => entry.name === "provider");
+			const status = async (): Promise<string> => {
+				const outputs: string[] = [];
+				await command?.handle?.({ name: "provider", args: "status", text: "/provider status" }, {
+					session: { modelRegistry: registry, credentialSessionId: sessionId },
+					output: (text: string) => outputs.push(text),
+				} as unknown as SlashCommandRuntime);
+				return outputs.join("\n");
+			};
+
+			const beforeDispatch = await status();
+			expect(beforeDispatch).toContain("kagi: OAuth (account selection pending)");
+			expect(beforeDispatch).not.toContain("shadowed: OAuth");
+			expect(beforeDispatch).not.toContain("kagi-account-one-secret");
+			expect(beforeDispatch).not.toContain("kagi-account-two-secret");
+
+			await registry.getApiKeyForProvider("kagi", sessionId);
+			const rowId = authStorage.getSessionCredentialRowId("kagi", sessionId);
+			const selected = authStorage
+				.exportSnapshot()
+				.credentials.find(entry => entry.id === rowId && entry.credential.type === "oauth");
+			if (selected?.credential.type !== "oauth" || !selected.credential.accountId) {
+				throw new Error("expected the selected Kagi OAuth row");
+			}
+			const afterDispatch = await status();
+			expect(afterDispatch).toContain(`kagi: OAuth (account ${selected.credential.accountId})`);
+			expect(afterDispatch).not.toContain("kagi-account-one-secret");
+			expect(afterDispatch).not.toContain("kagi-account-two-secret");
+		} finally {
+			if (originalKagiKey === undefined) delete Bun.env.KAGI_API_KEY;
+			else Bun.env.KAGI_API_KEY = originalKagiKey;
+		}
+	});
+
 	it("reports the configured --api-key-env name instead of its value", async () => {
 		tempAgentDir = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-provider-slash-"));
 		setAgentDir(tempAgentDir);
@@ -204,10 +265,10 @@ describe("provider slash command", () => {
 			);
 			await registry.refresh("offline");
 
-			const status = async (): Promise<string> => {
+			const status = async (credentialSessionId?: string): Promise<string> => {
 				const outputs: string[] = [];
 				await add?.handle?.({ name: "provider", args: "status", text: "/provider status" }, {
-					session: { modelRegistry: registry },
+					session: { modelRegistry: registry, credentialSessionId },
 					output: (text: string) => outputs.push(text),
 				} as unknown as SlashCommandRuntime);
 				return outputs.join("\n");
@@ -217,16 +278,43 @@ describe("provider slash command", () => {
 			expect(envStatus).toContain(`status-custom: API key (env ${TEST_PROVIDER_KEY_ENV})`);
 			expect(envStatus).not.toContain("custom-provider-secret-test-value");
 
-			await authStorage.set("status-custom", { type: "api_key", key: "stored-custom-secret-test-value" });
-			const storedKey = authStorage
-				.exportSnapshot()
-				.credentials.find(entry => entry.provider === "status-custom" && entry.credential.type === "api_key");
-			if (!storedKey) throw new Error("expected the stored custom provider API key");
-			const storedStatus = await status();
-			expect(storedStatus).toContain(`status-custom: API key (stored credential id:${storedKey.id})`);
-			expect(storedStatus).toContain(`shadowed: API key (env ${TEST_PROVIDER_KEY_ENV})`);
+			await authStorage.set("status-custom", [
+				{ type: "api_key", key: "stored-custom-secret-one" },
+				{ type: "api_key", key: "stored-custom-secret-two" },
+			]);
+			const credentialSessionId = "status-custom-dispatch-session";
+			const expectedRowId = authStorage.getProspectiveApiKeyCredentialRowId("status-custom", credentialSessionId, {
+				owner: registry.getAuthStorageOwner(),
+			});
+			if (expectedRowId === undefined) throw new Error("expected a prospective stored API key row");
+			const storedStatus = await status(credentialSessionId);
+			expect(storedStatus).toContain(`status-custom: API key (stored credential id:${expectedRowId})`);
+			expect(storedStatus).toContain(`API key (env ${TEST_PROVIDER_KEY_ENV})`);
 			expect(storedStatus).not.toContain("custom-provider-secret-test-value");
-			expect(storedStatus).not.toContain("stored-custom-secret-test-value");
+			expect(storedStatus).not.toContain("stored-custom-secret-one");
+			expect(storedStatus).not.toContain("stored-custom-secret-two");
+			await registry.getApiKeyForProvider("status-custom", credentialSessionId);
+			expect(authStorage.getSessionCredentialRowId("status-custom", credentialSessionId)).toBe(expectedRowId);
+
+			registry.registerProvider("status-runtime", {
+				baseUrl: "https://runtime-proxy.example.test/v1",
+				api: "openai-completions",
+				apiKey: TEST_PROVIDER_KEY_ENV,
+				models: [
+					{
+						id: "runtime-model",
+						name: "Runtime Model",
+						reasoning: false,
+						input: ["text"],
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+						contextWindow: 100_000,
+						maxTokens: 8_000,
+					},
+				],
+			});
+			const runtimeStatus = await status();
+			expect(runtimeStatus).toContain(`status-runtime: API key (env ${TEST_PROVIDER_KEY_ENV})`);
+			expect(runtimeStatus).not.toContain("custom-provider-secret-test-value");
 		} finally {
 			if (originalApiKey === undefined) delete Bun.env[TEST_PROVIDER_KEY_ENV];
 			else Bun.env[TEST_PROVIDER_KEY_ENV] = originalApiKey;

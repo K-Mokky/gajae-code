@@ -19,11 +19,13 @@ type ProviderAuthStatusSession = Pick<AgentSession, "credentialSessionId"> & {
 		| "getAuthStorageOwner"
 		| "getProviderConfigApiKeyEnvName"
 		| "getProviderRuntimeApiKeyEnvName"
+		| "hasRuntimeProviderApiKey"
 	>;
 };
 
 interface CredentialSource {
 	kind: "api_key" | "oauth";
+	layer: "runtime" | "config" | "stored" | "environment" | "fallback";
 	label: string;
 }
 
@@ -66,9 +68,23 @@ function environmentSourceLabel(source: EnvApiKeyCredentialSource): string {
 }
 
 function addSource(sources: CredentialSource[], source: CredentialSource): void {
-	if (!sources.some(existing => existing.kind === source.kind && existing.label === source.label)) {
+	if (
+		!sources.some(
+			existing =>
+				existing.kind === source.kind && existing.layer === source.layer && existing.label === source.label,
+		)
+	) {
 		sources.push(source);
 	}
+}
+
+function storedApiKeyLabel(entries: AuthCredentialSnapshotEntry[], rowId: number | undefined): string | undefined {
+	const apiKeys = entries.filter(entry => entry.credential.type === "api_key");
+	const selected = rowId === undefined ? undefined : apiKeys.find(entry => entry.id === rowId);
+	if (selected) return `API key (stored credential id:${selected.id})`;
+	if (apiKeys.length === 1) return `API key (stored credential id:${apiKeys[0]!.id})`;
+	if (apiKeys.length > 1) return "API key (stored credential; selection pending)";
+	return undefined;
 }
 
 function collectSources(
@@ -80,8 +96,15 @@ function collectSources(
 	const sources: CredentialSource[] = [];
 	const envProvider = resolveOAuthStorageProvider(provider);
 	for (const entry of entries) {
-		if (entry.credential.type === "oauth") addSource(sources, { kind: "oauth", label: oauthLabel(entry) });
-		else addSource(sources, { kind: "api_key", label: `API key (stored credential id:${entry.id})` });
+		if (entry.credential.type === "oauth") {
+			addSource(sources, { kind: "oauth", layer: "stored", label: oauthLabel(entry) });
+		} else {
+			addSource(sources, {
+				kind: "api_key",
+				layer: "stored",
+				label: `API key (stored credential id:${entry.id})`,
+			});
+		}
 	}
 
 	const authStorage = registry.authStorage;
@@ -89,13 +112,21 @@ function collectSources(
 		const envName = registry.getProviderRuntimeApiKeyEnvName(provider);
 		addSource(sources, {
 			kind: "api_key",
+			layer: "runtime",
 			label: envName ? `API key (env ${envName})` : "API key (runtime override)",
 		});
-	}
-	if (authStorage.hasConfigApiKey(provider, owner)) {
+	} else if (registry.hasRuntimeProviderApiKey(provider)) {
+		const envName = registry.getProviderRuntimeApiKeyEnvName(provider);
+		addSource(sources, {
+			kind: "api_key",
+			layer: "runtime",
+			label: envName ? `API key (env ${envName})` : "API key (runtime provider)",
+		});
+	} else if (authStorage.hasConfigApiKey(provider, owner)) {
 		const envName = registry.getProviderConfigApiKeyEnvName(provider);
 		addSource(sources, {
 			kind: "api_key",
+			layer: "config",
 			label: envName ? `API key (env ${envName})` : "API key (models.yml)",
 		});
 	}
@@ -105,10 +136,10 @@ function collectSources(
 			selectedEnvSource?.kind === "aws" && selectedEnvSource.source === "bearer-token"
 				? environmentSourceLabel(selectedEnvSource)
 				: environmentCredentialLabel(name);
-		addSource(sources, { kind: "api_key", label });
+		addSource(sources, { kind: "api_key", layer: "environment", label });
 	}
 	if (selectedEnvSource && selectedEnvSource.kind !== "environment") {
-		addSource(sources, { kind: "api_key", label: environmentSourceLabel(selectedEnvSource) });
+		addSource(sources, { kind: "api_key", layer: "environment", label: environmentSourceLabel(selectedEnvSource) });
 	}
 	return sources;
 }
@@ -123,55 +154,55 @@ function activeSource(
 	const { authStorage } = session.modelRegistry;
 	const sessionId = session.credentialSessionId;
 	if (activeType === "oauth") {
-		const credential = authStorage.getOAuthCredential(provider, sessionId, { owner });
 		const rowId = authStorage.getSessionCredentialRowId(provider, sessionId);
-		const row = entries.find(
-			entry =>
-				entry.credential.type === "oauth" && (entry.id === rowId || entry.credential.access === credential?.access),
-		);
-		return row
-			? { kind: "oauth", label: oauthLabel(row) }
-			: {
-					kind: "oauth",
-					label: credential?.accountId
-						? `OAuth (account ${displayAccountLabel(credential.accountId)})`
-						: credential?.email
-							? `OAuth (account ${displayAccountLabel(credential.email)})`
-							: "OAuth (stored account)",
-				};
+		const selected = rowId === undefined ? undefined : entries.find(entry => entry.id === rowId);
+		if (selected?.credential.type === "oauth") return { kind: "oauth", layer: "stored", label: oauthLabel(selected) };
+		const oauthEntries = entries.filter(entry => entry.credential.type === "oauth");
+		if (oauthEntries.length === 1) return { kind: "oauth", layer: "stored", label: oauthLabel(oauthEntries[0]!) };
+		return {
+			kind: "oauth",
+			layer: "stored",
+			label: oauthEntries.length > 1 ? "OAuth (account selection pending)" : "OAuth (stored account)",
+		};
 	}
 
 	if (authStorage.hasRuntimeApiKey(provider)) {
 		const envName = session.modelRegistry.getProviderRuntimeApiKeyEnvName(provider);
 		return {
 			kind: "api_key",
+			layer: "runtime",
 			label: envName ? `API key (env ${envName})` : "API key (runtime override)",
+		};
+	}
+	if (session.modelRegistry.hasRuntimeProviderApiKey(provider)) {
+		const envName = session.modelRegistry.getProviderRuntimeApiKeyEnvName(provider);
+		return {
+			kind: "api_key",
+			layer: "runtime",
+			label: envName ? `API key (env ${envName})` : "API key (runtime provider)",
 		};
 	}
 	if (authStorage.hasConfigApiKey(provider, owner)) {
 		const envName = session.modelRegistry.getProviderConfigApiKeyEnvName(provider);
 		if (!authStorage.hasLiteralConfigApiKey(provider, owner)) {
-			const rowId = authStorage.getSessionCredentialRowId(provider, sessionId);
-			const storedKey =
-				entries.find(entry => entry.credential.type === "api_key" && entry.id === rowId) ??
-				entries.find(entry => entry.credential.type === "api_key");
-			if (storedKey) return { kind: "api_key", label: `API key (stored credential id:${storedKey.id})` };
+			const rowId = authStorage.getProspectiveApiKeyCredentialRowId(provider, sessionId, { owner });
+			const storedLabel = storedApiKeyLabel(entries, rowId);
+			if (storedLabel) return { kind: "api_key", layer: "stored", label: storedLabel };
 		}
 		return {
 			kind: "api_key",
+			layer: "config",
 			label: envName ? `API key (env ${envName})` : "API key (models.yml)",
 		};
 	}
-	const rowId = authStorage.getSessionCredentialRowId(provider, sessionId);
-	const storedKey = entries.find(
-		entry => entry.credential.type === "api_key" && (entry.id === rowId || rowId === undefined),
-	);
-	if (storedKey) return { kind: "api_key", label: `API key (stored credential id:${storedKey.id})` };
+	const rowId = authStorage.getProspectiveApiKeyCredentialRowId(provider, sessionId, { owner });
+	const storedLabel = storedApiKeyLabel(entries, rowId);
+	if (storedLabel) return { kind: "api_key", layer: "stored", label: storedLabel };
 
 	const envProvider = resolveOAuthStorageProvider(provider);
 	const envSource = getEnvApiKeyCredentialSource(envProvider);
-	if (envSource) return { kind: "api_key", label: environmentSourceLabel(envSource) };
-	return { kind: "api_key", label: "API key (configured)" };
+	if (envSource) return { kind: "api_key", layer: "environment", label: environmentSourceLabel(envSource) };
+	return { kind: "api_key", layer: "fallback", label: "API key (configured)" };
 }
 
 /** Format credential provenance for `/provider status` without returning credential values. */
@@ -202,7 +233,12 @@ export function buildProviderAuthStatusText(session: ProviderAuthStatusSession):
 				: undefined;
 		lines.push(`${sanitizeDisplayLine(provider)}: ${active?.label ?? "credential source unavailable"}`);
 		const shadowed = active
-			? sources.filter(source => source.label !== active.label).map(source => source.label)
+			? sources
+					.filter(
+						source =>
+							source.label !== active.label && (source.kind !== active.kind || source.layer !== active.layer),
+					)
+					.map(source => source.label)
 			: [];
 		if (shadowed.length > 0) lines.push(`  shadowed: ${[...new Set(shadowed)].join(", ")}`);
 	}

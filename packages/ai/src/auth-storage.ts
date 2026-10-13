@@ -2349,6 +2349,29 @@ export class AuthStorage {
 		return this.#getStoredCredentials(storageProvider)[session.index]?.id;
 	}
 
+	/**
+	 * Preview the stored API-key row request dispatch would try for this session.
+	 * Requires a session id so the deterministic session order is used instead
+	 * of advancing the provider's round-robin cursor. Does not resolve key values
+	 * or mutate session selection.
+	 */
+	getProspectiveApiKeyCredentialRowId(
+		provider: string,
+		sessionId: string | undefined,
+		options?: Pick<AuthApiKeyOptions, "owner">,
+	): number | undefined {
+		if (!sessionId) return undefined;
+		const storageProvider = resolveOAuthStorageProvider(provider);
+		let selected: IndexedStoredCredential | undefined;
+		try {
+			selected = this.#resolveSelectedStoredCredential(storageProvider, options, sessionId);
+		} catch {
+			return undefined;
+		}
+		if (selected?.credential.type === "api_key") return selected.id;
+		return this.#selectApiKeyCredential(storageProvider, sessionId)?.id;
+	}
+
 	/** Whether an enabled stored row is currently available outside quota backoff. */
 	isCredentialAvailable(provider: string, rowId: number): boolean {
 		const storageProvider = resolveOAuthStorageProvider(provider);
