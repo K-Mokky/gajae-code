@@ -2,17 +2,23 @@ import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { AuthStorage } from "@gajae-code/ai/core";
 import { getAgentDir, setAgentDir } from "@gajae-code/utils";
 import { YAML } from "bun";
+import { ModelRegistry } from "../src/config/model-registry";
 import { BUILTIN_SLASH_COMMANDS_INTERNAL, executeBuiltinSlashCommand } from "../src/slash-commands/builtin-registry";
-import type { SlashCommandRuntime } from "../src/slash-commands/types";
+import type { SlashCommandRuntime, TuiSlashCommandRuntime } from "../src/slash-commands/types";
 
 let tempAgentDir: string | undefined;
+const authStorages: AuthStorage[] = [];
+const modelRegistries: ModelRegistry[] = [];
 const originalAgentDir = getAgentDir();
 const TEST_PROVIDER_KEY_ENV = "GJC_PROVIDER_SLASH_TEST_KEY";
 
 afterEach(async () => {
 	setAgentDir(originalAgentDir);
+	for (const registry of modelRegistries.splice(0)) await registry.dispose();
+	for (const storage of authStorages.splice(0)) storage.close();
 	if (tempAgentDir) {
 		await fs.rm(tempAgentDir, { recursive: true, force: true });
 		tempAgentDir = undefined;
@@ -50,6 +56,151 @@ describe("provider slash command", () => {
 		const output = outputs.join("\n");
 		expect(output).toContain("/login kagi");
 		expect(output).toMatch(/OAuth|account/);
+	});
+
+	it("reports OAuth as active and an API-key environment variable as shadowed without exposing secrets", async () => {
+		tempAgentDir = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-provider-slash-"));
+		setAgentDir(tempAgentDir);
+		const originalApiKey = Bun.env.ANTHROPIC_API_KEY;
+		Bun.env.ANTHROPIC_API_KEY = "anthropic-secret-test-value";
+		try {
+			const authStorage = await AuthStorage.create(path.join(tempAgentDir, "auth.db"));
+			authStorages.push(authStorage);
+			await authStorage.set("anthropic", {
+				type: "oauth",
+				access: "oauth-secret-test-value",
+				refresh: "oauth-refresh-secret-test-value",
+				expires: Date.now() + 60 * 60_000,
+				accountId: "account-123",
+			});
+			const registry = new ModelRegistry(authStorage, path.join(tempAgentDir, "models.yml"));
+			modelRegistries.push(registry);
+			const outputs: string[] = [];
+			const command = BUILTIN_SLASH_COMMANDS_INTERNAL.find(entry => entry.name === "provider");
+
+			await command?.handle?.({ name: "provider", args: "status", text: "/provider status" }, {
+				session: { modelRegistry: registry, credentialSessionId: "status-session" },
+				output: (text: string) => outputs.push(text),
+			} as unknown as SlashCommandRuntime);
+
+			const output = outputs.join("\n");
+			expect(output).toContain("anthropic: OAuth (account account-123)");
+			expect(output).toContain("shadowed: API key (env ANTHROPIC_API_KEY)");
+			expect(output).not.toContain("anthropic-secret-test-value");
+			expect(output).not.toContain("oauth-secret-test-value");
+		} finally {
+			if (originalApiKey === undefined) delete Bun.env.ANTHROPIC_API_KEY;
+			else Bun.env.ANTHROPIC_API_KEY = originalApiKey;
+		}
+	});
+
+	it("reports OAuth-only and environment-key-only providers", async () => {
+		tempAgentDir = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-provider-slash-"));
+		setAgentDir(tempAgentDir);
+		const originalAnthropicKey = Bun.env.ANTHROPIC_API_KEY;
+		const originalOpenAiKey = Bun.env.OPENAI_API_KEY;
+		delete Bun.env.ANTHROPIC_API_KEY;
+		Bun.env.OPENAI_API_KEY = "openai-secret-test-value";
+		try {
+			const authStorage = await AuthStorage.create(path.join(tempAgentDir, "auth.db"));
+			authStorages.push(authStorage);
+			await authStorage.set("anthropic", {
+				type: "oauth",
+				access: "oauth-secret-test-value",
+				refresh: "oauth-refresh-secret-test-value",
+				expires: Date.now() + 60 * 60_000,
+				accountId: "account-oauth-only",
+			});
+			const registry = new ModelRegistry(authStorage, path.join(tempAgentDir, "models.yml"));
+			modelRegistries.push(registry);
+			const outputs: string[] = [];
+			const command = BUILTIN_SLASH_COMMANDS_INTERNAL.find(entry => entry.name === "provider");
+
+			await command?.handle?.({ name: "provider", args: "status", text: "/provider status" }, {
+				session: { modelRegistry: registry, credentialSessionId: "status-session" },
+				output: (text: string) => outputs.push(text),
+			} as unknown as SlashCommandRuntime);
+
+			const output = outputs.join("\n");
+			expect(output).toContain("anthropic: OAuth (account account-oauth-only)");
+			expect(output).toContain("openai: API key (env OPENAI_API_KEY)");
+			expect(output).not.toMatch(/anthropic:\s+[^\n]*\n\s+shadowed:/);
+			expect(output).not.toContain("openai-secret-test-value");
+			expect(output).not.toContain("oauth-secret-test-value");
+		} finally {
+			if (originalAnthropicKey === undefined) delete Bun.env.ANTHROPIC_API_KEY;
+			else Bun.env.ANTHROPIC_API_KEY = originalAnthropicKey;
+			if (originalOpenAiKey === undefined) delete Bun.env.OPENAI_API_KEY;
+			else Bun.env.OPENAI_API_KEY = originalOpenAiKey;
+		}
+	});
+
+	it("shows credential status from the TUI provider command", async () => {
+		const registry = {
+			authStorage: { exportSnapshot: () => ({ credentials: [] }), hasAuth: () => false },
+			getAll: () => [],
+			getConfiguredProviderIds: () => [],
+			getAuthStorageOwner: () => ({}),
+		};
+		const statuses: string[] = [];
+		let editorText = "status";
+		const command = BUILTIN_SLASH_COMMANDS_INTERNAL.find(entry => entry.name === "provider");
+
+		await command?.handleTui?.({ name: "provider", args: "status", text: "/provider status" }, {
+			ctx: {
+				session: { modelRegistry: registry },
+				showStatus: (text: string) => statuses.push(text),
+				editor: { setText: (text: string) => (editorText = text) },
+			},
+			handleBackgroundCommand: () => undefined,
+		} as unknown as TuiSlashCommandRuntime);
+
+		expect(statuses).toEqual(["No configured provider credentials."]);
+		expect(editorText).toBe("");
+	});
+
+	it("reports the configured --api-key-env name instead of its value", async () => {
+		tempAgentDir = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-provider-slash-"));
+		setAgentDir(tempAgentDir);
+		const originalApiKey = Bun.env[TEST_PROVIDER_KEY_ENV];
+		Bun.env[TEST_PROVIDER_KEY_ENV] = "custom-provider-secret-test-value";
+		try {
+			const authStorage = await AuthStorage.create(path.join(tempAgentDir, "auth.db"));
+			authStorages.push(authStorage);
+			const registry = new ModelRegistry(authStorage, path.join(tempAgentDir, "models.yml"));
+			modelRegistries.push(registry);
+			const add = BUILTIN_SLASH_COMMANDS_INTERNAL.find(entry => entry.name === "provider");
+			await add?.handle?.(
+				{
+					name: "provider",
+					args: `add --compat openai --provider status-custom --base-url https://proxy.example.test --api-key-env ${TEST_PROVIDER_KEY_ENV} --model test-model`,
+					text: "/provider add",
+				},
+				{
+					session: { modelRegistry: registry },
+					sessionManager: {},
+					settings: {},
+					cwd: process.cwd(),
+					output: () => undefined,
+					refreshCommands: () => undefined,
+					reloadPlugins: async () => undefined,
+					notifyConfigChanged: () => undefined,
+				} as unknown as SlashCommandRuntime,
+			);
+			await registry.refresh("offline");
+
+			const outputs: string[] = [];
+			await add?.handle?.({ name: "provider", args: "status", text: "/provider status" }, {
+				session: { modelRegistry: registry },
+				output: (text: string) => outputs.push(text),
+			} as unknown as SlashCommandRuntime);
+
+			expect(outputs.join("\n")).toContain(`status-custom: API key (env ${TEST_PROVIDER_KEY_ENV})`);
+			expect(outputs.join("\n")).not.toContain("custom-provider-secret-test-value");
+		} finally {
+			if (originalApiKey === undefined) delete Bun.env[TEST_PROVIDER_KEY_ENV];
+			else Bun.env[TEST_PROVIDER_KEY_ENV] = originalApiKey;
+		}
 	});
 
 	it("reports the /provicer typo without falling through to model bootstrap", async () => {

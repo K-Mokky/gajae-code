@@ -223,6 +223,25 @@ const serviceProviderMap: Record<string, KeyResolver> = {
 	xiaomi: "XIAOMI_API_KEY",
 };
 
+const functionResolverEnvNames: Record<string, readonly string[]> = {
+	openai: ["OPENAI_API_KEY"],
+	kiro: ["KIRO_API_KEY", "AWS_BEARER_TOKEN_KIRO"],
+	"github-copilot": ["COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"],
+	"google-vertex": ["GOOGLE_CLOUD_API_KEY"],
+	"amazon-bedrock": ["AWS_BEARER_TOKEN_BEDROCK"],
+	huggingface: ["HUGGINGFACE_HUB_TOKEN", "HF_TOKEN"],
+	"qwen-portal": ["QWEN_OAUTH_TOKEN", "QWEN_PORTAL_API_KEY"],
+};
+
+function getFunctionResolverEnvNames(provider: string): readonly string[] {
+	if (provider === "anthropic") {
+		return isFoundryEnabled()
+			? ["ANTHROPIC_FOUNDRY_API_KEY", "ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"]
+			: ["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"];
+	}
+	return functionResolverEnvNames[provider] ?? [];
+}
+
 /**
  * Get API key for provider from known environment variables, e.g. OPENAI_API_KEY.
  *
@@ -235,6 +254,24 @@ export function getEnvApiKey(provider: string): string | undefined {
 		return $credentialEnv(resolver);
 	}
 	return resolver?.();
+}
+
+/**
+ * List configured environment variable names consulted for a provider's
+ * environment credential. Values are never returned. This intentionally uses
+ * the same credential-only environment reader as {@link getEnvApiKey}.
+ */
+export function getEnvApiKeyEnvNames(provider: string): string[] {
+	const resolver = serviceProviderMap[provider];
+	const names = typeof resolver === "string" ? [resolver] : getFunctionResolverEnvNames(provider);
+	return names.filter(name => $credentialEnv(name) !== undefined);
+}
+
+/** Name of the environment variable whose value is selected by `getEnvApiKey`, when identifiable. */
+export function getEnvApiKeyEnvName(provider: string): string | undefined {
+	const apiKey = getEnvApiKey(provider);
+	if (apiKey === undefined || apiKey === "<authenticated>") return undefined;
+	return getEnvApiKeyEnvNames(provider).find(name => $credentialEnv(name) === apiKey);
 }
 
 /**

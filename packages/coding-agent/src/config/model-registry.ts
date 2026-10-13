@@ -6065,6 +6065,16 @@ export class ModelRegistry {
 		return [...this.#configuredProviderIds];
 	}
 
+	/** Environment variable name for a provider API key configured in models.yml. */
+	getProviderConfigApiKeyEnvName(provider: string): string | undefined {
+		return this.#customProviderApiKeyEnvNames.get(provider);
+	}
+
+	/** Environment variable name for a provider API key supplied by runtime setup. */
+	getProviderRuntimeApiKeyEnvName(provider: string): string | undefined {
+		return this.#runtimeProviderApiKeyEnvNames.get(provider);
+	}
+
 	/**
 	 * Whether this registry can serve a provider id from any active source.
 	 *
