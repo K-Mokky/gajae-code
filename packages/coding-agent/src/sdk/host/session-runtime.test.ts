@@ -8926,6 +8926,39 @@ describe("accepted-control zero-execution bound (#4668)", () => {
 			const payload = frame.payload as { commandId?: string; turnId?: string } | undefined;
 			return payload?.commandId === correlation.commandId && payload?.turnId === correlation.turnId;
 		});
+	const observeDeadlineClaim = (
+		store: ReconciliationStore,
+	): { store: ReconciliationStore; committed: Promise<void> } => {
+		const committed = Promise.withResolvers<void>();
+		let startCommitted = false;
+		return {
+			committed: committed.promise,
+			store: {
+				...store,
+				transact: async mutator => {
+					const hadStartCommit = startCommitted;
+					let deadlineClaim = false;
+					let startedPrompt = false;
+					await store.transact(records => {
+						const updated = mutator(records);
+						startedPrompt = updated.some(record => record.kind === "prompt" && record.startedAt !== undefined);
+						deadlineClaim = updated.some(
+							record =>
+								record.kind === "prompt" &&
+								record.pendingOutcome?.kind === "failed" &&
+								record.pendingOutcome.code === "prompt_deadline_exceeded" &&
+								record.pendingOutcome.provenance === "deadline",
+						);
+						return updated;
+					});
+					if (startedPrompt) startCommitted = true;
+					// A queued START write can already contain later deadline intent.
+					// Require a later committed transaction, not that coalesced snapshot.
+					if (hadStartCommit && deadlineClaim) committed.resolve();
+				},
+			},
+		};
+	};
 
 	test("prompt agent_end waits for durable reconciliation before publication", async () => {
 		const cwd = await mkdtemp(path.join(os.tmpdir(), "gjc-prompt-terminal-durable-first-"));
@@ -8972,6 +9005,11 @@ describe("accepted-control zero-execution bound (#4668)", () => {
 
 	test("a prompt deadline stays nonterminal when its dispatched tool cannot be fenced", async () => {
 		const cwd = await mkdtemp(path.join(os.tmpdir(), "gjc-sdk-deadline-tool-boundary-"));
+		const sessionId = "sdk-only-deadline-tool-boundary";
+		const sessionFile = path.join(cwd, ".gjc", "state", `${sessionId}.jsonl`);
+		const store = createReconciliationStore({ sessionFile, sessionId });
+		const { store: observedStore, committed: claimCommitted } = observeDeadlineClaim(store);
+		const started = Promise.withResolvers<void>();
 		const activeTools = new Set(["sdk-only-mutating-tool"]);
 		let boundaryWaitStarted = false;
 		const epoch = 23;
@@ -8979,7 +9017,10 @@ describe("accepted-control zero-execution bound (#4668)", () => {
 		const pendingLedgerReads: string[] = [];
 		let harness: InvocationHarness | undefined;
 		try {
-			harness = await invocationHarness("sdk-only-deadline-tool-boundary", cwd, {
+			harness = await invocationHarness(sessionId, cwd, {
+				broadcastInterceptor: frame => {
+					if (frame.kind === "agent_start") started.resolve();
+				},
 				settings: {
 					get: (key: string) =>
 						key === "sdk.promptDeadlineMs" ? 250 : key === "sdk.promptMaxRuntimeMs" ? 60_000 : undefined,
@@ -8989,6 +9030,7 @@ describe("accepted-control zero-execution bound (#4668)", () => {
 					await neverSettlingPromise();
 				},
 				terminalAbortSeams: {
+					getReconciliationStore: () => observedStore,
 					getTerminalTurnEpoch: () => epoch,
 					getActivePromptHandle: () => "sdk-only-deadline-handle",
 					pendingToolExecutions: handle => {
@@ -9009,13 +9051,17 @@ describe("accepted-control zero-execution bound (#4668)", () => {
 			const accepted = await harness.control("turn.prompt", { text: "sdk-only deadline" });
 			expect(accepted.ok).toBe(true);
 			const correlation = { commandId: accepted.result?.commandId, turnId: accepted.result?.turnId };
-			await harness.emit("agent_start");
+			const sdkRunToken = `${correlation.commandId}:${correlation.turnId}`;
+			await harness.emit("agent_start", { sdkRunToken });
+			await started.promise;
 			await harness.emit("tool_execution_start", {
 				type: "tool_execution_start",
+				sdkRunToken,
 				toolCallId: "sdk-only-mutating-tool",
 				toolName: "apply_patch",
 				args: {},
 			});
+			await claimCommitted;
 			const boundaryWaitDeadline = Date.now() + 2_000;
 			while (!boundaryWaitStarted && Date.now() < boundaryWaitDeadline) await Bun.sleep(10);
 			expect(boundaryWaitStarted).toBe(true);
@@ -9042,32 +9088,7 @@ describe("accepted-control zero-execution bound (#4668)", () => {
 		const sessionFile = path.join(cwd, ".gjc", "state", `${sessionId}.jsonl`);
 		await Bun.write(sessionFile, "");
 		const store = createReconciliationStore({ sessionFile, sessionId });
-		const claimCommitted = Promise.withResolvers<void>();
-		let startCommitted = false;
-		const observedStore: ReconciliationStore = {
-			...store,
-			transact: async mutator => {
-				const hadStartCommit = startCommitted;
-				let deadlineClaim = false;
-				let startedPrompt = false;
-				await store.transact(records => {
-					const updated = mutator(records);
-					startedPrompt = updated.some(record => record.kind === "prompt" && record.startedAt !== undefined);
-					deadlineClaim = updated.some(
-						record =>
-							record.kind === "prompt" &&
-							record.pendingOutcome?.kind === "failed" &&
-							record.pendingOutcome.code === "prompt_deadline_exceeded" &&
-							record.pendingOutcome.provenance === "deadline",
-					);
-					return updated;
-				});
-				if (startedPrompt) startCommitted = true;
-				// A queued START transaction can snapshot later in-memory deadline intent.
-				// Only a later successful transaction proves that intent reached the store.
-				if (hadStartCommit && deadlineClaim) claimCommitted.resolve();
-			},
-		};
+		const { store: observedStore, committed: claimCommitted } = observeDeadlineClaim(store);
 		const activeTools = new Set(["unfenced-tool"]);
 		let boundaryWaitStarted = false;
 		let abortCalls = 0;
@@ -9121,7 +9142,7 @@ describe("accepted-control zero-execution bound (#4668)", () => {
 				args: {},
 			});
 			// Boundary timing begins after the recovery claim reaches disk, not while fsync is pending.
-			await claimCommitted.promise;
+			await claimCommitted;
 			const waitDeadline = Date.now() + 2_000;
 			while (!boundaryWaitStarted && Date.now() < waitDeadline) await Bun.sleep(10);
 			expect(
