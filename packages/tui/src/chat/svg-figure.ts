@@ -89,6 +89,8 @@ export class SvgFigure implements Component {
 	#attempt: Attempt | undefined;
 	/** Final source that could not be drawn; rendered as plaintext. */
 	#failed: string | undefined;
+	/** Whether retrying the failed source at different pixel limits could succeed. */
+	#failedLayoutDependent = false;
 	#rasterizing = false;
 	#startedAt = Number.NEGATIVE_INFINITY;
 	#timer: NodeJS.Timeout | undefined;
@@ -111,7 +113,10 @@ export class SvgFigure implements Component {
 		const sourceChanged = source !== this.#source;
 		const paletteChanged = palette !== this.#palette;
 		if (!sourceChanged && !paletteChanged && final === this.#final) return;
-		if (sourceChanged || paletteChanged) this.#failed = undefined;
+		if (sourceChanged || paletteChanged) {
+			this.#failed = undefined;
+			this.#failedLayoutDependent = false;
+		}
 		this.#source = source;
 		this.#final = final;
 		this.#palette = palette;
@@ -189,15 +194,14 @@ export class SvgFigure implements Component {
 		const attempt = this.#attempt;
 		const cell = getCellDimensions();
 		const limits = limitsFor(width, cell);
-		// If we've failed but limits changed and we'd outgrow, retry (resource-dependent failure).
 		if (this.#failed === this.#source) {
-			if (
-				(attempt?.limits.columns !== limits.columns || attempt?.limits.rows !== limits.rows) &&
-				this.#outgrown(limits)
-			) {
-				return true;
-			}
-			return false;
+			if (!this.#failedLayoutDependent || !attempt) return false;
+			return (
+				attempt.cell.widthPx !== cell.widthPx ||
+				attempt.cell.heightPx !== cell.heightPx ||
+				attempt.limits.columns !== limits.columns ||
+				attempt.limits.rows !== limits.rows
+			);
 		}
 		return (
 			attempt === undefined ||
@@ -260,41 +264,24 @@ export class SvgFigure implements Component {
 		this.#attempt = attempt;
 		const svg = closePartialSvg(attempt.source);
 		let png: Uint8Array | undefined;
+		let layoutDependentFailure = false;
 		if (svg !== null) {
 			this.#rasterizing = true;
 			this.#startedAt = performance.now();
 			try {
 				const prepared = prepareSvg(svg, attempt.palette);
-				const sourcePng = await rasterizeSvg(
-					new TextEncoder().encode(prepared),
-					attempt.limits.columns * cell.widthPx,
-					attempt.limits.rows * cell.heightPx,
-				);
-				const sourceData = Buffer.from(sourcePng).toString("base64");
-				const sourceSize = getImageDimensions(sourceData, "image/png");
-				if (!sourceSize) throw new Error("SVG rasterizer returned invalid PNG dimensions");
-
-				const columns = Math.min(attempt.limits.columns, Math.ceil(sourceSize.widthPx / cell.widthPx));
-				const rows = Math.min(attempt.limits.rows, Math.ceil(sourceSize.heightPx / cell.heightPx));
-				const widthPx = columns * cell.widthPx;
-				const heightPx = rows * cell.heightPx;
-				if (widthPx === sourceSize.widthPx && heightPx === sourceSize.heightPx) {
-					png = sourcePng;
-				} else {
-					// Terminal graphics occupy whole cells. Keep the original raster's
-					// aspect ratio by centering it on a transparent cell-sized canvas;
-					// the embedded data URL is resolved without reading host files.
-					const scale = Math.min(widthPx / sourceSize.widthPx, heightPx / sourceSize.heightPx, 1);
-					const drawnWidth = sourceSize.widthPx * scale;
-					const drawnHeight = sourceSize.heightPx * scale;
-					const x = (widthPx - drawnWidth) / 2;
-					const y = (heightPx - drawnHeight) / 2;
-					const paddedSvg =
-						`<svg xmlns="http://www.w3.org/2000/svg" width="${widthPx}" height="${heightPx}" ` +
-						`viewBox="0 0 ${widthPx} ${heightPx}"><image ` +
-						`href="data:image/png;base64,${sourceData}" x="${x}" y="${y}" ` +
-						`width="${drawnWidth}" height="${drawnHeight}"/></svg>`;
-					png = await rasterizeSvg(new TextEncoder().encode(paddedSvg), widthPx, heightPx);
+				try {
+					png = await rasterizeSvg(
+						new TextEncoder().encode(prepared),
+						attempt.limits.columns * cell.widthPx,
+						attempt.limits.rows * cell.heightPx,
+						cell.widthPx,
+						cell.heightPx,
+					);
+				} catch (error) {
+					const message = error instanceof Error ? error.message : String(error);
+					layoutDependentFailure = !message.includes("Failed to parse SVG:");
+					throw error;
 				}
 			} catch (error) {
 				// A streaming prefix that does not parse yet keeps the previous raster.
@@ -310,6 +297,7 @@ export class SvgFigure implements Component {
 			this.#show(attempt, data, size.widthPx, size.heightPx);
 		} else if (attempt.final && attempt.source === this.#source && attempt.palette === this.#palette) {
 			this.#failed = attempt.source;
+			this.#failedLayoutDependent = layoutDependentFailure;
 			// Clear the raster and image on terminal failure to keep preview only while a replacement is in flight.
 			this.#raster = undefined;
 			this.#image = undefined;
@@ -320,7 +308,10 @@ export class SvgFigure implements Component {
 	}
 
 	#show(attempt: Attempt, data: string, widthPx: number, heightPx: number): void {
-		if (this.#failed === attempt.source) this.#failed = undefined;
+		if (this.#failed === attempt.source) {
+			this.#failed = undefined;
+			this.#failedLayoutDependent = false;
+		}
 		this.#raster = {
 			source: attempt.source,
 			cell: attempt.cell,

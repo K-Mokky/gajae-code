@@ -261,15 +261,16 @@ function rejectEmbeddedRasterImages(svg: string): void {
 			continue;
 		}
 
-		// Extract the tag name, handling namespace prefixes.
+		// The namespace prefix may contain any XML name character, including
+		// non-ASCII letters. Compare the local name without validating the prefix.
 		const tag = svg.slice(lt, close);
-		const nameMatch = /^<\s*(?:[\w.-]+:)?(\w+)/.exec(tag);
+		const nameMatch = /^<\s*([^\s/>]+)/.exec(tag);
 		if (!nameMatch) {
 			index = close;
 			continue;
 		}
 
-		const tagName = nameMatch[1]!.toLowerCase();
+		const tagName = nameMatch[1]!.split(":").at(-1)!.toLowerCase();
 		if (tagName === "image" || tagName === "feimage") {
 			throw new Error("SVG contains <image> or <feImage> elements, which are not supported for this renderer");
 		}
@@ -286,14 +287,23 @@ export function prepareSvg(svg: string, palette: Readonly<Record<string, string>
 	const root = findRootSvgTag(resolved);
 	if (!root) return resolved;
 	let added = "";
-	if (!hasSvgAttribute(root.tag, "color")) added += ` color="${fg}"`;
+	let rootTag = root.tag;
+	let rootColor: { value: string; start: number; end: number } | undefined;
+	forEachSvgAttribute(root.tag, (name, value, start, end) => {
+		if (name === "color") rootColor = { value, start, end };
+	});
+	if (!rootColor) {
+		added += ` color="${fg}"`;
+	} else if (rootColor.value.trim().toLowerCase() === "currentcolor") {
+		rootTag = `${root.tag.slice(0, rootColor.start)}${fg}${root.tag.slice(rootColor.end)}`;
+	}
 	if (!hasSvgAttribute(root.tag, "font-family")) added += ` font-family="sans-serif"`;
 	if (!hasSvgAttribute(root.tag, "xmlns")) added += ` xmlns="http://www.w3.org/2000/svg"`;
 	if (usesXlink && !hasSvgAttribute(root.tag, "xmlns:xlink")) {
 		added += ` xmlns:xlink="http://www.w3.org/1999/xlink"`;
 	}
-	if (!added) return resolved;
-	const tag = root.tag.replace(/^<[^\s/>]+/, `$&${added}`);
+	if (!added && rootTag === root.tag) return resolved;
+	const tag = rootTag.replace(/^<[^\s/>]+/, `$&${added}`);
 	return `${resolved.slice(0, root.start)}${tag}${resolved.slice(root.end)}`;
 }
 

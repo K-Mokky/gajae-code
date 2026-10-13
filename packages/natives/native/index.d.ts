@@ -2582,11 +2582,14 @@ export declare function ptyTimeoutCount(): bigint
  * Conversion runs on the native blocking pool so parsing and rendering do not
  * stall the JavaScript event loop.
  *
+ * When both cell dimensions are provided, the PNG is padded on a transparent
+ * canvas to whole terminal cells without embedding or decoding another image.
+ *
  * # Errors
- * Returns an error for invalid SVG data, zero/oversized limits, allocation
- * failure, or PNG encoding failure.
+ * Returns an error for invalid SVG data, mismatched/zero cell dimensions,
+ * zero/oversized limits, allocation failure, or PNG encoding failure.
  */
-export declare function rasterizeSvg(input: Uint8Array, maxWidthPx: number, maxHeightPx: number): Promise<Uint8Array>
+export declare function rasterizeSvg(input: Uint8Array, maxWidthPx: number, maxHeightPx: number, cellWidthPx?: number | undefined | null, cellHeightPx?: number | undefined | null): Promise<Uint8Array>
 
 /**
  * Read an image from the system clipboard.

@@ -98,6 +98,13 @@ describe("prepareSvg", () => {
 		);
 	});
 
+	it("resolves a root currentColor declaration against the theme foreground", () => {
+		const svg = '<svg color=" currentColor " xmlns="http://www.w3.org/2000/svg"><rect stroke="currentColor"/></svg>';
+		expect(prepareSvg(svg, palette)).toBe(
+			'<svg font-family="sans-serif" color="#eeeeee" xmlns="http://www.w3.org/2000/svg"><rect stroke="currentColor"/></svg>',
+		);
+	});
+
 	it("scans the complete root tag when an attribute value contains a greater-than sign", () => {
 		const svg = '<svg data-label="1 > 0" xmlns="http://www.w3.org/2000/svg"><rect/></svg>';
 		const prepared = prepareSvg(svg, palette);
@@ -207,6 +214,15 @@ describe("prepareSvg", () => {
 			const svg =
 				'<svg xmlns:x="http://www.w3.org/2000/svg"><x:image href="data:image/png;base64,iVBORw0KGg" width="1" height="1"/></svg>';
 			expect(() => prepareSvg(svg, palette)).toThrow(/SVG contains.*<image>.*<feImage>/i);
+		});
+
+		it("rejects image elements with Unicode namespace prefixes", () => {
+			const image =
+				'<svg xmlns="http://www.w3.org/2000/svg" xmlns:π="http://www.w3.org/2000/svg"><π:image href="data:image/png;base64,iVBORw0KGg" width="1" height="1"/></svg>';
+			const filterImage =
+				'<svg xmlns="http://www.w3.org/2000/svg" xmlns:π="http://www.w3.org/2000/svg"><filter><π:feImage href="data:image/png;base64,iVBORw0KGg"/></filter></svg>';
+			expect(() => prepareSvg(image, palette)).toThrow(/SVG contains.*<image>.*<feImage>/i);
+			expect(() => prepareSvg(filterImage, palette)).toThrow(/SVG contains.*<image>.*<feImage>/i);
 		});
 
 		it("rejects <feImage> elements (filter primitive)", () => {

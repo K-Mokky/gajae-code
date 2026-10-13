@@ -27,22 +27,45 @@ static FONT_DB: LazyLock<Arc<usvg::fontdb::Database>> = LazyLock::new(|| {
 /// Conversion runs on the native blocking pool so parsing and rendering do not
 /// stall the JavaScript event loop.
 ///
+/// When both cell dimensions are provided, the PNG is padded on a transparent
+/// canvas to whole terminal cells without embedding or decoding another image.
+///
 /// # Errors
-/// Returns an error for invalid SVG data, zero/oversized limits, allocation
-/// failure, or PNG encoding failure.
+/// Returns an error for invalid SVG data, mismatched/zero cell dimensions,
+/// zero/oversized limits, allocation failure, or PNG encoding failure.
 #[napi(js_name = "rasterizeSvg")]
 pub fn rasterize_svg(
 	input: Uint8Array,
 	max_width_px: u32,
 	max_height_px: u32,
+	cell_width_px: Option<u32>,
+	cell_height_px: Option<u32>,
 ) -> task::Promise<Uint8Array> {
 	let input = input.to_vec();
 	task::blocking("svg.rasterize", (), move |_| {
-		rasterize_svg_sync(&input, max_width_px, max_height_px).map(Uint8Array::from)
+		rasterize_svg_sync_with_cells(
+			&input,
+			max_width_px,
+			max_height_px,
+			cell_width_px,
+			cell_height_px,
+		)
+		.map(Uint8Array::from)
 	})
 }
 
+#[cfg(test)]
 fn rasterize_svg_sync(input: &[u8], max_width_px: u32, max_height_px: u32) -> Result<Vec<u8>> {
+	rasterize_svg_sync_with_cells(input, max_width_px, max_height_px, None, None)
+}
+
+fn rasterize_svg_sync_with_cells(
+	input: &[u8],
+	max_width_px: u32,
+	max_height_px: u32,
+	cell_width_px: Option<u32>,
+	cell_height_px: Option<u32>,
+) -> Result<Vec<u8>> {
 	if max_width_px == 0 || max_height_px == 0 {
 		return Err(napi::Error::from_reason("SVG render limits must be greater than zero"));
 	}
@@ -51,6 +74,15 @@ fn rasterize_svg_sync(input: &[u8], max_width_px: u32, max_height_px: u32) -> Re
 			"SVG render limits exceed the {MAX_RENDER_PIXELS}-pixel safety cap"
 		)));
 	}
+	let cell_size = match (cell_width_px, cell_height_px) {
+		(None, None) => None,
+		(Some(width), Some(height)) if width > 0 && height > 0 => Some((width, height)),
+		_ => {
+			return Err(napi::Error::from_reason(
+				"SVG cell dimensions must both be greater than zero",
+			));
+		},
+	};
 
 	let mut options = usvg::Options { fontdb: Arc::clone(&FONT_DB), ..usvg::Options::default() };
 	// Repository-controlled SVGs must not read arbitrary host files through an
@@ -63,11 +95,35 @@ fn rasterize_svg_sync(input: &[u8], max_width_px: u32, max_height_px: u32) -> Re
 	let scale = (max_width_px as f32 / source.width())
 		.min(max_height_px as f32 / source.height())
 		.min(1.0);
-	let width = (source.width() * scale).ceil().max(1.0) as u32;
-	let height = (source.height() * scale).ceil().max(1.0) as u32;
+	let content_width = (source.width() * scale).ceil().max(1.0) as u32;
+	let content_height = (source.height() * scale).ceil().max(1.0) as u32;
+	let (width, height) = if let Some((cell_width, cell_height)) = cell_size {
+		let width = content_width
+			.div_ceil(cell_width)
+			.checked_mul(cell_width)
+			.ok_or_else(|| napi::Error::from_reason("Padded SVG width exceeds the render limit"))?;
+		let height = content_height
+			.div_ceil(cell_height)
+			.checked_mul(cell_height)
+			.ok_or_else(|| napi::Error::from_reason("Padded SVG height exceeds the render limit"))?;
+		if width > max_width_px || height > max_height_px {
+			return Err(napi::Error::from_reason("Padded SVG canvas exceeds the render limits"));
+		}
+		(width, height)
+	} else {
+		(content_width, content_height)
+	};
+	if u64::from(width) * u64::from(height) > MAX_RENDER_PIXELS {
+		return Err(napi::Error::from_reason(format!(
+			"SVG render limits exceed the {MAX_RENDER_PIXELS}-pixel safety cap"
+		)));
+	}
 	let mut pixmap = tiny_skia::Pixmap::new(width, height)
 		.ok_or_else(|| napi::Error::from_reason("Failed to allocate SVG render surface"))?;
-	resvg::render(&tree, tiny_skia::Transform::from_scale(scale, scale), &mut pixmap.as_mut());
+	let x = (width - content_width) / 2;
+	let y = (height - content_height) / 2;
+	let transform = tiny_skia::Transform::from_row(scale, 0.0, 0.0, scale, x as f32, y as f32);
+	resvg::render(&tree, transform, &mut pixmap.as_mut());
 	pixmap
 		.encode_png()
 		.map_err(|error| napi::Error::from_reason(format!("Failed to encode SVG preview: {error}")))
@@ -85,6 +141,21 @@ mod tests {
 		let png = rasterize_svg_sync(svg, 100, 100).expect("SVG should rasterize");
 		let image = image::load_from_memory(&png).expect("result should be PNG");
 		assert_eq!((image.width(), image.height()), (12, 7));
+	}
+
+	#[test]
+	fn pads_svg_to_cell_boundaries_without_rasterizing_an_embedded_image() {
+		let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="13" height="7"><rect width="13" height="7" fill="red"/></svg>"#;
+		let png = rasterize_svg_sync_with_cells(svg, 18, 18, Some(9), Some(18))
+			.expect("SVG should rasterize into a cell-aligned canvas");
+		let image = image::load_from_memory(&png)
+			.expect("result should be PNG")
+			.to_rgba8();
+		assert_eq!(image.dimensions(), (18, 18));
+		assert_eq!(image.get_pixel(2, 5).0, [255, 0, 0, 255]);
+		assert_eq!(image.get_pixel(14, 11).0, [255, 0, 0, 255]);
+		assert_eq!(image.get_pixel(1, 5).0, [0, 0, 0, 0]);
+		assert_eq!(image.get_pixel(15, 11).0, [0, 0, 0, 0]);
 	}
 
 	#[test]

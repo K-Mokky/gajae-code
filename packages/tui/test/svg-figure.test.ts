@@ -122,6 +122,92 @@ describe("SvgFigure", () => {
 		}
 	});
 
+	it("retries a layout-dependent raster failure when cell limits shrink", async () => {
+		const previousProtocol = TERMINAL.imageProtocol;
+		const previousCellDimensions = getCellDimensions();
+		setTerminalImageProtocol(ImageProtocol.Kitty);
+		setCellDimensions({ widthPx: 5000, heightPx: 5000 });
+		let changed = Promise.withResolvers<void>();
+		const figure = new SvgFigure({ theme, palette, onChange: () => changed.resolve() });
+		try {
+			figure.update(SVG, true);
+			figure.render(80);
+			await changed.promise;
+			expect(figure.failed).toBe(true);
+
+			changed = Promise.withResolvers<void>();
+			setCellDimensions({ widthPx: 9, heightPx: 18 });
+			figure.render(80);
+			await changed.promise;
+			expect(figure.failed).toBe(false);
+			expect(figure.debugState()).toMatchObject({ current: true, raster: "18x18" });
+		} finally {
+			figure.dispose();
+			setCellDimensions(previousCellDimensions);
+			setTerminalImageProtocol(previousProtocol);
+		}
+	});
+
+	it("does not retry a deterministic invalid SVG after layout changes", async () => {
+		const previousProtocol = TERMINAL.imageProtocol;
+		const previousCellDimensions = getCellDimensions();
+		setTerminalImageProtocol(ImageProtocol.Kitty);
+		setCellDimensions({ widthPx: 9, heightPx: 18 });
+		let changes = 0;
+		const changed = Promise.withResolvers<void>();
+		const figure = new SvgFigure({
+			theme,
+			palette,
+			onChange: () => {
+				changes++;
+				changed.resolve();
+			},
+		});
+		try {
+			figure.update("not an SVG document", true);
+			figure.render(80);
+			await changed.promise;
+			expect(figure.failed).toBe(true);
+			const changesAfterFailure = changes;
+
+			setCellDimensions({ widthPx: 5000, heightPx: 5000 });
+			figure.render(80);
+			await Bun.sleep(25);
+			expect(changes).toBe(changesAfterFailure);
+			expect(figure.failed).toBe(true);
+		} finally {
+			figure.dispose();
+			setCellDimensions(previousCellDimensions);
+			setTerminalImageProtocol(previousProtocol);
+		}
+	});
+
+	it("releases a streaming preview when the final source falls back", async () => {
+		const previousProtocol = TERMINAL.imageProtocol;
+		const previousCellDimensions = getCellDimensions();
+		setTerminalImageProtocol(ImageProtocol.Kitty);
+		setCellDimensions({ widthPx: 9, heightPx: 18 });
+		let changed = Promise.withResolvers<void>();
+		const figure = new SvgFigure({ theme, palette, onChange: () => changed.resolve() });
+		try {
+			figure.update(SVG, false);
+			figure.render(80);
+			await changed.promise;
+			expect(figure.debugState()).toMatchObject({ current: true, raster: "18x18" });
+
+			changed = Promise.withResolvers<void>();
+			figure.update('<svg><image href="data:image/png;base64,invalid"/></svg>', true);
+			figure.render(80);
+			await changed.promise;
+			expect(figure.failed).toBe(true);
+			expect(figure.debugState()).toMatchObject({ current: false, raster: null });
+		} finally {
+			figure.dispose();
+			setCellDimensions(previousCellDimensions);
+			setTerminalImageProtocol(previousProtocol);
+		}
+	});
+
 	it("recovers after a failed final source is replaced by valid SVG", async () => {
 		const previousProtocol = TERMINAL.imageProtocol;
 		setTerminalImageProtocol(ImageProtocol.Kitty);
