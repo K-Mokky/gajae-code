@@ -97,6 +97,28 @@ export function filterCandidatesByVariant(
 	return filtered;
 }
 
+export function filterStaleLocalCandidates(
+	candidates: CandidateAddon[],
+	buildSidecars: ReadonlyMap<string, BuildSidecar | null>,
+	packageVersion: string,
+	explicitlyRequestedVariants: ReadonlySet<EmbeddedAddonVariant> | null,
+): CandidateAddon[] {
+	const currentCandidates: CandidateAddon[] = [];
+	for (const candidate of candidates) {
+		const sidecar = buildSidecars.get(candidate.filename);
+		if (sidecar?.profile === "local" && sidecar.version !== undefined && sidecar.version !== packageVersion) {
+			if (explicitlyRequestedVariants?.has(candidate.variant)) {
+				throw new Error(
+					`${candidate.filename} is a local build for @gajae-code/natives@${sidecar.version}; rebuild it for @gajae-code/natives@${packageVersion} before embedding`,
+				);
+			}
+			continue;
+		}
+		currentCandidates.push(candidate);
+	}
+	return currentCandidates;
+}
+
 async function readBuildSidecar(candidatePath: string): Promise<BuildSidecar | null> {
 	const sidecarPath = `${candidatePath}.build.json`;
 	try {
@@ -117,25 +139,6 @@ async function fileExists(filePath: string): Promise<boolean> {
 	}
 }
 
-/**
- * Embedding bakes the addon into a compiled binary, where the diagnostic loader can
- * only use the versioned cache slot. Release addons must match the shipped trusted
- * record; local addons must match the gitignored local record and their verified
- * digests are carried into the compiled binary.
- */
-async function assertTrustedArtifactRecord(): Promise<void> {
-	const script = path.join(import.meta.dir, "..", "..", "..", "scripts", "verify-diagnostic-artifact-provenance.ts");
-	const nativeDir = path.join(import.meta.dir, "..", "native");
-	const result = Bun.spawnSync({
-		cmd: [process.execPath, script, "--verify-for-embedding", nativeDir],
-		stdout: "inherit",
-		stderr: "inherit",
-	});
-	if (result.exitCode !== 0) {
-		throw new Error("diagnostic artifact provenance verification failed; refusing to embed");
-	}
-}
-
 async function embedNative(): Promise<void> {
 	// Restoring the constant null stub neither selects nor reads an addon, so it stays
 	// available even when a present artifact has no trusted record. Every real embedding
@@ -145,53 +148,82 @@ async function embedNative(): Promise<void> {
 		await Bun.write(diagnosticArtifactOutputPath, emptyDiagnosticArtifactContent);
 		return;
 	}
-	await assertTrustedArtifactRecord();
 
 	const targetPlatform = Bun.env.TARGET_PLATFORM || process.platform;
 	const targetArch = Bun.env.TARGET_ARCH || process.arch;
 	const platformTag = `${targetPlatform}-${targetArch}`;
 	const hostPlatformTag = `${process.platform}-${process.arch}`;
-	const candidates = filterCandidatesByVariant(
+	const requestedVariants = parseEmbedVariants(Bun.env.EMBED_VARIANTS);
+	const selectedCandidates = filterCandidatesByVariant(
 		buildCandidateList(targetArch, platformTag),
-		parseEmbedVariants(Bun.env.EMBED_VARIANTS),
+		requestedVariants,
 		platformTag,
 	);
 	const packageJson = (await Bun.file(packageJsonPath).json()) as { version: string };
 
-	const available: CandidateAddon[] = [];
-	const diagnosticArtifacts: Record<string, string> = {};
-	for (const candidate of candidates) {
+	const existingCandidates: CandidateAddon[] = [];
+	const buildSidecars = new Map<string, BuildSidecar | null>();
+	for (const candidate of selectedCandidates) {
 		const candidatePath = path.join(nativeDir, candidate.filename);
-		if (await fileExists(candidatePath)) {
-			diagnosticArtifacts[candidate.filename] = await verifyDiagnosticArtifactDigest({
-				addonPath: candidatePath,
-				nativeDir,
-				version: packageJson.version,
-				allowLocalBuilds: true,
-			});
-			const nativeBindings =
-				platformTag === hostPlatformTag ? (require(candidatePath) as Record<string, unknown>) : undefined;
-			await verifyDefaultLanguageSet(candidate, candidatePath, {
-				platformTag,
-				hostPlatformTag,
-				readBuildSidecar,
-				loadNativeAddon: () => nativeBindings as { nativeBuildInfo?: () => { languageSet?: string } },
-				warn: message => console.warn(message),
-			});
-			if (nativeBindings) {
-				const missingExports = missingRequiredAddonExports(nativeBindings);
-				if (missingExports.length > 0) {
-					throw new Error(
-						`Embedded addon candidate ${candidate.filename} is missing required exports: ${missingExports.join(", ")}`,
-					);
-				}
-			}
-			available.push(candidate);
+		if (!(await fileExists(candidatePath))) continue;
+		existingCandidates.push(candidate);
+		buildSidecars.set(candidate.filename, await readBuildSidecar(candidatePath));
+	}
+	const candidates = filterStaleLocalCandidates(
+		existingCandidates,
+		buildSidecars,
+		packageJson.version,
+		requestedVariants,
+	);
+	const currentCandidateNames = new Set(candidates.map(candidate => candidate.filename));
+	for (const candidate of existingCandidates) {
+		if (currentCandidateNames.has(candidate.filename)) continue;
+		const sidecar = buildSidecars.get(candidate.filename);
+		if (sidecar?.profile === "local" && sidecar.version !== undefined) {
+			console.warn(
+				`Skipping stale local native addon ${candidate.filename} built for @gajae-code/natives@${sidecar.version}; rebuild it for @gajae-code/natives@${packageJson.version} to embed it.`,
+			);
 		}
 	}
 
+	const verifiedCandidates: Array<{ candidate: CandidateAddon; candidatePath: string; digest: string }> = [];
+	for (const candidate of candidates) {
+		const candidatePath = path.join(nativeDir, candidate.filename);
+		const digest = await verifyDiagnosticArtifactDigest({
+			addonPath: candidatePath,
+			nativeDir,
+			version: packageJson.version,
+			allowLocalBuilds: true,
+		});
+		verifiedCandidates.push({ candidate, candidatePath, digest });
+	}
+
+	const available: CandidateAddon[] = [];
+	const diagnosticArtifacts: Record<string, string> = {};
+	for (const { candidate, candidatePath, digest } of verifiedCandidates) {
+		const nativeBindings =
+			platformTag === hostPlatformTag ? (require(candidatePath) as Record<string, unknown>) : undefined;
+		await verifyDefaultLanguageSet(candidate, candidatePath, {
+			platformTag,
+			hostPlatformTag,
+			readBuildSidecar,
+			loadNativeAddon: () => nativeBindings as { nativeBuildInfo?: () => { languageSet?: string } },
+			warn: message => console.warn(message),
+		});
+		if (nativeBindings) {
+			const missingExports = missingRequiredAddonExports(nativeBindings);
+			if (missingExports.length > 0) {
+				throw new Error(
+					`Embedded addon candidate ${candidate.filename} is missing required exports: ${missingExports.join(", ")}`,
+				);
+			}
+		}
+		available.push(candidate);
+		diagnosticArtifacts[candidate.filename] = digest;
+	}
+
 	if (available.length === 0) {
-		const expected = candidates.map(candidate => `  - ${candidate.filename}`).join("\n");
+		const expected = selectedCandidates.map(candidate => `  - ${candidate.filename}`).join("\n");
 		throw new Error(`No native addons found for ${platformTag}. Expected one of:\n${expected}`);
 	}
 
