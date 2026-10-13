@@ -6698,6 +6698,23 @@ describe("ModelRegistry", () => {
 		);
 	});
 
+	test("uses bundled model APIs when discovery has no model-specific route", () => {
+		writeRawModelsConfig({
+			providers: {
+				"opencode-go": {
+					api: "openai-completions",
+					discovery: { type: "openai-models-list" },
+					modelOverrides: { "minimax-m2.5": { streamIdleTimeoutMs: 300_000 } },
+				},
+			},
+		});
+
+		const registry = new ModelRegistry(authStorage, modelsJsonPath);
+		expect(String(registry.getError()?.message)).toContain(
+			'modelOverrides "streamIdleTimeoutMs" is only supported with openai-completions or openai-responses APIs',
+		);
+	});
+
 	test.each([
 		["explicit prefix routing", { apiByModelPrefix: { "claude-": "anthropic-messages" } }],
 		["Claude model ID detection", {}],

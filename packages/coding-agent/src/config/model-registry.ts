@@ -473,12 +473,12 @@ function getKnownProviderModelApi(providerName: string, modelId: string): Api | 
 	)?.api as Api | undefined;
 }
 
-function resolveModelApiFromDiscovery(
+function resolveModelApiOverrideFromDiscovery(
 	providerApi: Api,
 	discovery: ProviderDiscovery,
 	modelId: string,
 	entry?: { id?: unknown; owned_by?: unknown },
-): Api {
+): Api | undefined {
 	// Explicit per-prefix routing always wins over model-id detection.
 	const normalizedModelId = modelId.toLowerCase();
 	let matchedPrefixLength = -1;
@@ -501,7 +501,16 @@ function resolveModelApiFromDiscovery(
 			return isOpenAIFamilyApi(providerApi) ? providerApi : "openai-completions";
 		}
 	}
-	return providerApi;
+	return undefined;
+}
+
+function resolveModelApiFromDiscovery(
+	providerApi: Api,
+	discovery: ProviderDiscovery,
+	modelId: string,
+	entry?: { id?: unknown; owned_by?: unknown },
+): Api {
+	return resolveModelApiOverrideFromDiscovery(providerApi, discovery, modelId, entry) ?? providerApi;
 }
 
 function isCanonicalOpenAIAffinityBaseUrl(baseUrl: string | undefined): boolean {
@@ -681,7 +690,7 @@ function validateProviderConfiguration(
 		const discoveryApi =
 			configuredModel || !config.discovery || !configuredApi
 				? undefined
-				: resolveModelApiFromDiscovery(configuredApi, config.discovery, modelId);
+				: resolveModelApiOverrideFromDiscovery(configuredApi, config.discovery, modelId);
 		const effectiveApi =
 			configuredModel?.api ??
 			(configuredModel ? config.api : undefined) ??
