@@ -10,3 +10,4 @@
 - Advertise image staging only when the host transport supplies authoritative connection liveness; keep other SDK controls available to custom transports.
 - Enforce the existing two-minute image inactivity lease even when expiry callbacks are delayed.
 - Interrupt existing first-turn readiness retry waits on cancellation or teardown without changing retry eligibility, budgets, or provider policies.
+- Anchor SDK snapshot storage and cleanup to the accepted absolute root, including relative session paths.
