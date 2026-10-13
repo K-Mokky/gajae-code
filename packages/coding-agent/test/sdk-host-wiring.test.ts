@@ -3030,6 +3030,7 @@ test("SDK host text-only stop/restart isolates late predecessor progress and ter
 	const predecessorDispatchStarted = Promise.withResolvers<void>();
 	const predecessorDispatchReady = Promise.withResolvers<void>();
 	const pendingSubmissions = new Set<() => void>();
+	let closing = false;
 	const settleSubmissions = () => {
 		for (const resolve of pendingSubmissions) resolve();
 		pendingSubmissions.clear();
@@ -3045,6 +3046,9 @@ test("SDK host text-only stop/restart isolates late predecessor progress and ter
 			return;
 		}
 		await firePreflightAccept(options);
+		// Failure cleanup can begin while durable acceptance is still awaiting I/O.
+		// Do not create a new held execution after its cleanup owner has drained.
+		if (closing) return;
 		const completion = Promise.withResolvers<void>();
 		pendingSubmissions.add(completion.resolve);
 		await completion.promise;
@@ -3311,13 +3315,12 @@ test("SDK host text-only stop/restart isolates late predecessor progress and ter
 			result: { status: "failed", error: { code: "prompt_deadline_exceeded" } },
 		});
 	} finally {
-		try {
-			predecessorDispatchReady.resolve();
-			settleSubmissions();
-			await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, sessionContext);
-		} finally {
-			leaseClock.mockRestore();
-		}
+		closing = true;
+		predecessorDispatchReady.resolve();
+		settleSubmissions();
+		// Teardown uses real wall-clock deadlines, even when an assertion fails.
+		leaseClock.mockRestore();
+		await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, sessionContext);
 	}
 });
 
@@ -7020,15 +7023,11 @@ test("SDK host turn.abort terminal mode finalizes an accepted-but-not-started pr
 	const deliveries: Parameters<ExtensionActions["sendUserMessage"]>[] = [];
 	const sessionContext = {
 		...context(cwd, sessionId, "main", live),
-		// File-backed reconciliation owner so the terminal abort reaches the
-		// fence path (and fails closed there) instead of the no-store gate.
+		// File-backed authority for the durable pre-run cancellation.
 		sessionManager: {
 			...(context(cwd, sessionId, "main", live).sessionManager as Record<string, unknown>),
 			getSessionFile: () => path.join(cwd, ".gjc", "state", "sdk", `${sessionId}.jsonl`),
 		},
-		// The initial-marker seam: a stable epoch so the marker is written
-		// before the fence attempts (and fails closed) on the missing seam.
-		getTerminalTurnEpoch: () => 1,
 	};
 	const handlers = start(
 		sessionContext,
@@ -7039,54 +7038,70 @@ test("SDK host turn.abort terminal mode finalizes an accepted-but-not-started pr
 		},
 		true,
 	);
-	const endpointFile = path.join(cwd, ".gjc", "state", "sdk", `${sessionId}.json`);
-	await waitFor(() => fs.existsSync(endpointFile), "SDK endpoint");
-	const endpoint = (await Bun.file(endpointFile).json()) as { url: string; token: string };
-	const frames: Record<string, unknown>[] = [];
-	const socket = new WebSocket(`${endpoint.url}/?token=${encodeURIComponent(endpoint.token)}`);
-	sockets.push(socket);
-	socket.addEventListener("message", event => frames.push(JSON.parse(String(event.data))));
-	const { promise, resolve, reject } = Promise.withResolvers<void>();
-	socket.addEventListener("open", () => resolve(), { once: true });
-	socket.addEventListener("error", () => reject(new Error("WS error")), { once: true });
-	await promise;
-	socket.send(
-		JSON.stringify({
-			type: "control_request",
-			id: "terminal-prompt",
-			operation: "turn.prompt",
-			input: { text: "terminalize me" },
-		}),
-	);
-	await waitFor(() => deliveries.length === 1, "terminal prompt accepted");
-	void handlers.get("agent_start")?.({ type: "agent_start" }, sessionContext);
-	// The fixture harness fires agent_start without binding an exact run handle,
-	// so the prompt is accepted-but-not-started: terminal abort must cancel the
-	// in-flight session preflight and FINALIZE the accepted prompt as a pre-run
-	// cancellation (no_active_turn / terminal_no_effect) instead of terminalizing
-	// with no run handle (which would wrongly fence the connection).
-	socket.send(
-		JSON.stringify({
-			type: "control_request",
-			id: "terminal-abort",
-			operation: "turn.abort",
-			input: { mode: "terminal" },
-			idempotencyKey: "terminal-abort-key",
-		}),
-	);
-	await waitFor(
-		() => frames.some(frame => frame.type === "control_response" && frame.id === "terminal-abort"),
-		"terminal abort uncertainty response",
-	);
-	expect(frames.find(frame => frame.type === "control_response" && frame.id === "terminal-abort")).toMatchObject({
-		ok: true,
-		result: {
-			selection: "turn",
-			turn: "no_active_turn",
-			terminal: "terminal_no_effect",
-		},
-	});
-	await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, sessionContext);
+	try {
+		const endpointFile = path.join(cwd, ".gjc", "state", "sdk", `${sessionId}.json`);
+		await waitFor(() => fs.existsSync(endpointFile), "SDK endpoint");
+		const endpoint = (await Bun.file(endpointFile).json()) as { url: string; token: string };
+		const frames: Record<string, unknown>[] = [];
+		const socket = new WebSocket(`${endpoint.url}/?token=${encodeURIComponent(endpoint.token)}`);
+		sockets.push(socket);
+		socket.addEventListener("message", event => frames.push(JSON.parse(String(event.data))));
+		const { promise, resolve, reject } = Promise.withResolvers<void>();
+		socket.addEventListener("open", () => resolve(), { once: true });
+		socket.addEventListener("error", () => reject(new Error("WS error")), { once: true });
+		await promise;
+		socket.send(
+			JSON.stringify({
+				type: "control_request",
+				id: "terminal-prompt",
+				operation: "turn.prompt",
+				input: { text: "terminalize me" },
+			}),
+		);
+		await waitFor(
+			() => frames.some(frame => frame.type === "control_response" && frame.id === "terminal-prompt"),
+			"terminal prompt accepted",
+		);
+		const accepted = frames.find(frame => frame.type === "control_response" && frame.id === "terminal-prompt")!;
+		expect(accepted).toMatchObject({ ok: true, result: { accepted: true } });
+		expect(deliveries).toHaveLength(1);
+		// Durable acceptance precedes agent_start. Keep this fixture in that pre-run
+		// window: agent_start clears the retained preflight cancellation owner even
+		// when a malformed fixture supplies no execution handle.
+		socket.send(
+			JSON.stringify({
+				type: "control_request",
+				id: "terminal-abort",
+				operation: "turn.abort",
+				input: { mode: "terminal" },
+				idempotencyKey: "terminal-abort-key",
+			}),
+		);
+		await waitFor(
+			() => frames.some(frame => frame.type === "control_response" && frame.id === "terminal-abort"),
+			"terminal abort pre-run cancellation response",
+		);
+		expect(frames.find(frame => frame.type === "control_response" && frame.id === "terminal-abort")).toMatchObject({
+			ok: true,
+			result: {
+				selection: "turn",
+				turn: "no_active_turn",
+				terminal: "terminal_no_effect",
+			},
+		});
+		const durable = (await Bun.file(
+			reconciliationStorePath(path.join(cwd, ".gjc", "state", "sdk", `${sessionId}.jsonl`), sessionId),
+		).json()) as ReconciliationStoreDocument;
+		const cancelled = durable.records.find(record => record.commandId === acceptedCorrelation(accepted).commandId);
+		expect(cancelled).toMatchObject({
+			status: "terminal_ok",
+			terminalAt: expect.any(Number),
+			outcome: { kind: "stopped", reason: "cancelled", provenance: "client_cancel" },
+		});
+		expect(cancelled?.startedAt).toBeUndefined();
+	} finally {
+		await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, sessionContext);
+	}
 });
 
 test("SDK session switches rotate endpoint authority before publishing the replacement host", async () => {
@@ -7168,9 +7183,10 @@ for (const eventType of ["session_switch", "session_branch"] as const) {
 		// Fail A's owner release exactly once so the rotate-time stopSession(prevId)
 		// throws the retained-retry AggregateError.
 		const stop = spyOn(SessionSdkHost.prototype, "stop").mockRejectedValueOnce(new Error("host stop failed"));
+		let handlers = new Map<string, (event: unknown, context: unknown) => unknown>();
 		try {
 			const startupCapability = new SdkStartupCapability(undefined, "immediate", "rotation-failure-marker");
-			const handlers = start(ctx, undefined, () => {}, false, new Map(), {
+			handlers = start(ctx, undefined, () => {}, false, new Map(), {
 				startupCapability,
 				lifecycleRequired: true,
 			});
@@ -7206,6 +7222,19 @@ for (const eventType of ["session_switch", "session_branch"] as const) {
 			await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, ctx);
 		} finally {
 			stop.mockRestore();
+			// An assertion failure may leave either the retained predecessor or an
+			// unexpectedly published successor alive. Join both exact identities.
+			try {
+				await handlers.get("session_shutdown")?.(
+					{ type: "session_shutdown" },
+					{ ...ctx, sessionManager: { ...ctx.sessionManager, getSessionId: () => sessionA } },
+				);
+			} finally {
+				await handlers.get("session_shutdown")?.(
+					{ type: "session_shutdown" },
+					{ ...ctx, sessionManager: { ...ctx.sessionManager, getSessionId: () => sessionB } },
+				);
+			}
 		}
 	});
 }
