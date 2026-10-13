@@ -6,7 +6,7 @@ import path from "node:path";
 import type { NativeBrokerRestartIntent, NativeDirectoryTreeSnapshot } from "@gajae-code/natives";
 import { logger, resolveEquivalentPath } from "@gajae-code/utils";
 import packageJson from "../../../package.json" with { type: "json" };
-import { FileLockAcquireError } from "../../config/file-lock";
+import { FileLockAcquireError, withFileLock } from "../../config/file-lock";
 import type { ModelProfileErrorDetails } from "../../config/model-profile-contract";
 import { planLaunchWorktree } from "../../gjc-runtime/launch-worktree";
 import { readExistingStateForMutation, withWorkflowStateLock } from "../../gjc-runtime/state-writer";
@@ -80,6 +80,7 @@ import {
 	type LifecycleState,
 	type TerminalReadBack,
 } from "./lifecycle-ledger";
+import { brokerLockHostIdentity } from "./lock-host-identity";
 import {
 	cancelManagedTasks,
 	createManagedDomainBinding,
@@ -1176,11 +1177,15 @@ type BrokerLockSnapshot = {
 	lockIdentity: string;
 };
 
-function isBrokerLockOwnerAlive(snapshot: BrokerLockSnapshot): boolean {
-	if (snapshot.pid <= 0 || !isPidAlive(snapshot.pid)) return false;
+function isBrokerLockOwnerAlive(
+	snapshot: Pick<BrokerLockSnapshot, "pid" | "incarnation">,
+	pidAlive: (pid: number) => boolean = isPidAlive,
+	readProcessIncarnation: (pid: number) => string | undefined = brokerProcessIncarnation,
+): boolean {
+	if (snapshot.pid <= 0 || !pidAlive(snapshot.pid)) return false;
 	// A reused PID is not the owner. Missing incarnation evidence remains fail-closed.
 	if (!snapshot.incarnation) return true;
-	const incarnation = brokerProcessIncarnation(snapshot.pid);
+	const incarnation = readProcessIncarnation(snapshot.pid);
 	return !incarnation || incarnation === snapshot.incarnation;
 }
 
@@ -1231,11 +1236,12 @@ function isBrokerLockArtifactName(name: string): boolean {
  * Decide whether one candidate directory is provably abandoned.
  *
  * Fail-closed by construction: every branch that cannot prove abandonment
- * returns a retention reason. A tombstone with an owner record is only
- * abandoned when that record names a dead PID. A missing record is abandoned
- * only when the aged tombstone is empty; non-empty tombstones remain retained
- * as ambiguous evidence. Backup directories carry no owner contract, so an
- * absent record there is not ambiguity and age alone governs.
+ * returns a retention reason. A tombstone with an owner record is abandoned
+ * only when its PID is dead or validated incarnation evidence proves PID reuse;
+ * missing or unavailable evidence remains retained. A missing record is
+ * abandoned only when the aged tombstone is empty; non-empty tombstones remain
+ * retained as ambiguous evidence. Backup directories carry no owner contract,
+ * so an absent record there is not ambiguity and age alone governs.
  */
 async function classifyBrokerLockArtifact(
 	directory: string,
@@ -1243,6 +1249,7 @@ async function classifyBrokerLockArtifact(
 	now: number,
 	graceMs: number,
 	pidAlive: (pid: number) => boolean,
+	readProcessIncarnation: (pid: number) => string | undefined,
 ): Promise<BrokerLockArtifactRetentionReason | "abandoned"> {
 	const target = path.join(directory, name);
 	// lstat, never stat: a symlink pointing at live state must never be followed
@@ -1265,14 +1272,21 @@ async function classifyBrokerLockArtifact(
 			return "owner-record-unreadable";
 		}
 	}
-	let pid: unknown;
+	let owner: { pid?: unknown; incarnation?: unknown };
 	try {
-		pid = (JSON.parse(raw) as { pid?: unknown }).pid;
+		owner = JSON.parse(raw) as { pid?: unknown; incarnation?: unknown };
 	} catch {
 		return "owner-record-unreadable";
 	}
-	if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0) return "owner-record-unreadable";
-	return pidAlive(pid) ? "owner-alive" : "abandoned";
+	if (typeof owner.pid !== "number" || !Number.isInteger(owner.pid) || owner.pid <= 0)
+		return "owner-record-unreadable";
+	return isBrokerLockOwnerAlive(
+		{ pid: owner.pid, incarnation: isProcessIncarnation(owner.incarnation) ? owner.incarnation : undefined },
+		pidAlive,
+		readProcessIncarnation,
+	)
+		? "owner-alive"
+		: "abandoned";
 }
 
 /**
@@ -1291,11 +1305,13 @@ export async function reapStaleBrokerLockArtifacts(input: {
 	now?: number;
 	graceMs?: number;
 	pidAlive?: (pid: number) => boolean;
+	processIncarnation?: (pid: number) => string | undefined;
 }): Promise<BrokerLockArtifactReapResult> {
 	const directory = path.join(input.agentDir, "sdk");
 	const now = input.now ?? Date.now();
 	const graceMs = input.graceMs ?? BROKER_LOCK_ARTIFACT_GRACE_MS;
 	const pidAlive = input.pidAlive ?? isPidAlive;
+	const readProcessIncarnation = input.processIncarnation ?? brokerProcessIncarnation;
 	const removed: string[] = [];
 	const retained: BrokerLockArtifactRetention[] = [];
 	const retainedByReason = new Map<BrokerLockArtifactRetentionReason, number>();
@@ -1312,7 +1328,7 @@ export async function reapStaleBrokerLockArtifacts(input: {
 		const target = path.join(directory, name);
 		let verdict: BrokerLockArtifactRetentionReason | "abandoned";
 		try {
-			verdict = await classifyBrokerLockArtifact(directory, name, now, graceMs, pidAlive);
+			verdict = await classifyBrokerLockArtifact(directory, name, now, graceMs, pidAlive, readProcessIncarnation);
 		} catch (error) {
 			// A vanished candidate needs no decision; anything else is ambiguous.
 			if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
@@ -1545,6 +1561,10 @@ const terminalPersistenceHooksForTest = new WeakMap<Broker, () => void>();
 const ambiguityGraceOverridesForTest = new WeakMap<Broker, number>();
 const publicationObservationOverridesForTest = new WeakMap<Broker, BrokerPublicationObservation>();
 const lockArtifactGraceOverridesForTest = new WeakMap<Broker, number>();
+const brokerLockReclaimHooksForTest = new WeakMap<
+	Broker,
+	{ beforeQuarantine?: () => Promise<void>; onContended?: () => void }
+>();
 const livenessGraceOverridesForTest = new WeakMap<Broker, number>();
 const heartbeatStallOverridesForTest = new WeakMap<Broker, PromiseWithResolvers<void>>();
 const managedCloseWaitOverridesForTest = new WeakMap<Broker, number>();
@@ -1556,6 +1576,8 @@ export class Broker {
 	discovery: BrokerDiscovery | null = null;
 	#lock: string;
 	#owner = randomBytes(12).toString("hex");
+	#ownedLockIdentity: string | undefined;
+	#ownedLockIncarnation: string | undefined;
 	/** Public publication-incarnation id, fixed at startup; never the endpoint generation. */
 	#diagnosticGeneration = randomBytes(16).toString("hex");
 	/** Trusted build snapshot captured at startup; unknown buildId stays null. */
@@ -3726,16 +3748,33 @@ export class Broker {
 		}
 		return this.#lockSnapshot(raw, lockIdentity);
 	}
-	async #createLock(): Promise<void> {
+	async #withLockReclaimGuard<T>(operation: () => Promise<T>): Promise<T> {
+		const hostIdentity = await brokerLockHostIdentity(this.settings.agentDir);
+		return withFileLock(`${this.#lock}.reclaim`, operation, {
+			...hostIdentity,
+			onContended: () => brokerLockReclaimHooksForTest.get(this)?.onContended?.(),
+		});
+	}
+	async #hasCanonicalLockOwnership(): Promise<boolean> {
+		if (!this.#ownedLockIdentity || !this.#ownedLockIncarnation) return false;
+		try {
+			const current = await this.#readLock();
+			return (
+				current?.identity === `owner:${this.#owner}` &&
+				current.lockIdentity === this.#ownedLockIdentity &&
+				current.pid === process.pid &&
+				current.incarnation === this.#ownedLockIncarnation
+			);
+		} catch {
+			return false;
+		}
+	}
+	async #createLockInsideGuard(): Promise<void> {
+		const rootDigest = await canonicalServiceRootDigest(this.settings.agentDir);
 		await fs.mkdir(this.#lock, { mode: 0o700 });
 		try {
 			const incarnation = brokerProcessIncarnation(process.pid);
-			// A minimal, non-secret receipt delta for D9 stale-artifact detach
-			// (sequenced follow-up): the OS incarnation and a digest of the exact
-			// resolved root this lock authorizes, so a later positive-death check can
-			// cross-bind this owner record against the discovery record it authored
-			// without re-deriving anything from file content or adding new identity.
-			const rootDigest = await canonicalServiceRootDigest(this.settings.agentDir);
+			if (!incarnation) throw new Error("Broker process incarnation is unavailable.");
 			await fs.writeFile(
 				this.#lockRecordPath(),
 				JSON.stringify({
@@ -3743,17 +3782,30 @@ export class Broker {
 					ownerId: this.#owner,
 					pid: process.pid,
 					acquiredAt: Date.now(),
-					...(incarnation ? { incarnation } : {}),
+					incarnation,
 					rootDigest,
 				}),
 				{ flag: "wx", mode: 0o600 },
 			);
-		} catch (e) {
+			const current = await this.#readLock();
+			if (
+				!current ||
+				current.ownerId !== this.#owner ||
+				current.pid !== process.pid ||
+				current.incarnation !== incarnation
+			)
+				throw new Error("SDK broker lock ownership changed during startup.");
+			this.#ownedLockIdentity = current.lockIdentity;
+			this.#ownedLockIncarnation = incarnation;
+		} catch (error) {
 			try {
 				await fs.rmdir(this.#lock);
 			} catch {}
-			throw e;
+			throw error;
 		}
+	}
+	async #createLock(): Promise<void> {
+		await this.#withLockReclaimGuard(() => this.#createLockInsideGuard());
 	}
 	async #waitForBrokerDiscovery(): Promise<BrokerDiscovery | null> {
 		const deadline = Date.now() + BROKER_LOCK_STARTUP_WAIT_MS;
@@ -3764,50 +3816,62 @@ export class Broker {
 		}
 		return readBrokerDiscovery(this.settings.agentDir, this.settings.heartbeatTtlMs);
 	}
-	async #reclaimStaleLock(snapshot: BrokerLockSnapshot): Promise<void> {
-		const current = await this.#readLock();
-		if (
-			!current ||
-			current.identity !== snapshot.identity ||
-			current.lockIdentity !== snapshot.lockIdentity ||
-			isBrokerLockOwnerAlive(current)
-		)
-			return;
+	async #reclaimStaleLock(snapshot: BrokerLockSnapshot): Promise<boolean> {
+		return await this.#withLockReclaimGuard(async () => {
+			const current = await this.#readLock();
+			if (
+				!current ||
+				current.identity !== snapshot.identity ||
+				current.lockIdentity !== snapshot.lockIdentity ||
+				isBrokerLockOwnerAlive(current)
+			)
+				return false;
+			await brokerLockReclaimHooksForTest.get(this)?.beforeQuarantine?.();
 
-		// Give every reclaimed generation a fresh quarantine name. Older brokers
-		// used only the lock inode hash; if that tombstone survived a crash, the
-		// deterministic name collided forever and left the dead canonical lock in
-		// place. The random suffix preserves no-replace rename semantics without
-		// letting retained cleanup debris block takeover.
-		for (let attempt = 0; attempt < 8; attempt++) {
-			const tombstone = path.join(
-				path.dirname(this.#lock),
-				`.broker.lock.stale-${createHash("sha256").update(snapshot.lockIdentity).digest("hex")}-${randomBytes(8).toString("hex")}`,
-			);
-			try {
-				await fs.rename(this.#lock, tombstone);
-				return;
-			} catch (e) {
-				const code = (e as NodeJS.ErrnoException).code;
-				if (code === "EEXIST" || code === "ENOTEMPTY") continue;
-				if (["ENOENT", "EISDIR", "ENOTDIR"].includes(code ?? "")) return;
-				if (code === "EPERM") {
-					try {
-						await fs.lstat(tombstone);
-						continue;
-					} catch (statError) {
-						if ((statError as NodeJS.ErrnoException).code !== "ENOENT") throw statError;
+			// Keep validation, quarantine, and successor lock publication under one
+			// cross-process fence so a stale snapshot can never move a newer lock.
+			for (let attempt = 0; attempt < 8; attempt++) {
+				const tombstone = path.join(
+					path.dirname(this.#lock),
+					`.broker.lock.stale-${createHash("sha256").update(snapshot.lockIdentity).digest("hex")}-${randomBytes(8).toString("hex")}`,
+				);
+				try {
+					await fs.rename(this.#lock, tombstone);
+				} catch (error) {
+					const code = (error as NodeJS.ErrnoException).code;
+					if (code === "EEXIST" || code === "ENOTEMPTY") continue;
+					if (["ENOENT", "EISDIR", "ENOTDIR"].includes(code ?? "")) return false;
+					if (code === "EPERM") {
+						try {
+							await fs.lstat(tombstone);
+							continue;
+						} catch (statError) {
+							if ((statError as NodeJS.ErrnoException).code !== "ENOENT") throw statError;
+						}
 					}
+					throw error;
 				}
-				throw e;
+				try {
+					await this.#createLockInsideGuard();
+					return true;
+				} catch (error) {
+					if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
+					throw error;
+				}
 			}
-		}
-		throw new Error(`Broker lock quarantine namespace is saturated for ${this.#lock}`);
+			throw new Error(`Broker lock quarantine namespace is saturated for ${this.#lock}`);
+		});
 	}
 	async #releaseOwnedLock(): Promise<void> {
 		try {
 			const lock = await this.#readLock();
-			if (lock?.ownerId !== this.#owner) return;
+			if (
+				!lock ||
+				lock.ownerId !== this.#owner ||
+				lock.lockIdentity !== this.#ownedLockIdentity ||
+				lock.incarnation !== this.#ownedLockIncarnation
+			)
+				return;
 			await fs.unlink(this.#lockRecordPath());
 			await fs.rmdir(this.#lock);
 		} catch (error) {
@@ -3856,6 +3920,8 @@ export class Broker {
 		this.#ambiguousAt = null;
 		this.#publishedAt = null;
 		this.#startedAt = process.hrtime.bigint();
+		this.#ownedLockIdentity = undefined;
+		this.#ownedLockIncarnation = undefined;
 		this.#watchInFlight = false;
 		this.#checkpointInFlight = false;
 		this.#throwIfStartupAborted();
@@ -3903,7 +3969,7 @@ export class Broker {
 				}
 				continue;
 			}
-			await this.#reclaimStaleLock(snapshot);
+			if (await this.#reclaimStaleLock(snapshot)) break;
 		}
 		this.#throwIfStartupAborted();
 		// Only the lock holder reaps, so concurrent brokers cannot race the removal.
@@ -3973,6 +4039,8 @@ export class Broker {
 			await this.#startupPrePublicationTestHook?.();
 			if (this.#startupPrePublicationDelayMs > 0) await Bun.sleep(this.#startupPrePublicationDelayMs);
 			this.#throwIfStartupAborted();
+			if (!(await this.#hasCanonicalLockOwnership()))
+				throw new Error("SDK broker lock ownership changed before discovery publication.");
 			this.#publication = await publishBrokerDiscovery(
 				this.settings.agentDir,
 				this.discovery,
@@ -4874,7 +4942,19 @@ export class Broker {
 	}
 
 	// Wire requests are readiness-gated by BrokerTransport before reaching this dispatcher.
-	handleRequest(operation: string, input: Record<string, unknown>, idempotencyKey?: string): Promise<BrokerResponse> {
+	async handleRequest(
+		operation: string,
+		input: Record<string, unknown>,
+		idempotencyKey?: string,
+	): Promise<BrokerResponse> {
+		if (
+			this.#publication !== null &&
+			this.#publicationState === "healthy-owned" &&
+			!(await this.#hasCanonicalLockOwnership())
+		) {
+			this.#fence("suspect-unpublished");
+			return error("unavailable", "broker lock ownership is not held");
+		}
 		if (operation === "broker.status") return Promise.resolve({ ok: true, result: this.status() });
 		if (operation === "broker.prepare_restart")
 			return this.prepareRestart(input as unknown as BrokerRestartPrepareOptions).then(
@@ -5391,6 +5471,15 @@ export function setAmbiguityGraceForTest(broker: Broker, graceMs: number | undef
 export function setLockArtifactGraceForTest(broker: Broker, graceMs: number | undefined): void {
 	if (graceMs === undefined) lockArtifactGraceOverridesForTest.delete(broker);
 	else lockArtifactGraceOverridesForTest.set(broker, graceMs);
+}
+
+/** Test-only barriers for exercising the cross-process broker-lock reclaim fence. */
+export function setBrokerLockReclaimHooksForTest(
+	broker: Broker,
+	hooks: { beforeQuarantine?: () => Promise<void>; onContended?: () => void } | undefined,
+): void {
+	if (hooks === undefined) brokerLockReclaimHooksForTest.delete(broker);
+	else brokerLockReclaimHooksForTest.set(broker, hooks);
 }
 
 /** Test-only hook for shortening the bounded liveness deadline. */

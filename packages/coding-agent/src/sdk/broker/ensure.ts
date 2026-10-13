@@ -7,7 +7,6 @@ import path from "node:path";
 import { nativeProcessBindings } from "@gajae-code/utils/native-process";
 import packageJson from "../../../package.json" with { type: "json" };
 import { acquireFileLock, type FileLockOptions, withFileLock } from "../../config/file-lock";
-import { loadInstallationHostId, loadLegacyInstallationHostId } from "../../config/machine-identity";
 import { SdkClient, SdkClientError } from "../client/client";
 import { type BrokerStartupExitRecord, clearBrokerStartupExitRecord, readBrokerStartupExitRecord } from "./broker-exit";
 import {
@@ -17,6 +16,7 @@ import {
 	readBrokerRestartIntent,
 } from "./discovery";
 import { BROKER_HANDOFF_ABORT, BROKER_HANDOFF_ACKNOWLEDGEMENT, BROKER_HANDOFF_COMMIT } from "./hop";
+import { brokerLockHostIdentity } from "./lock-host-identity";
 import {
 	isProcessIncarnation,
 	observeProcessIncarnation,
@@ -775,33 +775,6 @@ export function setEnsureBrokerTimingForTest(timing: EnsureBrokerTiming | undefi
 }
 
 type SpawnLockOptions = Pick<FileLockOptions, "retries" | "retryDelayMs" | "signal">;
-
-interface BrokerLockHostIdentity {
-	ownerHostId: string;
-	previousOwnerHostIds: readonly string[];
-}
-
-const brokerLockHostIdentityPromises = new Map<string, Promise<BrokerLockHostIdentity>>();
-
-async function brokerLockHostIdentity(agentDir: string): Promise<BrokerLockHostIdentity> {
-	const coordinationRoot = path.resolve(agentDir, "sdk");
-	const pending =
-		brokerLockHostIdentityPromises.get(coordinationRoot) ??
-		Promise.all([loadInstallationHostId({ configRootDir: coordinationRoot }), loadLegacyInstallationHostId()]).then(
-			([ownerHostId, legacyHostId]) => ({
-				ownerHostId,
-				previousOwnerHostIds: legacyHostId === ownerHostId ? [] : [legacyHostId],
-			}),
-		);
-	brokerLockHostIdentityPromises.set(coordinationRoot, pending);
-	try {
-		return await pending;
-	} catch (error) {
-		if (brokerLockHostIdentityPromises.get(coordinationRoot) === pending)
-			brokerLockHostIdentityPromises.delete(coordinationRoot);
-		throw error;
-	}
-}
 
 async function readBrokerDiscoveryBeforeDeadline(
 	agentDir: string,
