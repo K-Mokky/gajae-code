@@ -102,6 +102,45 @@ describe("provider slash command", () => {
 		}
 	});
 
+	it("reports lower-priority Anthropic environment credentials as shadowed", async () => {
+		tempAgentDir = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-provider-slash-"));
+		setAgentDir(tempAgentDir);
+		const envNames = [
+			"ANTHROPIC_OAUTH_TOKEN",
+			"ANTHROPIC_API_KEY",
+			"ANTHROPIC_FOUNDRY_API_KEY",
+			"CLAUDE_CODE_USE_FOUNDRY",
+		] as const;
+		const originalEnv = new Map(envNames.map(name => [name, Bun.env[name]]));
+		for (const name of envNames) delete Bun.env[name];
+		Bun.env.ANTHROPIC_OAUTH_TOKEN = "anthropic-oauth-token-secret";
+		Bun.env.ANTHROPIC_API_KEY = "anthropic-api-key-secret";
+		try {
+			const authStorage = await AuthStorage.create(path.join(tempAgentDir, "auth.db"));
+			authStorages.push(authStorage);
+			const registry = new ModelRegistry(authStorage, path.join(tempAgentDir, "models.yml"));
+			modelRegistries.push(registry);
+			const outputs: string[] = [];
+			const command = BUILTIN_SLASH_COMMANDS_INTERNAL.find(entry => entry.name === "provider");
+			await command?.handle?.({ name: "provider", args: "status", text: "/provider status" }, {
+				session: { modelRegistry: registry },
+				output: (text: string) => outputs.push(text),
+			} as unknown as SlashCommandRuntime);
+
+			const output = outputs.join("\n");
+			expect(output).toContain("anthropic: OAuth token (env ANTHROPIC_OAUTH_TOKEN)");
+			expect(output).toContain("shadowed: API key (env ANTHROPIC_API_KEY)");
+			expect(output).not.toContain("anthropic-oauth-token-secret");
+			expect(output).not.toContain("anthropic-api-key-secret");
+		} finally {
+			for (const name of envNames) {
+				const original = originalEnv.get(name);
+				if (original === undefined) delete Bun.env[name];
+				else Bun.env[name] = original;
+			}
+		}
+	});
+
 	it("reports OAuth-only and environment-key-only providers", async () => {
 		tempAgentDir = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-provider-slash-"));
 		setAgentDir(tempAgentDir);
@@ -215,6 +254,11 @@ describe("provider slash command", () => {
 			});
 			Bun.env.AWS_ACCESS_KEY_ID = "aws-access-key-test";
 			Bun.env.AWS_SECRET_ACCESS_KEY = "aws-secret-key-test";
+			Bun.env.AWS_PROFILE = "work";
+			await Bun.write(
+				credentialsPath,
+				"[work]\naws_access_key_id = profile-access-key-secret\naws_secret_access_key = profile-secret-key-secret\n",
+			);
 			registry.registerProvider(
 				"status-custom-bedrock",
 				{
@@ -265,6 +309,7 @@ describe("provider slash command", () => {
 			);
 			const withAwsCredentials = await status();
 			expect(withAwsCredentials).toContain("amazon-bedrock: AWS environment credentials");
+			expect(withAwsCredentials).toContain("shadowed: AWS profile credentials");
 			expect(withAwsCredentials).toContain("status-custom-bedrock: AWS environment credentials");
 			expect(withAwsCredentials).toMatch(/status-mixed-bedrock: API key \(stored credential id:\d+\)/);
 			expect(withAwsCredentials).toContain("  Bedrock route: AWS environment credentials");
@@ -277,11 +322,13 @@ describe("provider slash command", () => {
 			expect(withAwsCredentials).not.toContain("runtime-bedrock-api-key-secret");
 			expect(withAwsCredentials).not.toContain("aws-access-key-test");
 			expect(withAwsCredentials).not.toContain("aws-secret-key-test");
+			expect(withAwsCredentials).not.toContain("profile-access-key-secret");
+			expect(withAwsCredentials).not.toContain("profile-secret-key-secret");
 
 			Bun.env.AWS_BEARER_TOKEN_BEDROCK = "bedrock-bearer-secret";
 			const withBearerToken = await status();
 			expect(withBearerToken).toContain("amazon-bedrock: AWS bearer token (env AWS_BEARER_TOKEN_BEDROCK)");
-			expect(withBearerToken).toContain("shadowed: AWS environment credentials");
+			expect(withBearerToken).toContain("shadowed: AWS environment credentials, AWS profile credentials");
 			expect(withBearerToken).not.toContain("bedrock-bearer-secret");
 		} finally {
 			for (const name of envNames) {
@@ -1218,7 +1265,7 @@ describe("provider slash command", () => {
 		}
 	});
 
-	it("reports Vertex metadata-server credentials without retrieving an access token", async () => {
+	it("reports the winning Vertex API key and shadows metadata-server ADC", async () => {
 		tempAgentDir = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-provider-slash-"));
 		setAgentDir(tempAgentDir);
 		const envNames = [
@@ -1249,7 +1296,7 @@ describe("provider slash command", () => {
 		try {
 			Bun.env.HOME = tempAgentDir;
 			delete Bun.env.GOOGLE_APPLICATION_CREDENTIALS;
-			delete Bun.env.GOOGLE_CLOUD_API_KEY;
+			Bun.env.GOOGLE_CLOUD_API_KEY = "vertex-api-key-secret";
 			Bun.env.GOOGLE_CLOUD_PROJECT = "status-project";
 			Bun.env.GOOGLE_CLOUD_LOCATION = "us-central1";
 			await Bun.write(
@@ -1287,8 +1334,11 @@ describe("provider slash command", () => {
 				output: (text: string) => outputs.push(text),
 			} as unknown as SlashCommandRuntime);
 
-			expect(outputs.join("\n")).toContain("google-vertex: Google ADC (metadata server)");
-			expect(outputs.join("\n")).toContain("status-custom-vertex: Google ADC (metadata server)");
+			const output = outputs.join("\n");
+			expect(output).toContain("google-vertex: API key (env GOOGLE_CLOUD_API_KEY)");
+			expect(output).toContain("shadowed: Google ADC (metadata server)");
+			expect(output).toContain("status-custom-vertex: API key (env GOOGLE_CLOUD_API_KEY)");
+			expect(output).not.toContain("vertex-api-key-secret");
 			expect(requestedUrls).toContain(metadataServiceAccountUrl);
 			expect(requestedUrls).not.toContain(
 				"http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token",
