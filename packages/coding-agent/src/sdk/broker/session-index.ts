@@ -3,7 +3,12 @@ import * as fs from "node:fs/promises";
 import path from "node:path";
 import { logger, resolveEquivalentPath } from "@gajae-code/utils";
 import { nativeProcessBindings } from "@gajae-code/utils/native-process";
-import { type FileLockOptions, isFileLockAcquireTimeout, withFileLock } from "../../config/file-lock";
+import {
+	FILE_LOCK_ORPHAN_TRANSITION_ADOPTION_AGE_MS,
+	type FileLockOptions,
+	isFileLockAcquireTimeout,
+	withFileLock,
+} from "../../config/file-lock";
 import { repo } from "../../utils/git";
 import { endpointIncarnation } from "./endpoint-authority";
 import { processIncarnation } from "./process-incarnation";
@@ -762,7 +767,10 @@ function reduceEvents(
 // Global launch bursts may queue behind legitimate long index transactions. Keep
 // this bounded at one minute while the shared lock's exact dead-owner recovery runs.
 const SESSION_INDEX_LOCK_OPTIONS = { retries: 600, retryDelayMs: 100 } as const;
-const SESSION_INDEX_STARTUP_LOCK_WAIT_MS = 10_000;
+// Leave one retry interval beyond the transition's safe-adoption age so a fresh
+// ownerless transition can be reclaimed during ordinary startup.
+const SESSION_INDEX_STARTUP_LOCK_WAIT_MS =
+	FILE_LOCK_ORPHAN_TRANSITION_ADOPTION_AGE_MS + SESSION_INDEX_LOCK_OPTIONS.retryDelayMs * 2;
 
 /** Bound ordinary bootstrap waits; authorized doctor successors may use the full prepared window. */
 export function sessionIndexStartupLockOptions(

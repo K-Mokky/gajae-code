@@ -115,6 +115,8 @@ const REMOVAL_TRANSITION_GRACE_MS = 10_000;
  * This bounds how long a dead owner's transition can block lock acquisition.
  */
 const REMOVAL_TRANSITION_ADOPTION_BUFFER_MS = 5_000;
+export const FILE_LOCK_ORPHAN_TRANSITION_ADOPTION_AGE_MS =
+	REMOVAL_TRANSITION_GRACE_MS + REMOVAL_TRANSITION_ADOPTION_BUFFER_MS;
 
 /** Release retries cover transient handle denial and a competing exact-removal quarantine cleanup. */
 export const FILE_LOCK_RELEASE_RETRY_ATTEMPTS = 20;
@@ -2549,7 +2551,7 @@ export async function acquireFileLock(filePath: string, options: FileLockOptions
 	if (options.previousOwnerHostIds?.some(hostId => !hostId))
 		throw new Error("previousOwnerHostIds must contain only non-empty identities");
 	const opts = { ...DEFAULT_OPTIONS, ...options };
-	const orphanTransitionAgeMs = REMOVAL_TRANSITION_GRACE_MS + REMOVAL_TRANSITION_ADOPTION_BUFFER_MS;
+	const orphanTransitionAgeMs = FILE_LOCK_ORPHAN_TRANSITION_ADOPTION_AGE_MS;
 
 	if (opts.signal?.aborted) throw opts.signal.reason ?? new Error("File lock acquisition aborted");
 	const lockPath = getLockPath(filePath);

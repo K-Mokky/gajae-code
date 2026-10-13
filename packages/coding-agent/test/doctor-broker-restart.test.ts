@@ -2,7 +2,7 @@ import { describe, expect, it, spyOn } from "bun:test";
 import * as childProcess from "node:child_process";
 import * as fs from "node:fs/promises";
 import path from "node:path";
-import { FileLockAcquireError } from "../src/config/file-lock";
+import { FILE_LOCK_ORPHAN_TRANSITION_ADOPTION_AGE_MS, FileLockAcquireError } from "../src/config/file-lock";
 import { Broker } from "../src/sdk/broker/broker";
 import { readBrokerExitRecord, readBrokerStartupExitRecord } from "../src/sdk/broker/broker-exit";
 import { launchAuthorizedBrokerSuccessor, oldOwnerConfirmedExited } from "../src/sdk/broker/daemon-entry";
@@ -16,6 +16,7 @@ import {
 } from "../src/sdk/broker/discovery";
 import { restartBrokerForDoctor } from "../src/sdk/broker/doctor-restart";
 import * as brokerEnsure from "../src/sdk/broker/ensure";
+import { SessionIndex, sessionIndexStartupLockOptions } from "../src/sdk/broker/session-index";
 
 async function fixture() {
 	const dir = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-doctor-restart-"));
@@ -716,6 +717,37 @@ describe("doctor broker restart protocol", () => {
 			await fs.rm(dir, { recursive: true, force: true });
 		}
 	}, 10_000);
+
+	it("ordinary session-index startup waits until a fresh removal transition is reclaimable", async () => {
+		const dir = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-doctor-fresh-index-transition-"));
+		const indexPath = path.join(dir, "sdk", "sessions", "index.jsonl");
+		const transitionPath = `${indexPath}.lock.removing`;
+		await fs.mkdir(transitionPath, { recursive: true });
+		const initialTime = Date.now();
+		let now = initialTime;
+		const dateNow = spyOn(Date, "now").mockImplementation(() => now);
+		const sleep = spyOn(Bun, "sleep").mockImplementation(async milliseconds => {
+			now += typeof milliseconds === "number" ? milliseconds : Math.max(0, milliseconds.getTime() - now);
+		});
+		try {
+			const options = sessionIndexStartupLockOptions(performance.now() + 30_000, undefined, "ordinary");
+			const index = await new SessionIndex(dir).open(options);
+			expect(index.indexSeq).toBe(0);
+			expect(now - initialTime).toBeGreaterThanOrEqual(FILE_LOCK_ORPHAN_TRANSITION_ADOPTION_AGE_MS);
+			const transitionPresent = await fs.stat(transitionPath).then(
+				() => true,
+				error => {
+					if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+					throw error;
+				},
+			);
+			expect(transitionPresent).toBe(false);
+		} finally {
+			sleep.mockRestore();
+			dateNow.mockRestore();
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
 
 	it("retry/successor race: adopting an already-prepared request replays the same lease instead of double-preparing", async () => {
 		const { broker, discovery } = await fixture();
