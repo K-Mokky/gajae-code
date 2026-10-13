@@ -477,7 +477,7 @@ providers:
 
 Use provider-level `headers` for proxy-required headers. Keep the provider `api` set to `openai-completions` when the proxy exposes Chat Completions-compatible `/v1/chat/completions` semantics. `auth: apiKey` sends the resolved token as bearer auth; use `auth: none` only for trusted local/no-auth endpoints.
 
-For long reasoning gaps on an OpenAI-compatible endpoint, configure `streamIdleTimeoutMs` in milliseconds at the provider level, on an individual model, or in that model's `modelOverrides` entry. A model-level value overrides the provider value; `0` disables the inter-event watchdog. A request's explicit `streamIdleTimeoutMs` wins first, followed by the environment override, the models.yml value, then the built-in provider/model floor and 120-second default. This setting applies to `openai-completions` and `openai-responses` models.
+For long reasoning gaps on an OpenAI-compatible endpoint, configure `streamIdleTimeoutMs` in milliseconds at the provider level, on an individual model, or in that model's `modelOverrides` entry. A model-level value overrides the provider value; `0` disables the inter-event watchdog. A request's explicit `streamIdleTimeoutMs` wins first, followed by the environment override, the models.yml value, then the built-in provider/model floor and 120-second default. Values must not exceed 2,147,483,647 ms, and model-configured values are not supported with `transport: pi-native`; configure the upstream model in the auth-gateway instead. This setting applies to `openai-completions` and `openai-responses` models.
 
 ```yaml
 providers:

@@ -192,6 +192,22 @@ describe("resolveOpenAISdkRequestTimeoutMs(provider, override)", () => {
 		expect(resolveOpenAISdkRequestTimeoutMs("custom-proxy", undefined, "claude-opus-5-5", 300_000)).toBe(300_000);
 	});
 
+	it("uses a longer request idle timeout for SDK setup instead of the model fallback", () => {
+		expect(resolveOpenAISdkRequestTimeoutMs("custom-proxy", undefined, "claude-opus-5-5", 120_000, 300_000)).toBe(
+			300_000,
+		);
+	});
+
+	it("caps SDK request deadlines at the maximum platform timer delay", () => {
+		const maxTimerDelayMs = 2 ** 31 - 1;
+		expect(resolveOpenAISdkRequestTimeoutMs("custom-proxy", undefined, undefined, maxTimerDelayMs + 1)).toBe(
+			maxTimerDelayMs,
+		);
+		expect(
+			resolveOpenAISdkRequestTimeoutMs("custom-proxy", undefined, undefined, 120_000, Number.MAX_SAFE_INTEGER),
+		).toBe(maxTimerDelayMs);
+	});
+
 	it("disables the SDK request timeout when the first-event watchdog is explicitly off", () => {
 		expect(resolveOpenAISdkRequestTimeoutMs("openai", 0)).toBeUndefined();
 		expect(resolveOpenAISdkRequestTimeoutMs("alibaba-token-plan", 0)).toBeUndefined();

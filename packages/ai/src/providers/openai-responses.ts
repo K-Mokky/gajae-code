@@ -394,6 +394,7 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses"> = (
 				options?.maxRetryDelayMs,
 				options?.attemptScope,
 				options?.streamFirstEventTimeoutMs,
+				options?.streamIdleTimeoutMs,
 			);
 			const premiumRequestsTotal = copilotPremiumRequests;
 			const providerSessionState = getOpenAIResponsesProviderSessionState(model, options?.providerSessionState);
@@ -590,6 +591,7 @@ function createClient(
 	maxRetryDelayMs?: number,
 	attemptScope?: import("../types.js").AttemptScopeRef,
 	streamFirstEventTimeoutOverride?: number,
+	effectiveIdleTimeoutOverride?: number,
 ): {
 	client: OpenAI;
 	copilotPremiumRequests: number | undefined;
@@ -667,6 +669,7 @@ function createClient(
 		streamFirstEventTimeoutOverride,
 		model.id,
 		model.streamIdleTimeoutMs,
+		effectiveIdleTimeoutOverride,
 	);
 	return {
 		client: new OpenAI({

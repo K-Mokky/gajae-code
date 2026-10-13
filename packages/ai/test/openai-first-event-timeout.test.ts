@@ -583,6 +583,94 @@ describe("OpenAI-family first-event timeouts", () => {
 		);
 	});
 
+	it("uses the longer request idle timeout for OpenAI completions setup", async () => {
+		vi.useFakeTimers();
+		await withEnv(
+			{
+				GJC_OPENAI_STREAM_IDLE_TIMEOUT_MS: undefined,
+				PI_STREAM_IDLE_TIMEOUT_MS: undefined,
+				PI_OPENAI_STREAM_IDLE_TIMEOUT_MS: undefined,
+				PI_STREAM_FIRST_EVENT_TIMEOUT_MS: undefined,
+			},
+			async () => {
+				const model: Model<"openai-completions"> = {
+					...openAICompletionsModel,
+					provider: "custom-proxy",
+					baseUrl: "https://proxy.example.com/v1",
+					streamIdleTimeoutMs: 120_000,
+				};
+				const delayedFetch = createDelayedFetch(150_000, () => createOpenAICompletionsSuccessResponse(model.id));
+				global.fetch = Object.assign(delayedFetch, { preconnect: originalFetch.preconnect });
+
+				const pending = streamOpenAICompletions(model, baseContext(), {
+					apiKey: "test-key",
+					requestMaxRetries: 0,
+					streamIdleTimeoutMs: 300_000,
+				}).result();
+				await flushMicrotasks();
+
+				vi.advanceTimersByTime(120_000);
+				await flushMicrotasks();
+				let settled = false;
+				void pending.then(() => {
+					settled = true;
+				});
+				await flushMicrotasks();
+				expect(settled).toBe(false);
+
+				vi.advanceTimersByTime(30_000);
+				await flushMicrotasks();
+				const result = await pending;
+				expect(result.stopReason).toBe("stop");
+				expect(getFirstTextContent(result)).toMatchObject({ type: "text", text: "Hello delayed" });
+			},
+		);
+	});
+
+	it("uses the longer request idle timeout for OpenAI Responses setup", async () => {
+		vi.useFakeTimers();
+		await withEnv(
+			{
+				GJC_OPENAI_STREAM_IDLE_TIMEOUT_MS: undefined,
+				PI_STREAM_IDLE_TIMEOUT_MS: undefined,
+				PI_OPENAI_STREAM_IDLE_TIMEOUT_MS: undefined,
+				PI_STREAM_FIRST_EVENT_TIMEOUT_MS: undefined,
+			},
+			async () => {
+				const model: Model<"openai-responses"> = {
+					...openAIResponsesModel,
+					provider: "custom-proxy",
+					baseUrl: "https://proxy.example.com/v1",
+					streamIdleTimeoutMs: 120_000,
+				};
+				const delayedFetch = createDelayedFetch(150_000, createOpenAIResponsesSuccessResponse);
+				global.fetch = Object.assign(delayedFetch, { preconnect: originalFetch.preconnect });
+
+				const pending = streamOpenAIResponses(model, baseContext(), {
+					apiKey: "test-key",
+					requestMaxRetries: 0,
+					streamIdleTimeoutMs: 300_000,
+				}).result();
+				await flushMicrotasks();
+
+				vi.advanceTimersByTime(120_000);
+				await flushMicrotasks();
+				let settled = false;
+				void pending.then(() => {
+					settled = true;
+				});
+				await flushMicrotasks();
+				expect(settled).toBe(false);
+
+				vi.advanceTimersByTime(30_000);
+				await flushMicrotasks();
+				const result = await pending;
+				expect(result.stopReason).toBe("stop");
+				expect(getFirstTextContent(result)).toMatchObject({ type: "text", text: "Hello delayed" });
+			},
+		);
+	});
+
 	it("surfaces the Azure OpenAI responses first-event timeout message", async () => {
 		await expectFirstEventTimeout(
 			streamFirstEventTimeoutMs =>

@@ -751,7 +751,8 @@
 								},
 								"streamIdleTimeoutMs": {
 									"type": "integer",
-									"minimum": 0
+									"minimum": 0,
+									"maximum": 2147483647
 								}
 							},
 							"required": [
@@ -1146,7 +1147,8 @@
 								},
 								"streamIdleTimeoutMs": {
 									"type": "integer",
-									"minimum": 0
+									"minimum": 0,
+									"maximum": 2147483647
 								}
 							},
 							"additionalProperties": false
@@ -1169,7 +1171,8 @@
 					},
 					"streamIdleTimeoutMs": {
 						"type": "integer",
-						"minimum": 0
+						"minimum": 0,
+						"maximum": 2147483647
 					},
 					"openaiCompat": {
 						"type": "object",

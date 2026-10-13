@@ -527,6 +527,7 @@ interface ProviderValidationConfig {
 	apiKey?: string;
 	apiKeyEnv?: string;
 	api?: Api;
+	transport?: Model<Api>["transport"];
 	auth?: ProviderAuthMode;
 	oauthConfigured?: boolean;
 	discovery?: ProviderDiscovery;
@@ -551,6 +552,18 @@ function validateProviderConfiguration(
 ): void {
 	const hasProviderApi = !!config.api;
 	const models = config.models;
+	if (
+		config.transport === "pi-native" &&
+		(config.streamIdleTimeoutMs !== undefined ||
+			models.some(model => model.streamIdleTimeoutMs !== undefined) ||
+			Object.values(config.modelOverrides ?? {}).some(
+				override => (override as ModelOverride).streamIdleTimeoutMs !== undefined,
+			))
+	) {
+		throw new Error(
+			`Provider ${providerName}: "streamIdleTimeoutMs" is not supported with "transport: pi-native"; configure it on the auth-gateway's upstream model.`,
+		);
+	}
 
 	if (models.length === 0) {
 		if (mode === "models-config") {
@@ -766,6 +779,7 @@ function validateModelsConfig(config: ModelsConfig): void {
 				apiKey: providerConfig.apiKey,
 				apiKeyEnv: providerConfig.apiKeyEnv,
 				api: providerConfig.api as Api | undefined,
+				transport: providerConfig.transport,
 				auth: (providerConfig.auth ?? "apiKey") as ProviderAuthMode,
 				discovery: providerConfig.discovery as ProviderDiscovery | undefined,
 				compat: providerConfig.compat,

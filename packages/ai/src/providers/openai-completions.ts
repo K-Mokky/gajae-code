@@ -687,6 +687,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
 				options?.providerSessionId,
 				options?.maxRetryDelayMs,
 				options?.attemptScope,
+				options?.streamIdleTimeoutMs,
 			);
 			const premiumRequestsTotal = copilotPremiumRequests;
 			getCapturedErrorResponse = captureErrorResponse;
@@ -1542,6 +1543,7 @@ async function createClient(
 	providerSessionId?: string,
 	maxRetryDelayMs?: number,
 	attemptScope?: import("../types.js").AttemptScopeRef,
+	effectiveIdleTimeoutOverride?: number,
 ): Promise<{
 	client: OpenAI;
 	copilotPremiumRequests: number | undefined;
@@ -1693,6 +1695,7 @@ async function createClient(
 		streamFirstEventTimeoutOverride,
 		model.id,
 		model.streamIdleTimeoutMs,
+		effectiveIdleTimeoutOverride,
 	);
 	return {
 		client: new OpenAI({

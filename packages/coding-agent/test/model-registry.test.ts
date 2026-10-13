@@ -6603,6 +6603,47 @@ describe("ModelRegistry", () => {
 		);
 	});
 
+	test("rejects model-configured stream idle timeouts on pi-native transport", () => {
+		const timeoutConfigs: Array<Record<string, unknown>> = [
+			{ streamIdleTimeoutMs: 300_000 },
+			{ models: [{ id: "upstream/custom-model", streamIdleTimeoutMs: 300_000 }] },
+			{ modelOverrides: { "upstream/custom-model": { streamIdleTimeoutMs: 300_000 } } },
+		];
+
+		for (const timeoutConfig of timeoutConfigs) {
+			writeRawModelsConfig({
+				providers: {
+					gateway: {
+						baseUrl: "http://127.0.0.1:4000",
+						apiKey: "TEST_KEY",
+						api: "openai-completions",
+						transport: "pi-native",
+						models: [{ id: "upstream/custom-model" }],
+						...timeoutConfig,
+					},
+				},
+			});
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			expect(String(registry.getError()?.message)).toContain(
+				'"streamIdleTimeoutMs" is not supported with "transport: pi-native"',
+			);
+		}
+	});
+
+	test("rejects stream idle timeout values above the platform timer range", () => {
+		writeRawModelsConfig({
+			providers: {
+				openai: {
+					streamIdleTimeoutMs: 2 ** 31,
+				},
+			},
+		});
+
+		const registry = new ModelRegistry(authStorage, modelsJsonPath);
+		expect(String(registry.getError()?.message)).toContain("2147483647");
+	});
+
 	test("rejects runtime provider-only request shaping without an OpenAI-compatible API", () => {
 		const registry = new ModelRegistry(authStorage, modelsJsonPath);
 
