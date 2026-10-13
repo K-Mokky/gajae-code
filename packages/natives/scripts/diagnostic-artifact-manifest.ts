@@ -9,6 +9,19 @@ type ArtifactManifest = {
 	artifacts?: Record<string, string>;
 };
 
+function manifestHasArtifact(
+	manifest: ArtifactManifest | undefined,
+	version: string,
+	addon: string,
+	digest: string,
+): boolean {
+	return (
+		manifest?.schema === "gjc.diagnostic-artifact" &&
+		manifest.version === version &&
+		manifest.artifacts?.[addon] === digest
+	);
+}
+
 /**
  * Verify an addon against the manifest appropriate to its build profile and return
  * the verified digest for inclusion in a compiled binary's diagnostic trust record.
@@ -31,9 +44,9 @@ export async function verifyDiagnosticArtifactDigest(options: {
 	if (localBuild && !allowLocalBuilds) {
 		throw new Error(`${addon} is a local build and is not eligible for trusted verification`);
 	}
-	if (localBuild && metadata.version !== version) {
+	if (localBuild && metadata.version !== undefined && metadata.version !== version) {
 		throw new Error(
-			`${addon} is a local build for @gajae-code/natives@${metadata.version ?? "unknown"}; rebuild it for @gajae-code/natives@${version} before embedding`,
+			`${addon} is a local build for @gajae-code/natives@${metadata.version}; rebuild it for @gajae-code/natives@${version} before embedding`,
 		);
 	}
 
@@ -60,6 +73,17 @@ export async function verifyDiagnosticArtifactDigest(options: {
 			`${addon} bytes do not match the ${localBuild ? "local" : "trusted"} digest (${actual} != ${expected})`,
 		);
 	}
+	if (localBuild && metadata.version === undefined) {
+		const trustedManifestPath = path.join(nativeDir, "diagnostic-artifact.json");
+		const trustedManifest = (await Bun.file(trustedManifestPath).exists())
+			? ((await Bun.file(trustedManifestPath).json()) as ArtifactManifest)
+			: undefined;
+		if (!manifestHasArtifact(trustedManifest, version, addon, actual)) {
+			throw new Error(
+				`${addon} is an unversioned local build without a matching @gajae-code/natives@${version} trusted record; rebuild it before embedding`,
+			);
+		}
+	}
 	return expected;
 }
 
@@ -85,11 +109,16 @@ export async function recordDiagnosticArtifactDigest(options: {
 		? ((await Bun.file(manifestPath).json()) as ArtifactManifest)
 		: {};
 	const { version } = (await Bun.file(packageJsonPath).json()) as { version: string };
-	const artifacts = existing.version === version ? { ...(existing.artifacts ?? {}) } : {};
-	// Preserve pre-existing local variants during manifest migration, but only when their sidecar
-	// confirms they were built for this package version. A stale addon has a different native version
-	// sentinel and must not be included in a compiled binary.
-	if (localBuild && Object.keys(artifacts).length === 0) {
+	const artifacts = !localBuild && existing.version === version ? { ...(existing.artifacts ?? {}) } : {};
+	// Rebuild the local manifest from current-version addons so stale entries from earlier manifests
+	// cannot survive a package bump. Legacy sidecars are safe to migrate only when the tracked
+	// manifest records the exact bytes for this package version; local builds used to write that
+	// record before the manifest split.
+	if (localBuild) {
+		const trustedManifestPath = path.join(nativeDir, "diagnostic-artifact.json");
+		const trustedManifest = (await Bun.file(trustedManifestPath).exists())
+			? ((await Bun.file(trustedManifestPath).json()) as ArtifactManifest)
+			: undefined;
 		const entries = await fs.readdir(nativeDir);
 		for (const entry of entries) {
 			if (!entry.endsWith(".node")) continue;
@@ -98,10 +127,12 @@ export async function recordDiagnosticArtifactDigest(options: {
 			const sidecar = (await Bun.file(sidecarPath).exists())
 				? ((await Bun.file(sidecarPath).json()) as { profile?: string; version?: string })
 				: undefined;
-			if (sidecar?.profile === "local" && sidecar.version === version && entry !== path.basename(addonPath)) {
-				const variantDigest = new Bun.CryptoHasher("sha256")
-					.update(await Bun.file(variantPath).bytes())
-					.digest("hex");
+			if (sidecar?.profile !== "local") continue;
+			const variantDigest = new Bun.CryptoHasher("sha256").update(await Bun.file(variantPath).bytes()).digest("hex");
+			const currentVersion =
+				sidecar.version === version ||
+				(sidecar.version === undefined && manifestHasArtifact(trustedManifest, version, entry, variantDigest));
+			if (currentVersion && entry !== path.basename(addonPath)) {
 				artifacts[entry] = variantDigest;
 			}
 		}
