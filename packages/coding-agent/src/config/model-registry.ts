@@ -492,6 +492,7 @@ function resolveModelApiOverrideFromDiscovery(
 	discovery: ProviderDiscovery,
 	modelId: string,
 	entry?: { id?: unknown; owned_by?: unknown },
+	allowModelIdDetection = true,
 ): Api | undefined {
 	// Explicit per-prefix routing always wins over model-id detection.
 	const normalizedModelId = modelId.toLowerCase();
@@ -509,7 +510,12 @@ function resolveModelApiOverrideFromDiscovery(
 	// An OpenAI-shaped models list can advertise Anthropic models that must use
 	// the Anthropic transport even when the provider's default is OpenAI-family.
 	if (discovery.type === "openai-models-list") {
-		const detected = detectDiscoveredApiFamily(entry ?? { id: modelId });
+		const detected =
+			entry !== undefined
+				? detectDiscoveredApiFamily(entry)
+				: allowModelIdDetection
+					? detectDiscoveredApiFamily({ id: modelId })
+					: undefined;
 		if (detected === "anthropic-messages") return "anthropic-messages";
 		if (detected === "openai-completions") {
 			return isOpenAIFamilyApi(providerApi) ? providerApi : "openai-completions";
@@ -721,13 +727,23 @@ function validateProviderConfiguration(
 			configuredModel || !effectiveDiscovery || !discoveryProviderApi
 				? undefined
 				: resolveModelApiOverrideFromDiscovery(discoveryProviderApi, effectiveDiscovery, modelId);
+		const discoveryTimeoutApi =
+			configuredModel || !effectiveDiscovery || !discoveryProviderApi
+				? undefined
+				: resolveModelApiOverrideFromDiscovery(discoveryProviderApi, effectiveDiscovery, modelId, undefined, false);
 		const effectiveApi =
 			configuredModel?.api ??
 			(configuredModel ? config.api : undefined) ??
 			discoveryApi ??
 			getKnownProviderModelApi(providerName, modelId) ??
 			config.api;
-		const effectiveTimeoutApi = effectiveApi ?? (config.openaiCompat ? "openai-completions" : undefined);
+		const effectiveTimeoutApi =
+			configuredModel?.api ??
+			(configuredModel ? config.api : undefined) ??
+			discoveryTimeoutApi ??
+			getKnownProviderModelApi(providerName, modelId) ??
+			config.api ??
+			(config.openaiCompat ? "openai-completions" : undefined);
 		if (override.compat?.supportsResponsesSessionAffinity !== undefined) {
 			assertResponsesSessionAffinitySupported(
 				providerName,
@@ -1496,8 +1512,15 @@ function applyModelOverride(model: Model<Api>, override: ModelOverride): Model<A
 	if (override.input !== undefined) result.input = override.input as ("text" | "image")[];
 	if (override.output !== undefined) result.output = override.output as ("text" | "image")[];
 	if (override.cacheRetention !== undefined) result.cacheRetention = override.cacheRetention;
-	if (override.streamIdleTimeoutMs !== undefined && isRequestTransformApi(model.api))
+	if (override.streamIdleTimeoutMs !== undefined) {
+		assertRequestTransformSupportedForModelApi(
+			model.provider,
+			model.id,
+			model.api,
+			'modelOverrides "streamIdleTimeoutMs"',
+		);
 		result.streamIdleTimeoutMs = override.streamIdleTimeoutMs;
+	}
 	const contextWindowOverride = toPositiveNumberOrUndefined(override.contextWindow);
 	if (contextWindowOverride !== undefined) {
 		result.contextWindow = contextWindowOverride;
