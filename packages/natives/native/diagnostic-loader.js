@@ -202,6 +202,26 @@ function readTrustedLocalJson(file) {
 }
 
 /**
+ * An unversioned local build is accepted only when the package-owned record proves
+ * these exact bytes for the current package version. This is the migration path for
+ * builds produced before local sidecars carried their version.
+ *
+ * @param {unknown} record
+ * @param {string} version
+ * @param {string} artifact
+ * @param {string} digest
+ * @returns {boolean}
+ */
+function trustedRecordHasDigest(record, version, artifact, digest) {
+	if (typeof record !== "object" || record === null || Array.isArray(record)) return false;
+	const candidate = /** @type {Record<string, unknown>} */ (record);
+	if (candidate.schema !== "gjc.diagnostic-artifact" || candidate.version !== version) return false;
+	const artifacts = candidate.artifacts;
+	if (typeof artifacts !== "object" || artifacts === null || Array.isArray(artifacts)) return false;
+	return /** @type {Record<string, unknown>} */ (artifacts)[artifact] === digest;
+}
+
+/**
  * A source-mode local build has an explicit profile marker and a gitignored digest
  * record. Never consult these files for a compiled binary, an installed platform
  * package, or a release/CI addon.
@@ -224,7 +244,11 @@ function sourceLocalBuildDigest(file) {
 	const artifacts = localManifest.artifacts;
 	if (typeof artifacts !== "object" || artifacts === null || Array.isArray(artifacts)) return null;
 	const digest = /** @type {Record<string, unknown>} */ (artifacts)[ARTIFACT_BASENAME];
-	return typeof digest === "string" && /^[0-9a-f]{64}$/.test(digest) ? digest : null;
+	if (typeof digest !== "string" || !/^[0-9a-f]{64}$/.test(digest)) return null;
+	if (buildMetadata.version !== undefined) {
+		return buildMetadata.version === packageManifest.version ? digest : null;
+	}
+	return trustedRecordHasDigest(trustedArtifacts, packageManifest.version, ARTIFACT_BASENAME, digest) ? digest : null;
 }
 
 /**

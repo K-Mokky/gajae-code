@@ -142,6 +142,57 @@ test("bootstrapping a new local manifest includes pre-existing local variants on
 	});
 });
 
+test("rebuilding a local variant refuses to re-authorize modified peer bytes", async () => {
+	const nativeDir = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-native-peer-digest-"));
+	tempDirs.push(nativeDir);
+	const packageJsonPath = path.join(nativeDir, "package.json");
+	const modernAddonPath = path.join(nativeDir, "pi_natives.linux-x64-modern.node");
+	const baselineAddonPath = path.join(nativeDir, "pi_natives.linux-x64-baseline.node");
+	const localManifestPath = path.join(nativeDir, "diagnostic-artifact.local.json");
+
+	await Bun.write(packageJsonPath, JSON.stringify({ version: "2.0.0" }));
+	await Bun.write(modernAddonPath, "modern addon bytes");
+	await Bun.write(baselineAddonPath, "baseline addon bytes");
+	await Bun.write(`${modernAddonPath}.build.json`, JSON.stringify({ profile: "local", version: "2.0.0" }));
+	await Bun.write(`${baselineAddonPath}.build.json`, JSON.stringify({ profile: "local", version: "2.0.0" }));
+
+	await recordDiagnosticArtifactDigest({
+		addonPath: modernAddonPath,
+		nativeDir,
+		packageJsonPath,
+		profile: "local",
+	});
+
+	await Bun.write(modernAddonPath, "rebuilt modern addon bytes");
+	await recordDiagnosticArtifactDigest({
+		addonPath: modernAddonPath,
+		nativeDir,
+		packageJsonPath,
+		profile: "local",
+	});
+	const rebuiltManifest = (await Bun.file(localManifestPath).json()) as { artifacts: Record<string, string> };
+	expect(rebuiltManifest.artifacts["pi_natives.linux-x64-modern.node"]).toBe(
+		new Bun.CryptoHasher("sha256").update("rebuilt modern addon bytes").digest("hex"),
+	);
+	expect(rebuiltManifest.artifacts["pi_natives.linux-x64-baseline.node"]).toBe(
+		new Bun.CryptoHasher("sha256").update("baseline addon bytes").digest("hex"),
+	);
+	const manifestBefore = await Bun.file(localManifestPath).text();
+
+	await Bun.write(baselineAddonPath, "modified baseline addon bytes");
+	await expect(
+		recordDiagnosticArtifactDigest({
+			addonPath: modernAddonPath,
+			nativeDir,
+			packageJsonPath,
+			profile: "local",
+		}),
+	).rejects.toThrow(
+		"pi_natives.linux-x64-baseline.node bytes do not match the existing local diagnostic artifact digest",
+	);
+	expect(await Bun.file(localManifestPath).text()).toBe(manifestBefore);
+});
+
 test("legacy local variants migrate only when the current trusted record proves their version", async () => {
 	const nativeDir = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-native-legacy-migration-"));
 	tempDirs.push(nativeDir);

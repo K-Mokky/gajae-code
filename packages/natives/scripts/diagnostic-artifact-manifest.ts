@@ -99,6 +99,7 @@ export async function recordDiagnosticArtifactDigest(options: {
 	profile: NativeBuildProfile;
 }): Promise<void> {
 	const { addonPath, nativeDir, packageJsonPath, profile } = options;
+	const addon = path.basename(addonPath);
 	const localBuild = profile === "local";
 	const manifestPath = path.join(
 		nativeDir,
@@ -110,10 +111,20 @@ export async function recordDiagnosticArtifactDigest(options: {
 		: {};
 	const { version } = (await Bun.file(packageJsonPath).json()) as { version: string };
 	const artifacts = !localBuild && existing.version === version ? { ...(existing.artifacts ?? {}) } : {};
+	const currentLocalManifest =
+		localBuild && existing.schema === "gjc.diagnostic-artifact" && existing.version === version;
+	if (
+		currentLocalManifest &&
+		(typeof existing.artifacts !== "object" || existing.artifacts === null || Array.isArray(existing.artifacts))
+	) {
+		throw new Error(
+			"current local diagnostic artifact manifest has an invalid artifacts map; refusing to rebuild variants",
+		);
+	}
+	const currentLocalArtifacts = currentLocalManifest ? (existing.artifacts as Record<string, string>) : undefined;
 	// Rebuild the local manifest from current-version addons so stale entries from earlier manifests
-	// cannot survive a package bump. Legacy sidecars are safe to migrate only when the tracked
-	// manifest records the exact bytes for this package version; local builds used to write that
-	// record before the manifest split.
+	// cannot survive a package bump. Never re-hash a peer variant already committed by a current
+	// local manifest; legacy sidecars without a version need an exact current-version digest proof.
 	if (localBuild) {
 		const trustedManifestPath = path.join(nativeDir, "diagnostic-artifact.json");
 		const trustedManifest = (await Bun.file(trustedManifestPath).exists())
@@ -129,15 +140,23 @@ export async function recordDiagnosticArtifactDigest(options: {
 				: undefined;
 			if (sidecar?.profile !== "local") continue;
 			const variantDigest = new Bun.CryptoHasher("sha256").update(await Bun.file(variantPath).bytes()).digest("hex");
+			const recordedDigest = currentLocalArtifacts?.[entry];
+			if (entry !== addon && recordedDigest !== undefined && recordedDigest !== variantDigest) {
+				throw new Error(
+					`${entry} bytes do not match the existing local diagnostic artifact digest; rebuild it before rebuilding another variant`,
+				);
+			}
 			const currentVersion =
 				sidecar.version === version ||
-				(sidecar.version === undefined && manifestHasArtifact(trustedManifest, version, entry, variantDigest));
-			if (currentVersion && entry !== path.basename(addonPath)) {
+				(sidecar.version === undefined &&
+					(recordedDigest === variantDigest ||
+						manifestHasArtifact(trustedManifest, version, entry, variantDigest)));
+			if (currentVersion && entry !== addon) {
 				artifacts[entry] = variantDigest;
 			}
 		}
 	}
-	artifacts[path.basename(addonPath)] = digest;
+	artifacts[addon] = digest;
 	await Bun.write(
 		manifestPath,
 		`${JSON.stringify({ schema: "gjc.diagnostic-artifact", version, artifacts }, null, 2)}\n`,
