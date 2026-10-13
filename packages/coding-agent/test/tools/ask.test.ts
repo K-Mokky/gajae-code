@@ -1,4 +1,6 @@
 import { afterEach, beforeAll, describe, expect, it, spyOn, vi } from "bun:test";
+import * as os from "node:os";
+import * as path from "node:path";
 import type { AgentToolContext } from "@gajae-code/agent-core";
 import { validateToolArguments } from "@gajae-code/ai/utils/validation";
 import { Settings } from "@gajae-code/coding-agent/config/settings";
@@ -1894,6 +1896,96 @@ describe("AskTool option rendering", () => {
 			theme!,
 		);
 		expect(stripAnsi(renderedResult.render(300).join("\n"))).toContain(question);
+	});
+
+	it("shortens and truncates the display-only approval path in both renderers", async () => {
+		const theme = await getThemeByName("red-claw");
+		expect(theme).toBeDefined();
+		const artifactPath = `${os.homedir()}${path.sep}[click](https://example.invalid)${path.sep}${"long-directory/".repeat(12)}plan.md`;
+		const question = `Approve execution via ultragoal for the current Ralplan final at ${JSON.stringify(artifactPath)} (run_id="run", sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef)?`;
+		const renderedCall = askToolRenderer.renderCall(
+			{
+				questions: [
+					{
+						id: "approval",
+						question,
+						options: [{ label: "Approve execution via ultragoal" }],
+						workflowGate: { stage: "ralplan", kind: "approval" },
+					},
+				],
+			},
+			{ expanded: true, isPartial: false },
+			theme!,
+		);
+		const renderedResult = askToolRenderer.renderResult(
+			{
+				content: [{ type: "text", text: "Approval recorded." }],
+				details: {
+					question,
+					options: ["Refine further", "Approve execution via ultragoal", "Stop here"],
+					selectedOptions: ["Approve execution via ultragoal"],
+					multi: false,
+				},
+			},
+			{ expanded: true, isPartial: false },
+			theme!,
+		);
+		const callText = stripAnsi(renderedCall.render(120).join("\n"));
+		const resultText = stripAnsi(renderedResult.render(120).join("\n"));
+
+		for (const output of [callText, resultText]) {
+			expect(output).not.toContain(os.homedir());
+			expect(output).not.toContain(artifactPath);
+			expect(output).toContain("~");
+			expect(output).toContain("[click](https://example.invalid)");
+			expect(output).toContain("…");
+			expect(output).not.toContain("\t");
+		}
+
+		const selectorPrompts: string[] = [];
+		vi.spyOn(stateRuntime, "captureExecutionApprovalPresentation").mockResolvedValue({
+			state_path: "/tmp/ralplan-state.json",
+			state_revision: 1,
+			artifact_path: artifactPath,
+			artifact_sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+			run_id: "run",
+		});
+		vi.spyOn(stateRuntime, "revokeDeepInterviewExecutionApproval").mockResolvedValue(undefined);
+		vi.spyOn(stateRuntime, "revokeNonCrystalExecutionApproval").mockResolvedValue(undefined);
+		const tool = new AskTool(createSession({ getSessionId: () => "approval-render-session" }));
+		await tool.execute(
+			"approval-selector-render",
+			{
+				questions: [
+					{
+						id: "approval",
+						question,
+						options: [
+							{ label: "Refine further" },
+							{ label: "Approve execution via ultragoal" },
+							{ label: "Stop here" },
+						],
+						recommended: 1,
+						multi: false,
+						workflowGate: { stage: "ralplan", kind: "approval" },
+					},
+				],
+			},
+			undefined,
+			undefined,
+			createContext({
+				select: async prompt => {
+					selectorPrompts.push(prompt);
+					return "Stop here";
+				},
+			}),
+		);
+		const selectorPrompt = selectorPrompts[0] ?? "";
+		expect(selectorPrompt).not.toContain(os.homedir());
+		expect(selectorPrompt).not.toContain(artifactPath);
+		expect(selectorPrompt).toContain("~");
+		expect(selectorPrompt).toContain("[click](https://example.invalid)");
+		expect(selectorPrompt).toContain("…");
 	});
 });
 

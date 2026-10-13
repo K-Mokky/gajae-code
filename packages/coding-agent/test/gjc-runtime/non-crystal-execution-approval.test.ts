@@ -374,6 +374,39 @@ describe("non-Crystal user-gated execution approval", () => {
 		}
 	});
 
+	it("invalidates an earlier final review join when a Planner revision reopens planning", async () => {
+		await withSession(async (cwd, _manager, sessionId) => {
+			await createUltragoalPlan({ cwd, brief: "Implement the approved repair" });
+			await publishReviewedRalplanFinal(cwd, sessionId);
+			await writeRalplanStage(
+				cwd,
+				sessionId,
+				"reviewed-current-final",
+				"revision",
+				2,
+				"# Revised plan\n\nChange the repair.",
+			);
+			const ready = await runNativeStateCommand(
+				[
+					"write",
+					"--mode",
+					"ralplan",
+					"--input",
+					JSON.stringify({ current_phase: "handoff" }),
+					"--session-id",
+					sessionId,
+					"--json",
+				],
+				cwd,
+			);
+			expect(ready.status, ready.stderr).toBe(0);
+
+			await expect(captureExecutionApprovalPresentation(cwd, sessionId, "ralplan")).rejects.toThrow(
+				/verified same-pass Architect\/Critic review join/,
+			);
+		});
+	});
+
 	it("does not offer manual approval for a Ralplan autoresearch admission", async () => {
 		await withSession(async (cwd, manager, sessionId) => {
 			await fs.writeFile(path.join(cwd, ".gjc", "config.yml"), "gjc:\n  ralplan:\n    autoHandoff: autoresearch\n");

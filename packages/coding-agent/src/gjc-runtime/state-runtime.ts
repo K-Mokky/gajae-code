@@ -3770,6 +3770,7 @@ async function hasVerifiedRalplanApprovalReviewJoin(
 			planner = await verifiedRalplanStageReference(runDir, row);
 			architect = undefined;
 			critic = undefined;
+			finalJoin = undefined;
 			continue;
 		}
 		if ((row.stage === "architect" || row.stage === "critic") && planner && row.stage_n === planner.stage_n) {

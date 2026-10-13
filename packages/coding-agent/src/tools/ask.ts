@@ -29,7 +29,7 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "@gajae-code/tui";
-import { logger, prompt, untilAborted } from "@gajae-code/utils";
+import { logger, prompt, sanitizeDisplayLine, untilAborted } from "@gajae-code/utils";
 import {
 	formatDeepInterviewSelectorPrompt,
 	isDeepInterviewAskQuestion,
@@ -88,7 +88,15 @@ import {
 
 export { askSchema } from "./ask-contract";
 
-import { formatErrorMessage, formatMeta, formatTitle } from "./render-utils";
+import {
+	formatErrorMessage,
+	formatMeta,
+	formatTitle,
+	replaceTabs,
+	shortenPath,
+	TRUNCATE_LENGTHS,
+	truncateToWidth,
+} from "./render-utils";
 import { ToolAbortError, ToolError } from "./tool-errors";
 import {
 	assertUltragoalAskAllowed,
@@ -1405,7 +1413,11 @@ export class AskTool implements AgentTool<AskParametersSchema, AskToolDetails> {
 					: undefined;
 				const deepInterviewPrompt = formatDeepInterviewSelectorPrompt(q.question);
 				const isDeepInterviewQuestion = deepInterviewPrompt !== null || q.deepInterview !== undefined;
-				const baseDisplayQuestion = deepInterviewPrompt ?? q.question;
+				const baseDisplayQuestion =
+					deepInterviewPrompt ??
+					(q.workflowGate?.stage === "ralplan" && q.workflowGate.kind === "approval"
+						? displayRalplanApprovalQuestion(q.question)
+						: q.question);
 				const displayQuestion =
 					emptyCustomAttempt > 0
 						? `${baseDisplayQuestion}\n\n${EMPTY_CUSTOM_RETRY_MESSAGE} (attempt ${emptyCustomAttempt + 1} of ${MAX_EMPTY_CUSTOM_ATTEMPTS})`
@@ -1788,6 +1800,37 @@ function isRalplanApprovalQuestion(question: string): boolean {
 	return question.startsWith("Approve execution via ultragoal for the current Ralplan final at ");
 }
 
+function displayRalplanApprovalQuestion(question: string): string {
+	const prefix = "Approve execution via ultragoal for the current Ralplan final at ";
+	const safeQuestion = sanitizeDisplayLine(question);
+	if (!safeQuestion.startsWith(prefix)) return safeQuestion;
+	const pathStart = prefix.length;
+	if (safeQuestion[pathStart] !== '"') return truncateToWidth(replaceTabs(safeQuestion), TRUNCATE_LENGTHS.LINE);
+	let pathEnd = pathStart + 1;
+	for (; pathEnd < safeQuestion.length; pathEnd++) {
+		if (safeQuestion[pathEnd] === "\\") {
+			pathEnd++;
+			continue;
+		}
+		if (safeQuestion[pathEnd] === '"') break;
+	}
+	if (pathEnd >= safeQuestion.length) return truncateToWidth(replaceTabs(safeQuestion), TRUNCATE_LENGTHS.LINE);
+	let artifactPath: unknown;
+	try {
+		artifactPath = JSON.parse(safeQuestion.slice(pathStart, pathEnd + 1));
+	} catch {
+		return truncateToWidth(replaceTabs(safeQuestion), TRUNCATE_LENGTHS.LINE);
+	}
+	if (typeof artifactPath !== "string") return truncateToWidth(replaceTabs(safeQuestion), TRUNCATE_LENGTHS.LINE);
+	const displayPath = truncateToWidth(
+		replaceTabs(shortenPath(sanitizeDisplayLine(artifactPath))),
+		TRUNCATE_LENGTHS.CONTENT,
+	);
+	return replaceTabs(
+		`${safeQuestion.slice(0, pathStart)}${JSON.stringify(displayPath)}${safeQuestion.slice(pathEnd + 1)}`,
+	);
+}
+
 /** Render custom input as a single block with continuation lines (not one entry per line) */
 function renderCustomInput(
 	uiTheme: Theme,
@@ -1860,7 +1903,7 @@ export const askToolRenderer = {
 				const deepInterviewQuestion = renderDeepInterviewAskQuestion(q.question, uiTheme);
 				const markdownQuestion =
 					isRalplanApprovalGate(q.workflowGate) || isRalplanApprovalQuestion(q.question)
-						? markdownCodeSpan(q.question)
+						? markdownCodeSpan(displayRalplanApprovalQuestion(q.question))
 						: q.question;
 				container.addChild(deepInterviewQuestion ?? new Markdown(markdownQuestion, 3, 0, mdTheme, accentStyle));
 
@@ -1897,7 +1940,7 @@ export const askToolRenderer = {
 		const deepInterviewQuestion = renderDeepInterviewAskQuestion(question, uiTheme);
 		const markdownQuestion =
 			isRalplanApprovalGate(args.workflowGate) || isRalplanApprovalQuestion(question)
-				? markdownCodeSpan(question)
+				? markdownCodeSpan(displayRalplanApprovalQuestion(question))
 				: question;
 		container.addChild(deepInterviewQuestion ?? new Markdown(markdownQuestion, 1, 0, mdTheme, accentStyle));
 
@@ -1972,7 +2015,9 @@ export const askToolRenderer = {
 				container.addChild(
 					renderDeepInterviewAskQuestion(r.question, uiTheme) ??
 						new Markdown(
-							isRalplanApprovalQuestion(r.question) ? markdownCodeSpan(r.question) : r.question,
+							isRalplanApprovalQuestion(r.question)
+								? markdownCodeSpan(displayRalplanApprovalQuestion(r.question))
+								: r.question,
 							3,
 							0,
 							mdTheme,
@@ -2035,7 +2080,7 @@ export const askToolRenderer = {
 		const container = new Container();
 		container.addChild(new Text(header, 0, 0));
 		const markdownQuestion = isRalplanApprovalQuestion(details.question)
-			? markdownCodeSpan(details.question)
+			? markdownCodeSpan(displayRalplanApprovalQuestion(details.question))
 			: details.question;
 		container.addChild(
 			renderDeepInterviewAskQuestion(details.question, uiTheme) ??
