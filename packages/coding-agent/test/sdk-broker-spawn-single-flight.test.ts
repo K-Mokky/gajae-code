@@ -6,7 +6,7 @@ import * as path from "node:path";
 import * as native from "@gajae-code/natives";
 import packageJson from "../package.json" with { type: "json" };
 import Sdk from "../src/commands/sdk";
-import { FileLockAcquireError } from "../src/config/file-lock";
+import { FileLockAcquireError, FileLockTestHooks } from "../src/config/file-lock";
 import { Broker } from "../src/sdk/broker/broker";
 import { readBrokerExitRecord, readBrokerStartupExitRecord } from "../src/sdk/broker/broker-exit";
 import type { BrokerDiscovery } from "../src/sdk/broker/discovery";
@@ -869,6 +869,7 @@ it("retries ordinary broker startup after its session-index lock becomes availab
 	const dir = await temp();
 	const indexDir = path.join(dir, "sdk", "sessions");
 	const blockingLockPath = path.join(indexDir, "index.jsonl.lock");
+	const spawnLockPath = path.join(dir, "sdk", "broker.spawn.lock");
 	await fs.mkdir(blockingLockPath, { recursive: true });
 	await Bun.write(
 		path.join(blockingLockPath, "info"),
@@ -879,6 +880,13 @@ it("retries ordinary broker startup after its session-index lock becomes availab
 	let pollInFlight = false;
 	let lockUnavailableCount = 0;
 	let discoveryWhileBlocked: BrokerDiscovery | null | undefined;
+	let spawnLockAcquisitions = 0;
+	let retrySawReleasedSpawnLock = false;
+	FileLockTestHooks.afterParentMkdir = async lockPath => {
+		if (lockPath !== spawnLockPath) return;
+		spawnLockAcquisitions++;
+		if (spawnLockAcquisitions === 2) retrySawReleasedSpawnLock = !(await fs.exists(spawnLockPath));
+	};
 	const poll = setInterval(() => {
 		if (pollInFlight) return;
 		pollInFlight = true;
@@ -901,10 +909,13 @@ it("retries ordinary broker startup after its session-index lock becomes availab
 		await lockUnavailable.promise;
 		expect(lockUnavailableCount).toBe(1);
 		expect(discoveryWhileBlocked).toBeNull();
+		expect(spawnLockAcquisitions).toBe(2);
+		expect(retrySawReleasedSpawnLock).toBe(true);
 		expect(discovery.pid).toBeGreaterThan(0);
 		expect(await brokerDiscovery.readBrokerDiscovery(dir)).toMatchObject({ pid: discovery.pid });
 	} finally {
 		clearInterval(poll);
+		FileLockTestHooks.afterParentMkdir = undefined;
 		await fs.rm(blockingLockPath, { recursive: true, force: true });
 		await brokerOwnerForTest(dir)?.stop();
 		await fs.rm(dir, { recursive: true, force: true });

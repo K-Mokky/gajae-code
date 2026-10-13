@@ -1519,6 +1519,7 @@ async function ensureBrokerOnce(
 	// Fixture leases always spawn their own.
 	let spawnLog: BrokerSpawnLog | undefined;
 	const releaseSpawnLock = initiator === "fixture-lease" ? async () => {} : await acquireSpawnLock(settings.agentDir);
+	let spawnLockReleased = false;
 	try {
 		const deadline =
 			ensureBrokerTiming.now() +
@@ -1802,13 +1803,15 @@ async function ensureBrokerOnce(
 			initiator === "discovery" &&
 			trustedStartupExitRecord?.reason === "startup-lock-unavailable"
 		) {
+			await releaseSpawnLock();
+			spawnLockReleased = true;
 			await ensureBrokerTiming.sleep(SPAWN_LOCK_RETRY_DELAY_MS);
 			return ensureBrokerOnce(settings, initiator, true);
 		}
 		throw failure;
 	} finally {
 		if (spawnLog) await removeBrokerSpawnLog(spawnLog.path);
-		await releaseSpawnLock();
+		if (!spawnLockReleased) await releaseSpawnLock();
 	}
 }
 

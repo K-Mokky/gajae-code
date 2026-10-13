@@ -118,8 +118,12 @@ export async function launchAuthorizedBrokerSuccessor(
 ): Promise<AuthorizedBrokerSuccessorResult> {
 	let spawnOutcome: AuthorizedBrokerSuccessorResult;
 	let successorDeadlineAt = options.deadlineAt;
+	let startupLockFailure: FileLockAcquireError | undefined;
 	for (;;) {
-		if (Date.now() >= successorDeadlineAt) return { kind: "refused", reason: "deadline_elapsed" };
+		if (Date.now() >= successorDeadlineAt)
+			return startupLockFailure
+				? { kind: "refused", reason: "startup_lock_unavailable", detail: startupLockFailure.message }
+				: { kind: "refused", reason: "deadline_elapsed" };
 		try {
 			spawnOutcome = await withBrokerStartupLock(
 				options.agentDir,
@@ -233,7 +237,9 @@ export async function launchAuthorizedBrokerSuccessor(
 			break;
 		} catch (lockError) {
 			if (!(lockError instanceof FileLockAcquireError)) throw lockError;
-			if (Date.now() >= successorDeadlineAt) return { kind: "refused", reason: "deadline_elapsed" };
+			startupLockFailure = lockError;
+			if (Date.now() >= successorDeadlineAt)
+				return { kind: "refused", reason: "startup_lock_unavailable", detail: lockError.message };
 			await Bun.sleep(Math.min(50, options.deadlineAt - Date.now()));
 		}
 	}
@@ -322,14 +328,6 @@ export async function launchAuthorizedBrokerSuccessor(
 					}`,
 				};
 			}
-			if (Date.now() >= until)
-				return await refuseUnpublishedBrokerSuccessor(
-					child,
-					realBrokerPid,
-					expectedBrokerIncarnation,
-					spawnOutcome.handoff,
-					"publication_timeout",
-				);
 			return {
 				kind: "spawned" as const,
 				child,

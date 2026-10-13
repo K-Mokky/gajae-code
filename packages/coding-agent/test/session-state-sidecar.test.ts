@@ -1008,10 +1008,12 @@ describe("coordinator runtime state sidecar", () => {
 		expect(await Bun.file(stateFile).text()).toBe(evidence);
 
 		const originalReadFileSync = fsSync.readFileSync;
-		const readFileSync = spyOn(fsSync, "readFileSync").mockImplementation((...args: any[]) => {
-			if (String(args[0]) === stateFile) throw denied;
-			return Reflect.apply(originalReadFileSync, fsSync, args) as never;
-		});
+		const readFileSync = spyOn(fsSync, "readFileSync").mockImplementation(
+			(...args: Parameters<typeof fsSync.readFileSync>) => {
+				if (String(args[0]) === stateFile) throw denied;
+				return Reflect.apply(originalReadFileSync, fsSync, args) as never;
+			},
+		);
 		try {
 			await expect(
 				persistCoordinatorRuntimeStateFromPostmortem(postmortem.Reason.SIGTERM, {

@@ -1097,6 +1097,30 @@ describe("file lock cleanup failure handling (#2478)", () => {
 		},
 	);
 
+	test.skipIf(process.platform === "win32")(
+		"reclaims a young orphan transition within a longer acquisition budget",
+		async () => {
+			const lockedFile = path.join(await makeTemp(), "short-grace-transition.json");
+			const detachedPath = `${lockedFile}.lock.removing`;
+			await fs.mkdir(detachedPath);
+			const old = new Date(Date.now() - 20_000);
+			await fs.utimes(detachedPath, old, old);
+			vi.spyOn(Bun, "sleep").mockImplementation(async () => {});
+			let entered = false;
+
+			await withFileLock(
+				lockedFile,
+				async () => {
+					entered = true;
+				},
+				{ retries: 2, retryDelayMs: 30_000 },
+			);
+
+			expect(entered).toBe(true);
+			expect(await fs.exists(detachedPath)).toBe(false);
+		},
+	);
+
 	const invalidOrphanAdoptionReceipts: [string, (detachedPath: string) => unknown][] = [
 		["missing durable scrub proof", detachedPath => ({ ok: false, code: "cleanup_pending", detachedPath })],
 		[

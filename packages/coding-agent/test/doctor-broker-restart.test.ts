@@ -1,4 +1,5 @@
 import { describe, expect, it, spyOn } from "bun:test";
+import * as childProcess from "node:child_process";
 import * as fs from "node:fs/promises";
 import path from "node:path";
 import { FileLockAcquireError } from "../src/config/file-lock";
@@ -607,7 +608,11 @@ describe("doctor broker restart protocol", () => {
 				deadlineAt,
 				packageGeneration: "test-generation",
 			});
-			expect(result).toMatchObject({ kind: "refused", reason: "deadline_elapsed" });
+			expect(result).toMatchObject({
+				kind: "refused",
+				reason: "startup_lock_unavailable",
+				detail: expect.stringContaining("blocked by retained removal transition"),
+			});
 			expect(lock).toHaveBeenCalledTimes(2);
 			expect(now).toBe(deadlineAt);
 		} finally {
@@ -617,6 +622,100 @@ describe("doctor broker restart protocol", () => {
 			await fs.rm(dir, { recursive: true, force: true });
 		}
 	});
+
+	it("accepts a published successor when handoff release completes after its deadline", async () => {
+		const { dir, broker, discovery } = await fixture();
+		const requestId = "late-handoff-release";
+		let successorBroker: Broker | undefined;
+		let launcher: childProcess.ChildProcess | undefined;
+		const handoffReleaseStarted = Promise.withResolvers<void>();
+		const handoffReleaseGate = Promise.withResolvers<void>();
+		const launchMode = spyOn(brokerEnsure, "resolveBrokerLaunchMode").mockReturnValue("darwin-trampoline");
+		const launch = spyOn(brokerEnsure, "launchBrokerViaPosixTrampoline").mockImplementation(
+			async (agentDir, launchOptions) => {
+				const successorRequestId = launchOptions.env.GJC_BROKER_RESTART_REQUEST;
+				if (!successorRequestId) throw new Error("missing successor request id");
+				successorBroker = new Broker({ agentDir, restartRequestId: successorRequestId });
+				const successorDiscovery = await successorBroker.start();
+				launcher = childProcess.spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+					stdio: "ignore",
+				});
+				return {
+					process: launcher,
+					realBrokerPid: successorDiscovery.pid,
+					realBrokerIncarnation: successorDiscovery.incarnation,
+					error: undefined,
+					handoff: {
+						release: async () => {
+							handoffReleaseStarted.resolve();
+							await handoffReleaseGate.promise;
+						},
+						terminate: async () => {
+							handoffReleaseGate.resolve();
+						},
+					},
+				};
+			},
+		);
+		try {
+			const prepared = await broker.prepareRestart({
+				ownerId: discovery.ownerId,
+				generation: discovery.packageGeneration,
+				pid: discovery.pid,
+				incarnation: discovery.incarnation,
+				requestId,
+				deadlineAt: Date.now() + 2_500,
+			});
+			expect(prepared.ok).toBe(true);
+			if (!prepared.ok) return;
+			const lease = prepared.result as { lease: string; occupancyEpoch: number; expiresAt: number };
+			const committed = await broker.commitRestart({
+				ownerId: discovery.ownerId,
+				generation: discovery.packageGeneration,
+				pid: discovery.pid,
+				incarnation: discovery.incarnation,
+				requestId,
+				deadlineAt: lease.expiresAt,
+				lease: lease.lease,
+				occupancyEpoch: lease.occupancyEpoch,
+			});
+			expect(committed.ok).toBe(true);
+			if (!committed.ok) return;
+			await broker.completion;
+
+			const resultTask = launchAuthorizedBrokerSuccessor({
+				agentDir: dir,
+				requestId,
+				deadlineAt: lease.expiresAt,
+				packageGeneration: discovery.packageGeneration,
+			});
+			await handoffReleaseStarted.promise;
+			expect(Date.now()).toBeLessThan(lease.expiresAt);
+			await Bun.sleep(Math.max(0, lease.expiresAt - Date.now() + 10));
+			handoffReleaseGate.resolve();
+
+			const result = await resultTask;
+			expect(result).toMatchObject({
+				kind: "spawned",
+				discovery: { restartRequestId: requestId, packageGeneration: discovery.packageGeneration },
+			});
+			expect(Date.now()).toBeGreaterThanOrEqual(lease.expiresAt);
+		} finally {
+			handoffReleaseGate.resolve();
+			launch.mockRestore();
+			launchMode.mockRestore();
+			if (successorBroker) await successorBroker.stop();
+			if (launcher && launcher.exitCode === null && launcher.signalCode === null) {
+				const exited = Promise.withResolvers<void>();
+				launcher.once("exit", () => exited.resolve());
+				launcher.kill("SIGTERM");
+				await Promise.race([exited.promise, Bun.sleep(1_000)]);
+				if (launcher.exitCode === null && launcher.signalCode === null) launcher.kill("SIGKILL");
+			}
+			await broker.stop();
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	}, 10_000);
 
 	it("retry/successor race: adopting an already-prepared request replays the same lease instead of double-preparing", async () => {
 		const { broker, discovery } = await fixture();
