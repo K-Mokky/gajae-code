@@ -1835,6 +1835,17 @@ function ralplanIndexKey(entry: unknown): string | undefined {
 	return `${stage}\u0000${stage_n}\u0000${sha256}`;
 }
 
+function ralplanIndexKeyWithReviewMetadata(entry: unknown): string | undefined {
+	const key = ralplanIndexKey(entry);
+	if (!key || !entry || typeof entry !== "object" || Array.isArray(entry)) return key;
+	const record = entry as Record<string, unknown>;
+	return `${key}\u0000${JSON.stringify({
+		reviewed_planner: record.reviewed_planner ?? null,
+		lane_verdict: record.lane_verdict ?? null,
+		architect_decision: record.architect_decision ?? null,
+	})}`;
+}
+
 interface RalplanPlannerReference {
 	stage_n: number;
 	path: string;
@@ -2084,7 +2095,7 @@ async function persistArtifact(
 			skill: "ralplan",
 			sessionId: resolved.sessionId,
 		},
-		key: ralplanIndexKey,
+		key: ralplanIndexKeyWithReviewMetadata,
 	});
 
 	let pendingApprovalPath: string | undefined;
@@ -2118,6 +2129,11 @@ interface ExistingStageArtifact {
 	path: string;
 	sha256: string;
 	createdAt: string;
+	stage?: RalplanStage;
+	stageN?: number;
+	reviewedPlanner?: RalplanPlannerReference;
+	laneVerdict?: string;
+	architectDecision?: string;
 	autoHandoff?: RalplanAutoHandoffResolution;
 }
 
@@ -2179,10 +2195,57 @@ function findExistingStageArtifact(
 			path: record.path,
 			sha256: record.sha256,
 			createdAt: typeof record.created_at === "string" ? record.created_at : "",
+			stage,
+			stageN,
+			...(parseRalplanPlannerReference(record.reviewed_planner)
+				? { reviewedPlanner: parseRalplanPlannerReference(record.reviewed_planner) }
+				: {}),
+			...(typeof record.lane_verdict === "string" ? { laneVerdict: record.lane_verdict } : {}),
+			...(typeof record.architect_decision === "string" ? { architectDecision: record.architect_decision } : {}),
 			...(stage === "final" ? { autoHandoff: parseRalplanFinalAdmission(record.auto_handoff) } : {}),
 		};
 	}
 	return match;
+}
+
+function assertDuplicateReviewMetadataMatches(
+	existing: ExistingStageArtifact,
+	stage: RalplanStage,
+	reviewedPlanner: RalplanPlannerReference | undefined,
+	laneVerdict: LaneVerdictUpdate | undefined,
+): void {
+	if (existing.reviewedPlanner && !reviewedPlanner) {
+		throw new RalplanCommandError(
+			2,
+			`refusing to deduplicate ralplan ${stage} stage ${existing.stageN}: its reviewed Planner pass is no longer current.`,
+		);
+	}
+	if (
+		existing.reviewedPlanner &&
+		reviewedPlanner &&
+		!sameRalplanPlannerReference(existing.reviewedPlanner, reviewedPlanner)
+	) {
+		throw new RalplanCommandError(
+			2,
+			`refusing to deduplicate ralplan ${stage} stage ${existing.stageN} with different Planner provenance.`,
+		);
+	}
+	if (laneVerdict && existing.laneVerdict !== undefined && existing.laneVerdict !== laneVerdict.verdict) {
+		throw new RalplanCommandError(
+			2,
+			`refusing to deduplicate ralplan ${stage} stage ${existing.stageN} with a conflicting lane verdict.`,
+		);
+	}
+	if (
+		laneVerdict?.architectDecision &&
+		existing.architectDecision !== undefined &&
+		existing.architectDecision !== laneVerdict.architectDecision
+	) {
+		throw new RalplanCommandError(
+			2,
+			`refusing to deduplicate ralplan architect stage ${existing.stageN} with a conflicting Architect decision.`,
+		);
+	}
 }
 
 interface OnDiskStageArtifact {
@@ -2293,7 +2356,7 @@ async function repairMissingStageArtifactLedger(
 				skill: "ralplan",
 				sessionId: resolved.sessionId,
 			},
-			key: ralplanIndexKey,
+			key: ralplanIndexKeyWithReviewMetadata,
 		},
 	);
 	const duplicate = result.duplicate;
@@ -2542,7 +2605,6 @@ async function handleArtifactWrite(
 		resolved.stage === "architect" || resolved.stage === "critic" || resolved.stage === "final"
 			? latestRalplanPlannerReference(indexLoad.rawText, runDir, resolved.stageN)
 			: undefined;
-
 	// Duplicate-write guard: a second `--write` for the same (stage, stage_n) must not
 	// silently clobber the artifact or append a duplicate ledger row. Classify before any
 	// state mutation so a conflict never regresses run-state phase.
@@ -2552,6 +2614,40 @@ async function handleArtifactWrite(
 			throw new RalplanCommandError(
 				2,
 				`refusing to overwrite ralplan ${resolved.stage} stage ${resolved.stageN} at ${existingArtifact.path}: an artifact with different content already exists (existing sha256=${existingArtifact.sha256}, new sha256=${sha256}). Use a new --stage_n to record another pass.`,
+			);
+		}
+		assertDuplicateReviewMetadataMatches(existingArtifact, resolved.stage, reviewedPlanner, laneVerdict);
+		const mergedReviewedPlanner = reviewedPlanner ?? existingArtifact.reviewedPlanner;
+		const mergedLaneVerdict = laneVerdict?.verdict ?? existingArtifact.laneVerdict;
+		const mergedArchitectDecision = laneVerdict?.architectDecision ?? existingArtifact.architectDecision;
+		if (
+			(resolved.stage === "architect" || resolved.stage === "critic" || resolved.stage === "final") &&
+			(mergedReviewedPlanner || mergedLaneVerdict || mergedArchitectDecision)
+		) {
+			await appendRalplanIndexIdempotent(
+				path.join(sessionPlansDir(persistCwd, resolved.sessionId), "ralplan", resolved.runId, "index.jsonl"),
+				{
+					stage: resolved.stage,
+					stage_n: resolved.stageN,
+					path: existingArtifact.path,
+					created_at: existingArtifact.createdAt,
+					sha256: existingArtifact.sha256,
+					...(mergedReviewedPlanner ? { reviewed_planner: mergedReviewedPlanner } : {}),
+					...(mergedLaneVerdict ? { lane_verdict: mergedLaneVerdict } : {}),
+					...(mergedArchitectDecision ? { architect_decision: mergedArchitectDecision } : {}),
+					...(existingArtifact.autoHandoff ? { auto_handoff: existingArtifact.autoHandoff } : {}),
+				},
+				{
+					cwd: persistCwd,
+					key: ralplanIndexKeyWithReviewMetadata,
+					audit: {
+						category: "ledger",
+						verb: "append",
+						owner: "gjc-runtime",
+						skill: "ralplan",
+						sessionId: resolved.sessionId,
+					},
+				},
 			);
 		}
 		if (resolved.stage === "final") {
@@ -2564,11 +2660,14 @@ async function handleArtifactWrite(
 					path: existingArtifact.path,
 					created_at: existingArtifact.createdAt,
 					sha256: existingArtifact.sha256,
+					...(mergedReviewedPlanner ? { reviewed_planner: mergedReviewedPlanner } : {}),
+					...(mergedLaneVerdict ? { lane_verdict: mergedLaneVerdict } : {}),
+					...(mergedArchitectDecision ? { architect_decision: mergedArchitectDecision } : {}),
 					...(existingArtifact.autoHandoff ? { auto_handoff: existingArtifact.autoHandoff } : {}),
 				},
 				{
 					cwd: persistCwd,
-					key: ralplanIndexKey,
+					key: ralplanIndexKeyWithReviewMetadata,
 					audit: {
 						category: "ledger",
 						verb: "append",
@@ -2603,7 +2702,7 @@ async function handleArtifactWrite(
 				}
 			}
 		}
-		return await buildDeduplicatedResult(resolved, existingArtifact, sha256, persistCwd, repositoryBinding);
+		return await buildDeduplicatedResult(resolved, existingArtifact, sha256, persistCwd, repositoryBinding, laneVerdict, persistedRoleState);
 	}
 
 	// `persistArtifact` writes the artifact before its ledger row. If a process crashed

@@ -12,7 +12,12 @@ import {
 	runNativeDeepInterviewCommand,
 } from "@gajae-code/coding-agent/gjc-runtime/deep-interview-runtime";
 import { runNativeRalplanCommand } from "@gajae-code/coding-agent/gjc-runtime/ralplan-runtime";
-import { auditPath, modeStatePath, sessionStateDir } from "@gajae-code/coding-agent/gjc-runtime/session-layout";
+import {
+	auditPath,
+	modeStatePath,
+	sessionPlansDir,
+	sessionStateDir,
+} from "@gajae-code/coding-agent/gjc-runtime/session-layout";
 import {
 	captureExecutionApprovalPresentation,
 	DEEP_INTERVIEW_EXECUTION_APPROVAL_MAX_AGE_MS,
@@ -444,6 +449,82 @@ describe("non-Crystal user-gated execution approval", () => {
 				);
 			});
 		}
+	});
+
+	it("refuses conflicting duplicate review decisions and enriches legacy review rows", async () => {
+		await withSession(async (cwd, _manager, sessionId) => {
+			await createUltragoalPlan({ cwd, brief: "Implement the approved repair" });
+			const runId = "duplicate-review-provenance";
+			await writeRalplanStage(cwd, sessionId, runId, "planner", 1, "# Planner\n\nPlan the repair.");
+			const architectArtifact = "## Architectural Status\nCLEAR\n\n## Code Review Recommendation\nAPPROVE\n";
+			await writeRalplanStage(cwd, sessionId, runId, "architect", 1, architectArtifact, [
+				"--lane-verdict",
+				"CLEAR",
+				"--architect-decision",
+				"APPROVE",
+			]);
+			const conflictingRetry = await runNativeRalplanCommand(
+				[
+					"--write",
+					"--stage",
+					"architect",
+					"--stage_n",
+					"1",
+					"--artifact",
+					architectArtifact,
+					"--run-id",
+					"duplicate-review-provenance",
+					"--session-id",
+					sessionId,
+					"--lane-verdict",
+					"CLEAR",
+					"--architect-decision",
+					"REQUEST_CHANGES",
+					"--json",
+				],
+				cwd,
+			);
+			expect(conflictingRetry.status).toBe(2);
+			expect(conflictingRetry.stderr).toContain("conflicting Architect decision");
+
+			await writeRalplanStage(cwd, sessionId, runId, "critic", 1, "## Verdict\n**OKAY**\n", [
+				"--lane-verdict",
+				"OKAY",
+			]);
+			await writeRalplanStage(cwd, sessionId, runId, "final", 1, "# Final plan\n\nPlan the repair.");
+			await expect(captureExecutionApprovalPresentation(cwd, sessionId, "ralplan")).resolves.toMatchObject({
+				run_id: runId,
+			});
+
+			const legacyRunId = "legacy-review-provenance";
+			await writeRalplanStage(cwd, sessionId, legacyRunId, "planner", 1, "# Planner\n\nPlan the repair.");
+			await writeRalplanStage(cwd, sessionId, legacyRunId, "architect", 1, architectArtifact);
+			await writeRalplanStage(cwd, sessionId, legacyRunId, "architect", 1, architectArtifact, [
+				"--lane-verdict",
+				"CLEAR",
+				"--architect-decision",
+				"APPROVE",
+			]);
+			await writeRalplanStage(cwd, sessionId, legacyRunId, "critic", 1, "## Verdict\n**OKAY**\n", [
+				"--lane-verdict",
+				"OKAY",
+			]);
+			await writeRalplanStage(cwd, sessionId, legacyRunId, "final", 1, "# Final plan\n\nPlan the repair.");
+			const legacyIndexPath = path.join(sessionPlansDir(cwd, sessionId), "ralplan", legacyRunId, "index.jsonl");
+			const legacyRows = (await fs.readFile(legacyIndexPath, "utf8"))
+				.trim()
+				.split("\n")
+				.map(line => JSON.parse(line) as Record<string, unknown>);
+			expect(legacyRows.filter(row => row.stage === "architect")).toHaveLength(2);
+			expect(legacyRows.findLast(row => row.stage === "architect")).toMatchObject({
+				lane_verdict: "CLEAR",
+				architect_decision: "APPROVE",
+				reviewed_planner: { stage_n: 1 },
+			});
+			await expect(captureExecutionApprovalPresentation(cwd, sessionId, "ralplan")).resolves.toMatchObject({
+				run_id: legacyRunId,
+			});
+		});
 	});
 
 	it("invalidates an earlier final review join when a Planner revision reopens planning", async () => {
