@@ -7,7 +7,7 @@ use std::{
 	sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError},
 };
 
-use crate::{ShellFd, error, ioutils, sys};
+use crate::{ShellFd, error, ioutils, output_decode::OutputDecoderState, sys};
 
 /// A trait representing a stream that can be read from and written to.
 /// This is used for custom stream implementations in `OpenFile`.
@@ -41,6 +41,7 @@ pub trait Stream: std::io::Read + std::io::Write + Send + Sync {
 pub struct HeldInput {
 	bytes:      Arc<Mutex<VecDeque<u8>>>,
 	read_lock:  Arc<Mutex<()>>,
+	decoder:    Arc<Mutex<OutputDecoderState>>,
 }
 
 impl HeldInput {
@@ -60,6 +61,16 @@ impl HeldInput {
 	/// Whether nothing is held.
 	pub fn is_empty(&self) -> bool {
 		self.lock_bytes().is_empty()
+	}
+
+	/// Returns the decoder selection shared by builtin readers of this input.
+	pub fn output_decoder_state(&self) -> OutputDecoderState {
+		*self.decoder.lock().unwrap_or_else(PoisonError::into_inner)
+	}
+
+	/// Retains the decoder selection for the next line from this input.
+	pub fn set_output_decoder_state(&self, state: OutputDecoderState) {
+		*self.decoder.lock().unwrap_or_else(PoisonError::into_inner) = state;
 	}
 
 	/// Serializes builtin readers of this open file description. A reader holds

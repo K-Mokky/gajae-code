@@ -6,11 +6,19 @@ use std::{
 	time::{Duration, Instant},
 };
 
-use brush_core::{ErrorKind, builtins, env, error, openfiles::{HeldInput, OpenFile}, variables};
+use brush_core::{
+	ErrorKind,
+	builtins,
+	env,
+	error,
+	openfiles::{HeldInput, OpenFile},
+	output_decode::OutputDecoderState,
+	variables,
+};
 use clap::Parser;
 use itertools::Itertools;
 
-use crate::line_input::{CTRL_C, CTRL_D, LineInput, decode_line};
+use crate::line_input::{CTRL_C, CTRL_D, LineInput};
 
 /// Exit code returned when `read` times out.
 /// This is 128 + SIGALRM (14) = 142, matching bash behavior.
@@ -450,14 +458,26 @@ impl InputReader {
 		Ok(None)
 	}
 
-	/// The text of a `-n`/`-N` read whose limit fell before the last byte of
-	/// `line`. The `input` that byte took (with the backslash that escaped
-	/// it) is held for the next read of the open file description, so the
-	/// value never exceeds the limit and no input is lost.
-	fn line_before_last_byte(&self, mut line: Vec<u8>, input: &[u8]) -> String {
-		line.pop();
-		self.source.unread(input);
-		decode_line(line)
+	/// The text of a `-n`/`-N` read whose limit fell before trailing bytes in
+	/// `line`. Each line byte records the input bytes that produced it, so
+	/// escaped bytes can be returned intact to the next read.
+	fn line_before_trailing_bytes(
+		&self,
+		mut line: Vec<u8>,
+		raw_backslashes: Vec<bool>,
+		trailing_bytes: usize,
+	) -> String {
+		let keep = line.len().saturating_sub(trailing_bytes);
+		let mut unread = Vec::with_capacity(trailing_bytes * 2);
+		for (&byte, &escaped) in line.iter().zip(&raw_backslashes).skip(keep) {
+			if escaped {
+				unread.push(BACKSLASH);
+			}
+			unread.push(byte);
+		}
+		line.truncate(keep);
+		self.source.unread(&unread);
+		self.source.decode_line(line)
 	}
 
 	/// Reads the next input event, handling timeout and control characters.
@@ -504,17 +524,19 @@ struct LineReaderConfig {
 	process_escapes: bool,
 }
 
-/// Characters read toward a `-n`/`-N` limit, counted as `decode_line` will
-/// decode them: a complete UTF-8 character is one, and so is each invalid
-/// sequence it replaces with one U+FFFD. A multibyte character is never
-/// split. A lead byte is known to be invalid only once the byte after it
-/// arrives, and that byte then starts the next character, so it can lie past
-/// the limit.
-#[derive(Default)]
+/// Characters read toward a `-n`/`-N` limit, using the same active encoding as
+/// the line decoder. UTF-8 malformed sequences become one replacement
+/// character; ACP DBCS lead/trail pairs count as one character.
 struct CharCount {
 	chars:   usize,
 	pending: [u8; 4],
 	len:     usize,
+	state:   OutputDecoderState,
+}
+
+enum Utf8Character {
+	Valid(usize),
+	Invalid(usize),
 }
 
 /// Where a byte leaves a [`CharCount`] relative to its limit.
@@ -523,47 +545,103 @@ enum Limit {
 	NotReached,
 	/// Reached by the character this byte completes.
 	Reached,
-	/// Reached by the invalid sequence this byte ended without belonging to:
-	/// the byte itself lies past the limit.
-	Passed,
+	/// Reached before these trailing bytes, which must be returned to input.
+	Passed(usize),
 }
 
 impl CharCount {
+	fn new(state: OutputDecoderState) -> Self {
+		Self { chars: 0, pending: [0; 4], len: 0, state }
+	}
+
 	fn push(&mut self, byte: u8, limit: Option<usize>) -> Limit {
-		// The bytes pending before a push are the start of one valid
-		// character, at most three, so there is room for this one.
 		self.pending[self.len] = byte;
 		self.len += 1;
-		while let Some(char_len) = self.next_char_len() {
-			self.chars += 1;
-			self.pending.copy_within(char_len..self.len, 0);
-			self.len -= char_len;
+		if self.state.uses_acp() {
+			return self.process_acp(false, limit);
+		}
+
+		while let Some(character) = self.next_utf8_character() {
+			match character {
+				Utf8Character::Valid(char_len) => {
+					self.consume_pending(char_len);
+					self.chars += 1;
+				},
+				Utf8Character::Invalid(char_len) => {
+					if self.state.select_acp_fallback() {
+						return self.process_acp(false, limit);
+					}
+					self.consume_pending(char_len);
+					self.chars += 1;
+				},
+			}
 			if limit.is_some_and(|limit| self.chars >= limit) {
-				return if self.len == 0 { Limit::Reached } else { Limit::Passed };
+				return self.limit_result(self.len);
 			}
 		}
 		Limit::NotReached
 	}
 
-	/// At EOF the pending start of a character decodes to one U+FFFD, so it
-	/// counts as one character. Returns whether that reached `limit`.
-	fn finish(&mut self, limit: Option<usize>) -> bool {
+	/// At EOF, flush the last incomplete UTF-8 or ACP character.
+	fn finish(&mut self, limit: Option<usize>) -> Limit {
 		if self.len == 0 {
-			return false;
+			return Limit::NotReached;
+		}
+		if !self.state.uses_acp() && self.state.select_acp_fallback() {
+			return self.process_acp(true, limit);
+		}
+		if self.state.uses_acp() {
+			return self.process_acp(true, limit);
 		}
 		self.len = 0;
 		self.chars += 1;
-		limit.is_some_and(|limit| self.chars >= limit)
+		if limit.is_some_and(|limit| self.chars >= limit) {
+			Limit::Reached
+		} else {
+			Limit::NotReached
+		}
 	}
 
-	/// The length of the first pending character once it is known: a
-	/// complete character, or an invalid sequence that decodes to one
-	/// U+FFFD. `None` while the pending bytes can still become a character.
-	fn next_char_len(&self) -> Option<usize> {
+	fn next_utf8_character(&self) -> Option<Utf8Character> {
 		(1..=self.len).find_map(|end| match std::str::from_utf8(&self.pending[..end]) {
-			Ok(_) => Some(end),
-			Err(error) => error.error_len(),
+			Ok(_) => Some(Utf8Character::Valid(end)),
+			Err(error) => error.error_len().map(Utf8Character::Invalid),
 		})
+	}
+
+	fn consume_pending(&mut self, consumed: usize) {
+		self.pending.copy_within(consumed..self.len, 0);
+		self.len -= consumed;
+	}
+
+	fn process_acp(&mut self, eof: bool, limit: Option<usize>) -> Limit {
+		let mut index = 0;
+		while index < self.len {
+			let char_len = if self.state.is_acp_lead_byte(self.pending[index]) {
+				if index + 1 < self.len {
+					2
+				} else if eof {
+					1
+				} else {
+					break;
+				}
+			} else {
+				1
+			};
+			index += char_len;
+			self.chars += 1;
+			if limit.is_some_and(|limit| self.chars >= limit) {
+				let trailing = self.len - index;
+				self.consume_pending(index);
+				return self.limit_result(trailing);
+			}
+		}
+		self.consume_pending(index);
+		Limit::NotReached
+	}
+
+	fn limit_result(&self, trailing: usize) -> Limit {
+		if trailing == 0 { Limit::Reached } else { Limit::Passed(trailing) }
 	}
 }
 
@@ -586,7 +664,8 @@ where
 	F: Fn() -> bool,
 {
 	let mut line = Vec::new();
-	let mut count = CharCount::default();
+	let mut raw_backslashes = Vec::new();
+	let mut count = CharCount::new(reader.source.decoder_state());
 	let mut pending_backslash = false;
 
 	loop {
@@ -594,24 +673,34 @@ where
 
 		match event {
 			InputEvent::Eof => {
-				// An incomplete character that reaches the limit completes the
-				// read, as in bash.
-				if count.finish(config.char_limit) {
-					return Ok(ReadResult::Line(decode_line(line)));
+				match count.finish(config.char_limit) {
+					Limit::Reached => return Ok(ReadResult::Line(reader.source.decode_line(line))),
+					Limit::Passed(past) => {
+						return Ok(ReadResult::Line(
+							reader.line_before_trailing_bytes(line, raw_backslashes, past),
+						));
+					},
+					Limit::NotReached => {},
 				}
 				// Bash discards pending backslash on EOF.
-				return Ok(ReadResult::Eof((!line.is_empty()).then(|| decode_line(line))));
+				return Ok(ReadResult::Eof(
+					(!line.is_empty()).then(|| reader.source.decode_line(line)),
+				));
 			},
 
 			InputEvent::Timeout => {
 				// Include pending backslash on timeout (different from EOF).
 				if pending_backslash {
 					line.push(BACKSLASH);
+					raw_backslashes.push(false);
 				}
-				return Ok(ReadResult::TimedOut((!line.is_empty()).then(|| decode_line(line))));
+				return Ok(ReadResult::TimedOut(
+					(!line.is_empty()).then(|| reader.source.decode_line(line)),
+				));
 			},
 
 			InputEvent::CtrlC => {
+				reader.source.set_decoder_state(count.state);
 				return Ok(ReadResult::Interrupted);
 			},
 
@@ -621,7 +710,7 @@ where
 				return Ok(if line.is_empty() && !pending_backslash {
 					ReadResult::Eof(None)
 				} else {
-					ReadResult::Line(decode_line(line))
+					ReadResult::Line(reader.source.decode_line(line))
 				});
 			},
 
@@ -638,14 +727,16 @@ where
 
 						// For other bytes, add the byte literally (backslash consumed).
 						line.push(byte);
+						raw_backslashes.push(true);
 
 						// Check character limit (based on output length).
 						match count.push(byte, config.char_limit) {
 							Limit::NotReached => continue,
-							Limit::Reached => return Ok(ReadResult::Line(decode_line(line))),
-							// The backslash before the byte lies past the limit too.
-							Limit::Passed => {
-								return Ok(ReadResult::Line(reader.line_before_last_byte(line, &[BACKSLASH, byte])));
+							Limit::Reached => return Ok(ReadResult::Line(reader.source.decode_line(line))),
+							Limit::Passed(past) => {
+								return Ok(ReadResult::Line(
+									reader.line_before_trailing_bytes(line, raw_backslashes, past),
+								));
 							},
 						}
 					}
@@ -658,7 +749,7 @@ where
 
 				// Check for delimiter.
 				if config.delimiter == Some(byte) {
-					return Ok(ReadResult::Line(decode_line(line)));
+					return Ok(ReadResult::Line(reader.source.decode_line(line)));
 				}
 
 				// Ignore non-whitespace control characters.
@@ -667,12 +758,17 @@ where
 				}
 
 				line.push(byte);
+				raw_backslashes.push(false);
 
 				// Check character limit (based on output length).
 				match count.push(byte, config.char_limit) {
 					Limit::NotReached => {},
-					Limit::Reached => return Ok(ReadResult::Line(decode_line(line))),
-					Limit::Passed => return Ok(ReadResult::Line(reader.line_before_last_byte(line, &[byte]))),
+					Limit::Reached => return Ok(ReadResult::Line(reader.source.decode_line(line))),
+					Limit::Passed(past) => {
+						return Ok(ReadResult::Line(
+							reader.line_before_trailing_bytes(line, raw_backslashes, past),
+						));
+					},
 				}
 			},
 		}
@@ -1053,6 +1149,79 @@ mod tests {
 		}
 	}
 
+	#[cfg(windows)]
+	#[derive(Clone)]
+	struct CursorStream(std::sync::Arc<std::sync::Mutex<std::io::Cursor<Vec<u8>>>>);
+
+	#[cfg(windows)]
+	impl std::io::Read for CursorStream {
+		fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+			std::io::Read::read(&mut *self.0.lock().expect("cursor lock"), buf)
+		}
+	}
+
+	#[cfg(windows)]
+	impl std::io::Write for CursorStream {
+		fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+			std::io::Write::write(&mut *self.0.lock().expect("cursor lock"), buf)
+		}
+
+		fn flush(&mut self) -> std::io::Result<()> {
+			std::io::Write::flush(&mut *self.0.lock().expect("cursor lock"))
+		}
+	}
+
+	#[cfg(windows)]
+	impl brush_core::openfiles::Stream for CursorStream {
+		fn clone_box(&self) -> Box<dyn brush_core::openfiles::Stream> {
+			Box::new(self.clone())
+		}
+	}
+
+	#[cfg(windows)]
+	#[test]
+	#[expect(clippy::panic_in_result_fn)]
+	fn read_n_and_read_cap_count_gbk_pairs_after_acp_selection() -> anyhow::Result<()> {
+		for no_delimiter in [false, true] {
+			// D2 BB is CP936 一 and valid UTF-8 U+04BB. Only the retained ACP
+			// choice disambiguates it correctly after the first line.
+			let contents = vec![0xff, b'\n', 0xd2, 0xbb, b'X', b'\n'];
+			let stream = CursorStream(std::sync::Arc::new(std::sync::Mutex::new(
+				std::io::Cursor::new(contents),
+			)));
+			let input = OpenFile::Stream(Box::new(stream), HeldInput::default());
+			input
+				.held_input()
+				.expect("stream holds decoder state")
+				.set_output_decoder_state(OutputDecoderState::with_fallback_codepage(936));
+
+			let first = test_command().read_line(input.try_clone()?, Vec::<u8>::new(), None, || false)?;
+			assert!(matches!(first, ReadResult::Line(_)));
+			assert!(input
+				.held_input()
+				.expect("stream holds decoder state")
+				.output_decoder_state()
+				.uses_acp());
+
+			let limited = ReadCommand {
+				raw_mode: true,
+				return_after_n_chars: (!no_delimiter).then_some(1),
+				return_after_n_chars_no_delimiter: no_delimiter.then_some(1),
+				..test_command()
+			};
+			assert!(matches!(
+				limited.read_line(input.try_clone()?, Vec::<u8>::new(), None, || false)?,
+				ReadResult::Line(ref text) if text == "一"
+			));
+
+			assert!(matches!(
+				test_command().read_line(input, Vec::<u8>::new(), None, || false)?,
+				ReadResult::Line(ref text) if text == "X"
+			));
+		}
+		Ok(())
+	}
+
 	#[test]
 	fn test_ensure_not_cancelled_returns_interrupted() {
 		let is_cancelled = || true;
@@ -1188,7 +1357,7 @@ mod tests {
 		let held = first_input.held_input().expect("pipe holds input").clone();
 		let second_input = first_input.try_clone()?;
 		let first_command = ReadCommand { raw_mode: true, return_after_n_chars: Some(1), ..test_command() };
-		let expected_first = decode_line(vec![0xc3]);
+		let expected_first = brush_core::output_decode::decode_owned_bytes(vec![0xc3]);
 		let (first_sender, first_receiver) = std::sync::mpsc::channel();
 		let first = std::thread::spawn(move || {
 			let result = first_command.read_line(first_input, Vec::<u8>::new(), None, || false);

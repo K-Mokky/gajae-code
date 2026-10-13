@@ -27,18 +27,89 @@ use std::str;
 #[cfg(windows)]
 const CP_UTF8: u32 = 65001;
 
+
+#[derive(Clone, Copy)]
 enum Mode {
 	Utf8,
 	#[cfg(windows)]
 	Acp,
 }
 
-/// Incremental decoder for one byte stream.
-pub struct OutputDecoder {
-	pending:           Vec<u8>,
-	mode:              Mode,
+/// Encoding decision retained for one input stream.
+#[derive(Clone, Copy)]
+pub struct OutputDecoderState {
+	mode: Mode,
 	#[cfg(windows)]
 	fallback_codepage: u32,
+}
+
+impl Default for OutputDecoderState {
+	fn default() -> Self {
+		Self::new()
+	}
+}
+
+impl OutputDecoderState {
+	/// Start with UTF-8 preference and the host ACP fallback.
+	#[cfg(windows)]
+	pub fn new() -> Self {
+		Self::with_fallback_codepage(acp())
+	}
+
+	/// Start with UTF-8-only decoding off Windows.
+	#[cfg(not(windows))]
+	pub const fn new() -> Self {
+		Self { mode: Mode::Utf8 }
+	}
+
+	/// Use an explicit ACP, primarily for deterministic code-page tests.
+	#[cfg(windows)]
+	pub const fn with_fallback_codepage(codepage: u32) -> Self {
+		Self { mode: Mode::Utf8, fallback_codepage: codepage }
+	}
+
+	/// Whether a prior byte selected the ACP fallback for this stream.
+	pub const fn uses_acp(&self) -> bool {
+		#[cfg(windows)]
+		{
+			matches!(self.mode, Mode::Acp)
+		}
+		#[cfg(not(windows))]
+		{
+			false
+		}
+	}
+
+	/// Select ACP fallback after invalid UTF-8, if an ACP fallback is available.
+	pub fn select_acp_fallback(&mut self) -> bool {
+		#[cfg(windows)]
+		{
+			if self.fallback_codepage != 0 && self.fallback_codepage != CP_UTF8 {
+				self.mode = Mode::Acp;
+				return true;
+			}
+		}
+		false
+	}
+
+	/// Whether `byte` starts a multibyte character in the selected ACP.
+	pub fn is_acp_lead_byte(&self, byte: u8) -> bool {
+		#[cfg(windows)]
+		{
+			self.uses_acp() && is_dbcs_lead(self.fallback_codepage, byte)
+		}
+		#[cfg(not(windows))]
+		{
+			let _ = byte;
+			false
+		}
+	}
+}
+
+/// Incremental decoder for one byte stream.
+pub struct OutputDecoder {
+	pending: Vec<u8>,
+	state:   OutputDecoderState,
 }
 
 impl Default for OutputDecoder {
@@ -52,24 +123,30 @@ impl OutputDecoder {
 	/// Not `const`: `GetACP` is an FFI call.
 	#[cfg(windows)]
 	pub fn new() -> Self {
-		Self::with_fallback_codepage(acp())
+		Self::with_state(OutputDecoderState::new())
 	}
 
 	/// Decode as UTF-8 only; no ANSI fallback exists off Windows.
 	#[cfg(not(windows))]
 	pub const fn new() -> Self {
-		Self { pending: Vec::new(), mode: Mode::Utf8 }
+		Self::with_state(OutputDecoderState::new())
 	}
 
 	/// Decode with an explicit ANSI fallback. Used by tests so GBK fixtures
 	/// run on any Windows host, not only a Chinese ACP.
 	#[cfg(windows)]
 	pub const fn with_fallback_codepage(codepage: u32) -> Self {
-		Self {
-			pending:           Vec::new(),
-			mode:              Mode::Utf8,
-			fallback_codepage: codepage,
-		}
+		Self::with_state(OutputDecoderState::with_fallback_codepage(codepage))
+	}
+
+	/// Continue a stream using its retained UTF-8/ACP selection.
+	pub const fn with_state(state: OutputDecoderState) -> Self {
+		Self { pending: Vec::new(), state }
+	}
+
+	/// Current stream encoding decision.
+	pub const fn state(&self) -> OutputDecoderState {
+		self.state
 	}
 
 	/// Push the next bytes. Returns text that is safe to emit now;
@@ -88,7 +165,7 @@ impl OutputDecoder {
 	}
 
 	fn drain(&mut self, eof: bool) -> String {
-		match self.mode {
+		match self.state.mode {
 			Mode::Utf8 => self.drain_utf8(eof),
 			#[cfg(windows)]
 			Mode::Acp => self.drain_acp(eof),
@@ -120,12 +197,11 @@ impl OutputDecoder {
 				}
 
 				#[cfg(windows)]
-				if self.can_fallback_to_acp() {
+				if self.state.select_acp_fallback() {
 					// One encoding per command. Do not resume UTF-8 after
 					// a bad byte: later UTF-8 would be ACP-mojibake, but
 					// cmd/chcp emit ACP for the whole stream.
 					self.pending.drain(..valid_up_to);
-					self.mode = Mode::Acp;
 					out.push_str(&self.drain_acp(eof));
 					return out;
 				}
@@ -141,20 +217,15 @@ impl OutputDecoder {
 	}
 
 	#[cfg(windows)]
-	const fn can_fallback_to_acp(&self) -> bool {
-		self.fallback_codepage != 0 && self.fallback_codepage != CP_UTF8
-	}
-
-	#[cfg(windows)]
 	fn drain_acp(&mut self, eof: bool) -> String {
 		if self.pending.is_empty() {
 			return String::new();
 		}
-		let len = complete_acp_len(self.fallback_codepage, &self.pending, eof);
+		let len = complete_acp_len(self.state.fallback_codepage, &self.pending, eof);
 		if len == 0 {
 			return String::new();
 		}
-		let decoded = decode_codepage(self.fallback_codepage, &self.pending[..len])
+		let decoded = decode_codepage(self.state.fallback_codepage, &self.pending[..len])
 			.unwrap_or_else(|| String::from_utf8_lossy(&self.pending[..len]).into_owned());
 		self.pending.drain(..len);
 		decoded
@@ -175,6 +246,19 @@ pub fn decode_owned_bytes(bytes: Vec<u8>) -> String {
 	let mut decoder = OutputDecoder::new();
 	decoder.pending = bytes;
 	decoder.drain(true)
+}
+
+/// Decode a complete buffer and retain any ACP selection for later buffers
+/// from the same input stream.
+pub fn decode_owned_bytes_with_state(
+	bytes: Vec<u8>,
+	state: &mut OutputDecoderState,
+) -> String {
+	let mut decoder = OutputDecoder::with_state(*state);
+	decoder.pending = bytes;
+	let decoded = decoder.drain(true);
+	*state = decoder.state();
+	decoded
 }
 
 #[cfg(windows)]

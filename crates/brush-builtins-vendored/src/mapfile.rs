@@ -4,7 +4,7 @@ use std::io::Write;
 use brush_core::{ErrorKind, ExecutionExitCode, ExecutionResult, builtins, env, escape, variables};
 use clap::Parser;
 
-use crate::line_input::{CTRL_C, CTRL_D, LineInput, decode_line};
+use crate::line_input::{CTRL_C, CTRL_D, LineInput};
 
 /// Read lines from standard input into an indexed array variable.
 #[derive(Parser)]
@@ -131,7 +131,7 @@ impl MapFileCommand {
 		let mut input = LineInput::new(input_file);
 
 		while max_count == 0 || entry_count < max_count {
-			let (mut line, saw_delimiter) = {
+			let line_str = {
 				// Release before running a callback so it can read the same
 				// descriptor without deadlocking on this mapfile operation.
 				let _read_guard = held_input.as_ref().map(|held| held.lock_reader());
@@ -150,23 +150,25 @@ impl MapFileCommand {
 						break;
 					}
 				}
-				(line, saw_delimiter)
-			};
 
-			if line.is_empty() && !saw_delimiter {
+				if line.is_empty() && !saw_delimiter {
+					None
+				} else {
+					if self.remove_delimiter && line.ends_with(&[delimiter]) {
+						line.pop();
+					}
+					Some(input.decode_line(line))
+				}
+			};
+			let Some(line_str) = line_str else {
 				break;
-			}
+			};
 
 			if read_count < self.skip_count {
 				read_count += 1;
 				continue;
 			}
 
-			if self.remove_delimiter && line.ends_with(&[delimiter]) {
-				line.pop();
-			}
-
-			let line_str = decode_line(line);
 			let array_index = self.origin.unwrap_or(0) + i64::try_from(entry_count)?;
 
 			if let Some(callback) = &self.callback
