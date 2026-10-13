@@ -758,16 +758,36 @@ function validateProviderConfiguration(
 		}
 	}
 	if (config.streamIdleTimeoutMs !== undefined) {
-		if (models.length === 0 && !config.discovery && getKnownProviderApis(providerName).size > 0) {
-			assertStreamIdleTimeoutSupportedForKnownProvider(providerName, '"streamIdleTimeoutMs"');
-		} else if (configuredApi) {
-			if (!isRequestTransformApi(configuredApi)) {
+		if (models.length > 0) {
+			const hasCompatibleModelApi = models.some(modelDef => {
+				const api = modelDef.api ?? config.api;
+				return api !== undefined && isRequestTransformApi(api);
+			});
+			if (!hasCompatibleModelApi) {
 				throw new Error(
 					`Provider ${providerName}: "streamIdleTimeoutMs" is only supported with openai-completions or openai-responses APIs.`,
 				);
 			}
-		} else if (models.length === 0) {
-			assertStreamIdleTimeoutSupportedForKnownProvider(providerName, '"streamIdleTimeoutMs"');
+		} else {
+			const bundledApis = getKnownProviderApis(providerName);
+			const hasCompatibleBundledApi = [...bundledApis].some(isRequestTransformApi);
+			const hasCompatibleDiscoveryApi =
+				config.discovery !== undefined &&
+				((configuredApi !== undefined && isRequestTransformApi(configuredApi)) ||
+					Object.values(config.discovery.apiByModelPrefix ?? {}).some(isRequestTransformApi));
+			if (!hasCompatibleBundledApi && !hasCompatibleDiscoveryApi) {
+				if (bundledApis.size > 0) {
+					assertStreamIdleTimeoutSupportedForKnownProvider(providerName, '"streamIdleTimeoutMs"');
+				} else if (configuredApi) {
+					if (!isRequestTransformApi(configuredApi)) {
+						throw new Error(
+							`Provider ${providerName}: "streamIdleTimeoutMs" is only supported with openai-completions or openai-responses APIs.`,
+						);
+					}
+				} else {
+					assertStreamIdleTimeoutSupportedForKnownProvider(providerName, '"streamIdleTimeoutMs"');
+				}
+			}
 		}
 	}
 
@@ -783,14 +803,6 @@ function validateProviderConfiguration(
 			throw new Error(`Provider ${providerName}: model missing "id"`);
 		}
 		const effectiveApi = modelDef.api ?? config.api;
-		if (config.streamIdleTimeoutMs !== undefined && effectiveApi) {
-			assertRequestTransformSupportedForModelApi(
-				providerName,
-				modelDef.id,
-				effectiveApi,
-				'provider "streamIdleTimeoutMs"',
-			);
-		}
 		if (modelDef.streamIdleTimeoutMs !== undefined && effectiveApi) {
 			assertRequestTransformSupportedForModelApi(
 				providerName,
@@ -1706,7 +1718,9 @@ function buildCustomModelOverlay(
 ): CustomModelOverlay | undefined {
 	const api = modelDef.api ?? providerApi;
 	if (!api) return undefined;
-	const streamIdleTimeoutMs = modelDef.streamIdleTimeoutMs ?? providerStreamIdleTimeoutMs;
+	const streamIdleTimeoutMs = isRequestTransformApi(api)
+		? (modelDef.streamIdleTimeoutMs ?? providerStreamIdleTimeoutMs)
+		: undefined;
 	return {
 		id: modelDef.id,
 		provider: providerName,

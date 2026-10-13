@@ -6682,6 +6682,45 @@ describe("ModelRegistry", () => {
 		expect(registry.find("github-copilot", "claude-sonnet-4")).not.toHaveProperty("streamIdleTimeoutMs");
 	});
 
+	test("applies provider stream idle timeouts only to OpenAI models in mixed custom lists", () => {
+		writeRawModelsConfig({
+			providers: {
+				proxy: {
+					baseUrl: "https://proxy.example.com/v1",
+					apiKey: "TEST_KEY",
+					streamIdleTimeoutMs: 300_000,
+					models: [
+						{ id: "gpt-model", api: "openai-completions" },
+						{ id: "claude-model", api: "anthropic-messages" },
+					],
+				},
+			},
+		});
+
+		const registry = new ModelRegistry(authStorage, modelsJsonPath);
+		expect(registry.getError()).toBeUndefined();
+		expect(registry.find("proxy", "gpt-model")).toMatchObject({ streamIdleTimeoutMs: 300_000 });
+		expect(registry.find("proxy", "claude-model")).not.toHaveProperty("streamIdleTimeoutMs");
+	});
+
+	test("rejects provider stream idle timeouts when custom models have no OpenAI-compatible API", () => {
+		writeRawModelsConfig({
+			providers: {
+				proxy: {
+					baseUrl: "https://proxy.example.com/v1",
+					apiKey: "TEST_KEY",
+					streamIdleTimeoutMs: 300_000,
+					models: [{ id: "claude-model", api: "anthropic-messages" }],
+				},
+			},
+		});
+
+		const registry = new ModelRegistry(authStorage, modelsJsonPath);
+		expect(String(registry.getError()?.message)).toContain(
+			'"streamIdleTimeoutMs" is only supported with openai-completions or openai-responses APIs',
+		);
+	});
+
 	test("validates stream idle modelOverrides case-insensitively", () => {
 		writeRawModelsConfig({
 			providers: {
