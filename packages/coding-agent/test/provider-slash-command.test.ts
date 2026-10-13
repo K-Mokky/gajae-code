@@ -204,8 +204,28 @@ describe("provider slash command", () => {
 
 			Bun.env.AWS_ACCESS_KEY_ID = "aws-access-key-test";
 			Bun.env.AWS_SECRET_ACCESS_KEY = "aws-secret-key-test";
+			registry.registerProvider(
+				"status-custom-bedrock",
+				{
+					baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
+					api: "bedrock-converse-stream",
+					models: [
+						{
+							id: "us.anthropic.claude-opus-4-6-v1",
+							name: "Custom Bedrock Model",
+							reasoning: false,
+							input: ["text"],
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+							contextWindow: 100_000,
+							maxTokens: 8_000,
+						},
+					],
+				},
+				"ext://provider-status-bedrock-test",
+			);
 			const withAwsCredentials = await status();
 			expect(withAwsCredentials).toContain("amazon-bedrock: AWS environment credentials");
+			expect(withAwsCredentials).toContain("status-custom-bedrock: AWS environment credentials");
 			expect(withAwsCredentials).not.toContain("API key (runtime override)");
 			expect(withAwsCredentials).not.toContain("API key (stored credential");
 			expect(withAwsCredentials).not.toContain("stored-bedrock-api-key-secret");

@@ -149,9 +149,10 @@ function collectSources(
 	entries: AuthCredentialSnapshotEntry[],
 	registry: ProviderAuthStatusSession["modelRegistry"],
 	environmentSources: EnvApiKeyCredentialSource[],
+	usesBedrockResolver: boolean,
 ): CredentialSource[] {
 	const sources: CredentialSource[] = [];
-	if (provider === "amazon-bedrock") {
+	if (usesBedrockResolver) {
 		for (const source of environmentSources) {
 			addSource(sources, { kind: "api_key", layer: "environment", label: environmentSourceLabel(source) });
 		}
@@ -214,8 +215,9 @@ function activeSource(
 	owner: object,
 	activeType: "api_key" | "oauth",
 	environmentSources: EnvApiKeyCredentialSource[],
+	usesBedrockResolver: boolean,
 ): CredentialSource {
-	if (provider === "amazon-bedrock") {
+	if (usesBedrockResolver) {
 		const source = environmentSources[0];
 		return source
 			? { kind: "api_key", layer: "environment", label: environmentSourceLabel(source) }
@@ -303,10 +305,18 @@ export async function buildProviderAuthStatusText(session: ProviderAuthStatusSes
 	modelRegistry.getAvailable();
 	const googleVertexSources = await getEnvApiKeyCredentialSources("google-vertex");
 	const googleVertexSource = googleVertexSources[0];
+	const bedrockCredentialSources = await getEnvApiKeyCredentialSources("amazon-bedrock");
 	const authStorage = modelRegistry.authStorage;
 	const owner = modelRegistry.getAuthStorageOwner();
 	const snapshot = authStorage.exportSnapshot();
 	const storedProviders = new Set(snapshot.credentials.map(entry => resolveOAuthStorageProvider(entry.provider)));
+	const bedrockProviders = new Set(
+		modelRegistry
+			.getAll()
+			.filter(model => model.api === "bedrock-converse-stream")
+			.map(model => resolveOAuthStorageProvider(model.provider)),
+	);
+	bedrockProviders.add("amazon-bedrock");
 	const providerIds = new Set([
 		...modelRegistry.getAll().map(model => resolveOAuthStorageProvider(model.provider)),
 		...modelRegistry.getConfiguredProviderIds().map(provider => resolveOAuthStorageProvider(provider)),
@@ -323,7 +333,10 @@ export async function buildProviderAuthStatusText(session: ProviderAuthStatusSes
 						modelRegistry.getProviderConfigApiKeySources(provider).length > 0 ||
 						hasRuntimeProviderCredential(modelRegistry, provider) ||
 						authStorage.hasRuntimeApiKey(provider)
-					: authStorage.hasAuth(provider, session.credentialSessionId, { owner })),
+					: bedrockProviders.has(provider)
+						? bedrockCredentialSources.length > 0 ||
+							authStorage.hasAuth(provider, session.credentialSessionId, { owner })
+						: authStorage.hasAuth(provider, session.credentialSessionId, { owner })),
 		)
 		.sort((left, right) => left.localeCompare(right));
 	if (providers.length === 0) return "No configured provider credentials.";
@@ -331,19 +344,24 @@ export async function buildProviderAuthStatusText(session: ProviderAuthStatusSes
 	const lines = ["Provider credentials (active source per provider):"];
 	for (const provider of providers) {
 		const entries = snapshot.credentials.filter(entry => resolveOAuthStorageProvider(entry.provider) === provider);
+		const usesBedrockResolver = bedrockProviders.has(provider);
 		const environmentSources =
-			provider === "google-vertex" ? googleVertexSources : await getEnvApiKeyCredentialSources(provider);
+			provider === "google-vertex"
+				? googleVertexSources
+				: usesBedrockResolver
+					? bedrockCredentialSources
+					: await getEnvApiKeyCredentialSources(provider);
 		const activeType = authStorage.getEffectiveCredentialType(provider, session.credentialSessionId, { owner });
-		const sources = collectSources(provider, entries, modelRegistry, environmentSources);
+		const sources = collectSources(provider, entries, modelRegistry, environmentSources, usesBedrockResolver);
 		const sessionCredentialUnavailable = authStorage.hasSessionCredentialUnavailable(
 			provider,
 			session.credentialSessionId,
 		);
 		let active: { kind: "api_key" | "oauth"; layer: string; label: string } | undefined;
-		if (provider === "amazon-bedrock") {
-			active = activeSource(provider, entries, session, owner, "api_key", environmentSources);
+		if (usesBedrockResolver) {
+			active = activeSource(provider, entries, session, owner, "api_key", environmentSources, usesBedrockResolver);
 		} else if (activeType === "oauth" || activeType === "api_key") {
-			active = activeSource(provider, entries, session, owner, activeType, environmentSources);
+			active = activeSource(provider, entries, session, owner, activeType, environmentSources, usesBedrockResolver);
 		} else if (environmentSources[0]) {
 			active = {
 				kind: "api_key" as const,
@@ -360,7 +378,7 @@ export async function buildProviderAuthStatusText(session: ProviderAuthStatusSes
 			active?.layer === "runtime-override" ||
 			active?.layer === "runtime-provider" ||
 			configOverridePrecedesUnavailablePin;
-		if (provider !== "amazon-bedrock" && sessionCredentialUnavailable && !overridePrecedesUnavailablePin) {
+		if (!usesBedrockResolver && sessionCredentialUnavailable && !overridePrecedesUnavailablePin) {
 			active = { kind: "api_key", layer: "pending", label: "selected credential unavailable" };
 		}
 		lines.push(
