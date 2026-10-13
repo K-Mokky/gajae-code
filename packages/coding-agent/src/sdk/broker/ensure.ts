@@ -1325,11 +1325,11 @@ async function waitForBrokerDiscoveryOwnerGone(
 	deadline: number,
 ): Promise<void> {
 	for (;;) {
-		const current = await readBrokerDiscovery(agentDir);
+		// Heartbeat expiry is not proof that this owner removed its publication.
+		const current = await readBrokerDiscoveryBeforeDeadline(agentDir, Number.POSITIVE_INFINITY, deadline);
 		if (!current || !sameBrokerOwner(current, discovery)) return;
 		const remainingMs = deadline - ensureBrokerTiming.now();
-		if (remainingMs <= 0)
-			throw new Error(`SDK broker ${discovery.pid} retained discovery after authenticated shutdown.`);
+		if (remainingMs <= 0) throw new Error(`SDK broker ${discovery.pid} retained discovery during retirement.`);
 		await ensureBrokerTiming.sleep(Math.min(STALE_BROKER_POLL_MS, remainingMs));
 	}
 }
@@ -1389,6 +1389,16 @@ async function retireUnusableBroker(
 					`SDK broker ${stale.pid} shutdown and identity-bound cleanup both failed.`,
 				);
 			}
+		} else {
+			try {
+				await waitForBrokerDiscoveryOwnerGone(settings.agentDir, stale, deadline);
+			} catch (retirementError) {
+				throw new AggregateError(
+					[rpcError, retirementError],
+					`SDK broker ${stale.pid} shutdown RPC and discovery retirement both failed.`,
+				);
+			}
+			return;
 		}
 		// If pid === process.pid, fall through to wait on identity
 	}

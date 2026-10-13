@@ -49,6 +49,7 @@ import {
 } from "../append-only-mode";
 import { type AsyncJob, AsyncJobManager, isBackgroundJobSupportEnabled, jobElapsedMs } from "../async";
 import { asyncJobEndpointId as deriveAsyncJobEndpointId } from "../async/endpoint-id";
+import { formatAsyncResultForFollowUp } from "../async/result-formatting";
 import { resolveBrowserBackend } from "../browser-backend";
 import { loadCapability, reset as resetCapabilities } from "../capability";
 import { type Rule, ruleCapability, setActiveRules } from "../capability/rule";
@@ -162,11 +163,7 @@ import {
 } from "../runtime-mcp";
 import { createMCPFormInputHandler } from "../runtime-mcp/elicitation";
 import type { MCPLoadResult } from "../runtime-mcp/manager";
-import {
-	omitPluginMcpNameShadows,
-	retainPluginMcpMandatoryNames,
-	survivingPluginMcpToolNames,
-} from "../runtime-mcp/plugin-mcp-name-filter";
+import { omitPluginMcpNameShadows, retainPluginMcpMandatoryNames } from "../runtime-mcp/plugin-mcp-name-filter";
 import { MCP_STARTUP_WAIT_GRACE_MS } from "../runtime-mcp/startup-policy";
 import type { MCPServerConfig } from "../runtime-mcp/types";
 import {
@@ -1314,8 +1311,11 @@ function classifyInheritedMcpToolNames(
 	for (const tool of tools) {
 		const serverName = tool.mcpServerName;
 		if (serverName === undefined) continue;
-		if (pluginServers?.has(serverName)) pluginMcpToolNames.push(tool.name);
-		else if (conventionalServers?.has(serverName)) conventionalMcpToolNames.push(tool.name);
+		// Caller-supplied source metadata is descriptive; only a manager's
+		// validated plugin-server set can grant mandatory-tool authority.
+		if (pluginServers?.has(serverName)) {
+			pluginMcpToolNames.push(tool.name);
+		} else if (conventionalServers?.has(serverName)) conventionalMcpToolNames.push(tool.name);
 	}
 	return { pluginMcpToolNames, conventionalMcpToolNames };
 }
@@ -2520,33 +2520,6 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 		const backgroundJobsEnabled = isBackgroundJobSupportEnabled(settings);
 		const asyncMaxJobs = Math.min(100, Math.max(1, settings.get("async.maxJobs") ?? 100));
-		const ASYNC_INLINE_RESULT_MAX_CHARS = 12_000;
-		const ASYNC_PREVIEW_MAX_CHARS = 4_000;
-		const formatAsyncResultForFollowUp = async (result: string, allowArtifact = true): Promise<string> => {
-			if (result.length <= ASYNC_INLINE_RESULT_MAX_CHARS) {
-				return result;
-			}
-
-			const preview = `${result.slice(0, ASYNC_PREVIEW_MAX_CHARS)}\n\n[Output truncated. Showing first ${ASYNC_PREVIEW_MAX_CHARS.toLocaleString()} characters.]`;
-			// A delivery already denied by a scope:"owned" gate never reaches the
-			// model: allocating an artifact for it would leave the stopped job's
-			// output in an unreferenced artifact after the flush drops it (review
-			// thread P2). Only the inline preview is produced.
-			if (!allowArtifact) return preview;
-			try {
-				const { path: artifactPath, id: artifactId } = await sessionManager.allocateArtifactPath("async");
-				if (artifactPath && artifactId) {
-					await Bun.write(artifactPath, result);
-					return `${preview}\nFull output: artifact://${artifactId}`;
-				}
-			} catch (error) {
-				logger.warn("Failed to persist async follow-up artifact", {
-					error: error instanceof Error ? error.message : String(error),
-				});
-			}
-
-			return preview;
-		};
 		// Only top-level sessions own an AsyncJobManager. Subagents reach the
 		// parent's manager via `AsyncJobManager.instance()` (set below), so creating
 		// a second instance here just to leave it orphaned wastes a constructor and
@@ -2604,7 +2577,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 								if (job) asyncJobManager?.retainParkedDelivery(job, result);
 								return;
 							}
-							const formattedResult = await formatAsyncResultForFollowUp(result, !deniedOwnedDelivery);
+							const formattedResult = await formatAsyncResultForFollowUp(
+								sessionManager,
+								result,
+								!deniedOwnedDelivery,
+							);
 							if (
 								foldDisposition.kind === "receipt" &&
 								job &&
@@ -2821,7 +2798,14 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 							if (serverName === undefined) continue;
 							if (!pluginNames.has(serverName)) conventionalMcpToolNames.push(tool.name);
 						}
-						pluginMcpToolNames.push(...survivingPluginMcpToolNames(result.tools as CustomTool[]));
+						pluginMcpToolNames.push(
+							...retainPluginMcpMandatoryNames(
+								result.tools,
+								result.tools
+									.filter(tool => tool.mcpServerName && pluginNames.has(tool.mcpServerName))
+									.map(tool => tool.name),
+							),
+						);
 					}
 				} catch (error) {
 					logger.warn("Failed to recreate MCP authority after session rescope", {
@@ -4926,7 +4910,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		}
 		// Mandatory names follow the plugin tools that survived registration.
 		// A colliding user tool keeps the normalized name and must stay selectable.
-		pluginMcpToolNames.splice(0, pluginMcpToolNames.length, ...survivingPluginMcpToolNames(customTools));
+		pluginMcpToolNames.splice(
+			0,
+			pluginMcpToolNames.length,
+			...retainPluginMcpMandatoryNames(customTools, pluginMcpToolNames),
+		);
 		const mandatoryMCPToolNameSet = new Set(pluginMcpToolNames);
 		const selectableExplicitMCPToolNames = explicitlyRequestedMCPToolNames.filter(
 			name => !mandatoryMCPToolNameSet.has(name),
@@ -5753,7 +5741,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 						const previousNames = ownedMcpManagerToolNames;
 						const nextToolNames = nextTools.map(tool => tool.name);
 						const previousSet = new Set(previousNames);
-						const nextPluginToolNames = survivingPluginMcpToolNames(nextTools);
+						const nextPluginToolNames = retainPluginMcpMandatoryNames(
+							nextTools,
+							nextTools
+								.filter(tool => tool.mcpServerName && pluginServerNames.has(tool.mcpServerName))
+								.map(tool => tool.name),
+						);
 						const nextConventionalToolNames = nextTools
 							.filter(tool => tool.mcpServerName && conventionalServerNames.has(tool.mcpServerName))
 							.map(tool => tool.name);
@@ -5873,7 +5866,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 						const previousNames = inheritedMcpManagerToolNames;
 						const nextNames = snapshot.map(tool => tool.name);
 						const classifiedTools = classifyInheritedMcpToolNames(manager, snapshot);
-						const mandatoryPluginToolNames = survivingPluginMcpToolNames(snapshot);
+						const mandatoryPluginToolNames = retainPluginMcpMandatoryNames(
+							snapshot,
+							classifiedTools.pluginMcpToolNames,
+						);
 						try {
 							await session.replaceNamedCustomTools(previousNames, snapshot, {
 								mandatoryMCPToolNames: mandatoryPluginToolNames,
