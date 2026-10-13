@@ -646,7 +646,7 @@ function validateProviderConfiguration(
 	for (const [modelId, rawOverride] of Object.entries(config.modelOverrides ?? {})) {
 		const override = rawOverride as ModelOverride;
 		const effectiveApi =
-			models.find(model => model.id === modelId)?.api ??
+			models.find(model => model.id.toLowerCase() === modelId.toLowerCase())?.api ??
 			config.api ??
 			getKnownProviderModelApi(providerName, modelId);
 		const effectiveTimeoutApi = effectiveApi ?? (config.openaiCompat ? "openai-completions" : undefined);

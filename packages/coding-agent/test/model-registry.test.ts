@@ -6603,6 +6603,23 @@ describe("ModelRegistry", () => {
 		);
 	});
 
+	test("validates stream idle modelOverrides case-insensitively", () => {
+		writeRawModelsConfig({
+			providers: {
+				proxy: {
+					baseUrl: "https://proxy.example.com/v1",
+					apiKey: "TEST_KEY",
+					models: [{ id: "Model-X", api: "openai-responses" }],
+					modelOverrides: { "model-x": { streamIdleTimeoutMs: 300_000 } },
+				},
+			},
+		});
+
+		const registry = new ModelRegistry(authStorage, modelsJsonPath);
+		expect(registry.getError()).toBeUndefined();
+		expect(registry.find("proxy", "Model-X")).toMatchObject({ streamIdleTimeoutMs: 300_000 });
+	});
+
 	test("rejects model-configured stream idle timeouts on pi-native transport", () => {
 		const timeoutConfigs: Array<Record<string, unknown>> = [
 			{ streamIdleTimeoutMs: 300_000 },
