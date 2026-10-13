@@ -2031,41 +2031,45 @@ async function runSdkInternal(internal: SdkInternalArgv, publicBrokerRun = false
 				}, effectiveWatchdogMs);
 			let startupWatchdog = armStartupWatchdog();
 			try {
-				if (requestIdEnv !== undefined) {
-					let restartIntent: BrokerRestartIntentWithIdentity | null;
-					try {
-						restartIntent = await readBrokerRestartIntent(agentDir);
-					} catch (error) {
-						throw new Error("Could not validate SDK broker restart intent; refusing untagged startup.", {
-							cause: error,
-						});
-					}
-					if (
-						restartDeadlineAt !== undefined &&
-						(restartIntent?.phase !== "committed" ||
-							restartIntent.requestId !== requestIdEnv ||
-							restartIntent.expiresAt !== restartDeadlineAt)
-					)
-						throw new Error("Could not validate SDK broker restart deadline; refusing successor startup.");
-					if (restartIntent?.requestId === requestIdEnv) {
-						if (restartIntent.phase !== "committed")
-							throw new Error("SDK broker restart intent is not committed; refusing successor startup.");
-						const remainingSuccessorMs = restartIntent.expiresAt - Date.now();
-						if (remainingSuccessorMs <= 0)
-							throw new Error("SDK broker restart intent expired; refusing untagged startup.");
-						restartRequestId = requestIdEnv;
-						startupDeadlineAt = restartDeadlineAt ?? restartIntent.expiresAt;
-						activeStartupDeadlineAt = startupDeadlineAt;
-						effectiveWatchdogMs =
-							Number.isSafeInteger(testWatchdogMs) &&
-							testWatchdogMs > 0 &&
-							testWatchdogMs <= remainingSuccessorMs
-								? testWatchdogMs
-								: remainingSuccessorMs;
-						clearTimeout(startupWatchdog);
-						startupCheckpointDeadline = performance.now() + Math.max(1, effectiveWatchdogMs - 1_000);
-						startupWatchdog = armStartupWatchdog();
-					}
+				let restartIntent: BrokerRestartIntentWithIdentity | null;
+				try {
+					restartIntent = await readBrokerRestartIntent(agentDir);
+				} catch (error) {
+					throw new Error("Could not validate SDK broker restart intent; refusing untagged startup.", {
+						cause: error,
+					});
+				}
+				// A committed request survives the prior owner's exit. Ordinary or
+				// mismatched starts must not publish ahead of its exact successor.
+				if (
+					restartIntent?.phase === "committed" &&
+					restartIntent.expiresAt > Date.now() &&
+					restartIntent.requestId !== requestIdEnv
+				)
+					throw new Error("A committed SDK broker restart is active; startup requires its exact request ID.");
+				if (
+					restartDeadlineAt !== undefined &&
+					(restartIntent?.phase !== "committed" ||
+						restartIntent.requestId !== requestIdEnv ||
+						restartIntent.expiresAt !== restartDeadlineAt)
+				)
+					throw new Error("Could not validate SDK broker restart deadline; refusing successor startup.");
+				if (requestIdEnv !== undefined && restartIntent?.requestId === requestIdEnv) {
+					if (restartIntent.phase !== "committed")
+						throw new Error("SDK broker restart intent is not committed; refusing successor startup.");
+					const remainingSuccessorMs = restartIntent.expiresAt - Date.now();
+					if (remainingSuccessorMs <= 0)
+						throw new Error("SDK broker restart intent expired; refusing untagged startup.");
+					restartRequestId = requestIdEnv;
+					startupDeadlineAt = restartDeadlineAt ?? restartIntent.expiresAt;
+					activeStartupDeadlineAt = startupDeadlineAt;
+					effectiveWatchdogMs =
+						Number.isSafeInteger(testWatchdogMs) && testWatchdogMs > 0 && testWatchdogMs <= remainingSuccessorMs
+							? testWatchdogMs
+							: remainingSuccessorMs;
+					clearTimeout(startupWatchdog);
+					startupCheckpointDeadline = performance.now() + Math.max(1, effectiveWatchdogMs - 1_000);
+					startupWatchdog = armStartupWatchdog();
 				}
 				if (startupAbortController.signal.aborted) return undefined;
 				// `gjc sdk broker run` never retires another owner, even one this generation cannot

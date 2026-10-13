@@ -3893,6 +3893,17 @@ export class Broker {
 		await this.#reapLockArtifacts();
 		try {
 			this.#throwIfStartupAborted();
+			// Recheck under the broker ownership lock: a restart can be committed while
+			// an ordinary startup is waiting to acquire this lock.
+			const restartIntent = await readBrokerRestartIntent(this.settings.agentDir);
+			const activeCommittedIntent =
+				restartIntent?.phase === "committed" && restartIntent.expiresAt > Date.now() ? restartIntent : undefined;
+			if (
+				this.settings.restartRequestId === undefined
+					? activeCommittedIntent !== undefined
+					: activeCommittedIntent?.requestId !== this.settings.restartRequestId
+			)
+				throw new Error("A committed SDK broker restart is active; startup requires its exact request ID.");
 			await this.index.open(
 				this.#startupCheckpointDeadline === undefined
 					? undefined

@@ -266,15 +266,14 @@ describe("doctor broker restart protocol", () => {
 		expect(await readBrokerExitRecord(dir)).toMatchObject({ mode: "owned-root", reason: "restart-committed" });
 		expect((await readBrokerRestartIntent(dir))?.phase).toBe("committed");
 
-		// A successor Broker whose settings carry a DIFFERENT restartRequestId must
-		// never clear another request's committed intent.
+		// A Broker with a different request ID must not publish into another
+		// request's committed restart window.
 		const mismatchedSuccessor = new Broker({ agentDir: dir, restartRequestId: "unrelated-request" });
-		await mismatchedSuccessor.start();
-		try {
-			expect((await readBrokerRestartIntent(dir))?.requestId).toBe(requestId);
-		} finally {
-			await mismatchedSuccessor.stop();
-		}
+		await expect(mismatchedSuccessor.start()).rejects.toThrow(
+			"A committed SDK broker restart is active; startup requires its exact request ID.",
+		);
+		expect((await readBrokerRestartIntent(dir))?.requestId).toBe(requestId);
+		expect(await readBrokerDiscovery(dir)).toBeNull();
 
 		// The exact authorized successor clears it only after its own publication
 		// has proven ownership (Broker#start() has already returned).
