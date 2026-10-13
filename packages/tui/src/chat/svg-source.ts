@@ -266,8 +266,9 @@ function rejectEmbeddedRasterImages(svg: string): void {
 
 		const close = constructEnd(svg, lt);
 		if (close < 0) {
-			index = lt + 1;
-			continue;
+			// The remainder is part of this incomplete construct, not independent
+			// markup. Retrying at each later `<` would rescan overlapping suffixes.
+			break;
 		}
 
 		// Skip non-element constructs (comments, CDATA, processing instructions).

@@ -10,11 +10,11 @@ import {
 	Markdown,
 	type MarkdownTheme,
 	Spacer,
-	SvgFigure,
 	TERMINAL,
 	Text,
 	type ViewportAnchorSource,
 } from "@gajae-code/tui";
+import { SvgFigure } from "@gajae-code/tui/chat/svg-figure";
 import { formatNumber } from "@gajae-code/utils";
 import { settings } from "../../config/settings";
 import { renderDeepInterviewAssistantText } from "../../deep-interview/render-middleware";

@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from "bun:test";
+import * as url from "node:url";
 import { SvgFigure } from "../src/chat/svg-figure";
 import type { ImageTheme } from "../src/components/image";
 import {
@@ -21,6 +22,28 @@ describe("SvgFigure", () => {
 		theme = {
 			fallbackColor: (str: string) => str,
 		};
+	});
+
+	it("keeps the public TUI importable and falls back when the rasterizer is unavailable", () => {
+		const rootEntry = url.fileURLToPath(new URL("../src/index.ts", import.meta.url));
+		const figureEntry = url.fileURLToPath(new URL("../src/chat/svg-figure.ts", import.meta.url));
+		const terminalEntry = url.fileURLToPath(new URL("../src/terminal-capabilities.ts", import.meta.url));
+		const script = [
+			'process.platform = "freebsd";',
+			`require(${JSON.stringify(rootEntry)});`,
+			`const { SvgFigure } = require(${JSON.stringify(figureEntry)});`,
+			`const { ImageProtocol, setTerminalImageProtocol } = require(${JSON.stringify(terminalEntry)});`,
+			"setTerminalImageProtocol(ImageProtocol.Kitty);",
+			'const figure = new SvgFigure({ theme: { fallbackColor: text => text }, palette: { fg: "#fff" }, onChange() {} });',
+			'figure.update("<svg/>", true, true);',
+			"figure.render(80);",
+			"setTimeout(() => { const failed = figure.failed; figure.dispose(); process.exitCode = failed ? 0 : 1; }, 100);",
+		].join("\n");
+		const child = Bun.spawnSync([process.execPath, "-e", script], {
+			cwd: url.fileURLToPath(new URL("../../..", import.meta.url)),
+		});
+
+		expect(child.exitCode).toBe(0);
 	});
 
 	it("initializes without source", () => {
@@ -269,6 +292,24 @@ describe("SvgFigure", () => {
 		} finally {
 			figure.dispose();
 			setCellDimensions(previousCellDimensions);
+			setTerminalImageProtocol(previousProtocol);
+		}
+	});
+
+	it("quickly falls back for a closed SVG with a long malformed markup suffix", async () => {
+		const previousProtocol = TERMINAL.imageProtocol;
+		setTerminalImageProtocol(ImageProtocol.Kitty);
+		const changed = Promise.withResolvers<void>();
+		const figure = new SvgFigure({ theme, palette, onChange: () => changed.resolve() });
+		try {
+			figure.update(`<svg></svg>${"<".repeat(32 * 1024)}`, true, true);
+			figure.render(80);
+			await changed.promise;
+
+			expect(figure.failed).toBe(true);
+			expect(figure.debugState()).toMatchObject({ current: false, raster: null });
+		} finally {
+			figure.dispose();
 			setTerminalImageProtocol(previousProtocol);
 		}
 	});

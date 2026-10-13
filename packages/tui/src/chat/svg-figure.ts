@@ -12,12 +12,26 @@
  *
  * Source: oh-my-pi (https://github.com/can1357/oh-my-pi)
  */
-import { rasterizeSvg } from "@gajae-code/natives";
+import type { rasterizeSvg as rasterizeSvgFn } from "@gajae-code/natives";
 import { logger } from "@gajae-code/utils";
 import { Image, type ImageTheme } from "../components/image";
 import { type CellDimensions, getCellDimensions, getImageDimensions, TERMINAL } from "../terminal-capabilities";
 import type { Component } from "../tui";
 import { closePartialSvg, prepareSvg } from "./svg-source";
+
+type NativeRasterizeSvg = typeof rasterizeSvgFn;
+let nativeRasterizeSvg: NativeRasterizeSvg | undefined;
+
+function rasterizeSvg(
+	input: Uint8Array,
+	maxWidthPx: number,
+	maxHeightPx: number,
+	cellWidthPx: number,
+	cellHeightPx: number,
+): Promise<Uint8Array> {
+	nativeRasterizeSvg ??= (require("@gajae-code/natives") as { rasterizeSvg: NativeRasterizeSvg }).rasterizeSvg;
+	return nativeRasterizeSvg(input, maxWidthPx, maxHeightPx, cellWidthPx, cellHeightPx);
+}
 
 /** Least time between rasters of a fence that is still streaming. */
 const STREAM_INTERVAL_MS = 200;
