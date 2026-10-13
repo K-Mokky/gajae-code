@@ -3212,6 +3212,7 @@ describe("AskTool deep-interview recorder persistence", () => {
 		expect(recorder).not.toHaveBeenCalled();
 	});
 	it("does not auto-select a ralplan approval gate on ask timeout", async () => {
+		spyOn(stateRuntime, "executionApprovalLineage").mockResolvedValue("crystal");
 		spyOn(stateRuntime, "captureExecutionApprovalPresentation").mockResolvedValue({
 			state_path: "/tmp/timeout-state.json",
 			state_revision: 1,
@@ -3219,6 +3220,18 @@ describe("AskTool deep-interview recorder persistence", () => {
 			artifact_sha256: "b".repeat(64),
 			run_id: "timeout-run",
 		});
+		spyOn(deepInterviewRuntime, "assertDeepInterviewCrystalCoversLiveTranscript").mockResolvedValue({
+			transcriptPath: "/tmp/timeout-session.jsonl",
+			transcriptSha256: "a".repeat(64),
+		});
+		const record = spyOn(stateRuntime, "recordDeepInterviewExecutionApproval").mockResolvedValue({
+			path: "/tmp/timeout-approval.json",
+			record: {
+				transcript_boundary: { byte_length: 1, device: "1", inode: "1", leaf_id: null },
+			} as DeepInterviewExecutionApprovalRecord,
+		});
+		spyOn(stateRuntime, "revokeDeepInterviewExecutionApproval").mockResolvedValue();
+		spyOn(stateRuntime, "revokeNonCrystalExecutionApproval").mockResolvedValue();
 		const tool = new AskTool(
 			createSession({
 				settings: Settings.isolated({ "ask.timeout": 0.001 }),
@@ -3230,7 +3243,7 @@ describe("AskTool deep-interview recorder persistence", () => {
 				const timeout = dialogOptions?.timeout ?? 1;
 				await Bun.sleep(timeout + 5);
 				dialogOptions?.onTimeout?.();
-				return _options[0];
+				return _options[1];
 			},
 		});
 		const approvalQuestion = {
@@ -3254,8 +3267,10 @@ describe("AskTool deep-interview recorder persistence", () => {
 			undefined,
 			context,
 		);
-		// A timeout is not consent: the plan approval must stay unselected.
+		// Even when the selector returns the recommended choice with its timeout signal,
+		// a timeout is not consent and must not mint a durable execution approval.
 		expect(result.details?.selectedOptions).toEqual([]);
+		expect(record).not.toHaveBeenCalled();
 	});
 	it("does not auto-select an execution gate on ask timeout", async () => {
 		const tool = new AskTool(

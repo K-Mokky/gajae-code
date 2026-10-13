@@ -1639,7 +1639,7 @@ export class AskTool implements AgentTool<AskParametersSchema, AskToolDetails> {
 
 		if (params.questions.length === 1) {
 			const [q] = params.questions;
-			const {
+			let {
 				optionLabels,
 				selectedOptions,
 				customInput,
@@ -1649,6 +1649,11 @@ export class AskTool implements AgentTool<AskParametersSchema, AskToolDetails> {
 				cancelled,
 				timedOut,
 			} = await askQuestion(q);
+			if (timedOut && q.workflowGate?.stage === "ralplan" && q.workflowGate.kind === "approval") {
+				selectedOptions = [];
+				customInput = undefined;
+				clarificationQuestion = undefined;
+			}
 
 			if (
 				!timedOut &&
@@ -1732,7 +1737,7 @@ export class AskTool implements AgentTool<AskParametersSchema, AskToolDetails> {
 				allowForward: true,
 				progressText: `${questionIndex + 1}/${params.questions.length}`,
 			};
-			const {
+			let {
 				optionLabels,
 				selectedOptions,
 				customInput,
@@ -1743,6 +1748,11 @@ export class AskTool implements AgentTool<AskParametersSchema, AskToolDetails> {
 				cancelled,
 				timedOut,
 			} = await askQuestion(q, { previous, navigation });
+			if (timedOut && q.workflowGate?.stage === "ralplan" && q.workflowGate.kind === "approval") {
+				selectedOptions = [];
+				customInput = undefined;
+				clarificationQuestion = undefined;
+			}
 
 			if (cancelled && !timedOut) {
 				context?.abort();
