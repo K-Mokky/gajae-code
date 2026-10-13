@@ -643,6 +643,22 @@ impl CharCount {
 	fn limit_result(&self, trailing: usize) -> Limit {
 		if trailing == 0 { Limit::Reached } else { Limit::Passed(trailing) }
 	}
+
+	/// A backslash can be the trail byte of an ACP character, even before an
+	/// invalid UTF-8 byte has switched this stream to ACP mode.
+	fn is_acp_character_continuation(&self, byte: u8) -> bool {
+		if self.len == 0 || self.len == self.pending.len() {
+			return false;
+		}
+		let len = self.len + 1;
+		let mut candidate = [0; 4];
+		candidate[..self.len].copy_from_slice(&self.pending[..self.len]);
+		candidate[self.len] = byte;
+		matches!(
+			self.state.acp_character_len(&candidate[..len], false),
+			Some(character_len) if character_len == len && character_len > 1
+		)
+	}
 }
 
 /// Reads a complete line of input using the given reader and configuration.
@@ -717,7 +733,7 @@ where
 
 			InputEvent::Byte(byte) => {
 				// Handle backslash escape processing (when enabled).
-				if config.process_escapes {
+				if config.process_escapes && !count.is_acp_character_continuation(byte) {
 					if pending_backslash {
 						pending_backslash = false;
 
@@ -1302,6 +1318,40 @@ mod tests {
 		Ok(())
 	}
 
+	#[cfg(windows)]
+	#[test]
+	#[expect(clippy::panic_in_result_fn)]
+	fn read_n_and_read_cap_preserve_cp932_backslash_trail() -> anyhow::Result<()> {
+		use std::io::Write;
+
+		for no_delimiter in [false, true] {
+			let (reader, mut writer) = std::io::pipe()?;
+			let input = OpenFile::from(reader);
+			let held = input.held_input().expect("pipe holds input").clone();
+			let mut decoder_state = OutputDecoderState::with_fallback_codepage(932);
+			assert!(decoder_state.select_acp_fallback());
+			held.set_output_decoder_state(decoder_state);
+			writer.write_all(&[0x83, 0x5c, b'A', b'\n'])?;
+			drop(writer);
+
+			let limited = ReadCommand {
+				return_after_n_chars: (!no_delimiter).then_some(1),
+				return_after_n_chars_no_delimiter: no_delimiter.then_some(1),
+				..test_command()
+			};
+			assert!(matches!(
+				limited.read_line(input.try_clone()?, Vec::<u8>::new(), None, || false)?,
+				ReadResult::Line(ref text) if text == "ソ"
+			));
+
+			assert!(matches!(
+				test_command().read_line(input, Vec::<u8>::new(), None, || false)?,
+				ReadResult::Line(ref text) if text == "A"
+			));
+		}
+		Ok(())
+	}
+
 	#[test]
 	fn test_ensure_not_cancelled_returns_interrupted() {
 		let is_cancelled = || true;
@@ -1611,6 +1661,35 @@ mod tests {
 		let result =
 			command.read_line(pipe, Vec::<u8>::new(), Some(Duration::from_millis(100)), || false)?;
 		assert!(matches!(result, ReadResult::TimedOut(Some(ref line)) if line == "A"));
+		Ok(())
+	}
+
+	/// A timed-out multibyte prefix is put back so a later read can complete it.
+	#[test]
+	#[expect(clippy::panic_in_result_fn)]
+	fn test_read_timeout_preserves_incomplete_utf8_for_next_read() -> anyhow::Result<()> {
+		use std::io::Write;
+
+		let (reader, mut writer) = std::io::pipe()?;
+		let input = OpenFile::from(reader);
+		writer.write_all(&[0xc3])?;
+
+		let timed_out = test_command().read_line(
+			input.try_clone()?,
+			Vec::<u8>::new(),
+			Some(Duration::from_millis(100)),
+			|| false,
+		)?;
+		assert!(matches!(timed_out, ReadResult::TimedOut(Some(ref text)) if text.is_empty()));
+
+		writer.write_all(&[0xa9, b'\n'])?;
+		let completed = test_command().read_line(
+			input,
+			Vec::<u8>::new(),
+			Some(Duration::from_secs(1)),
+			|| false,
+		)?;
+		assert!(matches!(completed, ReadResult::Line(ref text) if text == "é"));
 		Ok(())
 	}
 

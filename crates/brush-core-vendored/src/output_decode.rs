@@ -282,11 +282,15 @@ pub fn decode_owned_bytes_with_state(
 	decoded
 }
 
-/// Decode a buffer without finalizing it (not EOF). This is used for timeout cases
-/// where we want to emit what we have without committing partial character state.
-pub fn decode_bytes_without_eof(bytes: &[u8]) -> String {
-	let mut decoder = OutputDecoder::new();
-	decoder.push(bytes)
+/// Decode a buffer without finalizing it (not EOF). Return any incomplete
+/// suffix and the updated state so a timed-out reader can preserve both.
+pub fn decode_bytes_without_eof(
+	bytes: &[u8],
+	state: OutputDecoderState,
+) -> (String, Vec<u8>, OutputDecoderState) {
+	let mut decoder = OutputDecoder::with_state(state);
+	let decoded = decoder.push(bytes);
+	(decoded, std::mem::take(&mut decoder.pending), decoder.state)
 }
 
 #[cfg(windows)]

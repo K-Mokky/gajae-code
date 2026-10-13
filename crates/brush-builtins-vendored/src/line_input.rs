@@ -5,7 +5,9 @@ use std::io::{self, Read};
 
 use brush_core::{
 	openfiles::OpenFile,
-	output_decode::{OutputDecoderState, decode_owned_bytes, decode_owned_bytes_with_state, decode_bytes_without_eof},
+	output_decode::{
+		OutputDecoderState, decode_bytes_without_eof, decode_owned_bytes, decode_owned_bytes_with_state,
+	},
 };
 
 /// ASCII control character for Ctrl+C (ETX - End of Text).
@@ -95,10 +97,19 @@ impl LineInput {
 		decoded
 	}
 
-	/// Decodes a buffer without finalizing partial characters or persisting ACP selection.
-	/// Used for timeout cases where input is incomplete.
+	/// Decodes a buffer without finalizing partial characters. Incomplete bytes
+	/// are returned to the shared input so a later read can complete them.
 	pub(crate) fn decode_bytes_temporary(&self, line: &[u8]) -> String {
-		decode_bytes_without_eof(line)
+		let (decoded, pending, state) = decode_bytes_without_eof(line, self.decoder_state());
+		if !pending.is_empty() {
+			self.unread(&pending);
+			// Keep an ACP choice when the unread suffix needs that decoder. A
+			// temporary invalid byte with no incomplete suffix must not select ACP.
+			if state.uses_acp() {
+				self.set_decoder_state(state);
+			}
+		}
+		decoded
 	}
 }
 
@@ -216,6 +227,39 @@ mod tests {
 
 		let second = LineInput::new(input);
 		assert_eq!(second.decode_line(vec![0xd2, 0xbb]), "一");
+		Ok(())
+	}
+
+	#[cfg(windows)]
+	#[test]
+	fn temporary_decode_uses_shared_acp_selection() -> Result<()> {
+		let (reader, _writer) = std::io::pipe()?;
+		let input = OpenFile::from(reader);
+		let held = input.held_input().expect("pipe holds input").clone();
+		held.set_output_decoder_state(OutputDecoderState::with_fallback_codepage(936));
+
+		let first = LineInput::new(input.try_clone()?);
+		let _ = first.decode_line(vec![0xff]);
+		assert!(held.output_decoder_state().uses_acp());
+
+		let timed_out = LineInput::new(input);
+		assert_eq!(timed_out.decode_bytes_temporary(&[0xd2, 0xbb]), "一");
+		assert!(held.output_decoder_state().uses_acp());
+		Ok(())
+	}
+
+	#[cfg(windows)]
+	#[test]
+	fn temporary_decode_keeps_incomplete_acp_bytes_and_selection() -> Result<()> {
+		let (reader, _writer) = std::io::pipe()?;
+		let input = OpenFile::from(reader);
+		let held = input.held_input().expect("pipe holds input").clone();
+		held.set_output_decoder_state(OutputDecoderState::with_fallback_codepage(936));
+
+		let timed_out = LineInput::new(input);
+		let _ = timed_out.decode_bytes_temporary(&[0xff, 0xd2]);
+		assert!(held.output_decoder_state().uses_acp());
+		assert_eq!(timed_out.take_held(), Some(0xd2));
 		Ok(())
 	}
 

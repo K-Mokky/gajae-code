@@ -3778,6 +3778,20 @@ mod tests {
 		assert_eq!(output, "é|ü\n");
 	}
 
+	/// Contract: a timed-out partial UTF-8 character remains available to the
+	/// next read of the same input stream.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn read_timeout_preserves_a_partial_utf8_character() {
+		let (result, output) = execute_captured(
+			"{ printf '\\303'; sleep 0.2; printf '\\251\\n'; } | { read -r -t 0.05 first; rc=$?; \
+			 read -r second; printf '[%s][%s][%s]\\n' \"$rc\" \"$first\" \"$second\"; }"
+				.to_owned(),
+		)
+		.await;
+		assert_eq!(result.exit_code, Some(0), "{output:?}");
+		assert_eq!(output, "[142][][é]\n");
+	}
+
 	/// Contract: `read` preserves Windows ACP bytes from an external producer.
 	#[cfg(windows)]
 	#[tokio::test(flavor = "multi_thread")]
