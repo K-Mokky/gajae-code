@@ -24,7 +24,10 @@ import {
 	modeStatePath,
 	sessionPlansDir,
 } from "@gajae-code/coding-agent/gjc-runtime/session-layout";
-import { runNativeStateCommand } from "@gajae-code/coding-agent/gjc-runtime/state-runtime";
+import {
+	captureExecutionApprovalPresentation,
+	runNativeStateCommand,
+} from "@gajae-code/coding-agent/gjc-runtime/state-runtime";
 import { readVisibleSkillActiveState } from "@gajae-code/coding-agent/skill-state/active-state";
 import { getAgentDir, setAgentDir } from "@gajae-code/utils";
 import { YAML } from "bun";
@@ -1091,6 +1094,62 @@ describe("native gjc ralplan runtime — duplicate --write guard", () => {
 			.filter(Boolean);
 		expect(indexLines.length).toBe(1);
 		expect(JSON.parse(indexLines[0]).stage).toBe("planner");
+	});
+	it("rejects contradictory concurrent review metadata after both writers read one snapshot", async () => {
+		const root = await tempDir();
+		const runId = "review-metadata-race";
+		expect((await writeRalplanArtifact(root, runId, "planner", 1, "# plan")).status).toBe(0);
+		const indexPath = path.join(ralplanRunDir(root, runId), "index.jsonl");
+		const originalLstat = fs.lstat;
+		const bothSnapshotsStarted = Promise.withResolvers<void>();
+		let snapshotReads = 0;
+		const lstatImplementation = (async (file: PathLike, options?: unknown) => {
+			const target = typeof file === "string" ? file : String(file);
+			if (path.resolve(target) === indexPath && snapshotReads < 2) {
+				snapshotReads += 1;
+				if (snapshotReads === 2) bothSnapshotsStarted.resolve();
+				await bothSnapshotsStarted.promise;
+			}
+			return await originalLstat(file, options as never);
+		}) as typeof fs.lstat;
+		const lstatSpy = spyOn(fs, "lstat").mockImplementation(lstatImplementation);
+		try {
+			const write = (verdict: "CLEAR" | "BLOCK") =>
+				runNativeRalplanCommand(
+					[
+						"--write",
+						"--stage",
+						"architect",
+						"--stage_n",
+						"1",
+						"--artifact",
+						"# architecture",
+						"--run-id",
+						runId,
+						"--lane-verdict",
+						verdict,
+						"--architect-decision",
+						"APPROVE",
+						"--json",
+					],
+					root,
+				);
+			const results = await Promise.all([write("CLEAR"), write("BLOCK")]);
+			expect(snapshotReads).toBe(2);
+			expect(results.map(result => result.status).sort()).toEqual([0, 2]);
+			const rejected = results.find(result => result.status === 2);
+			expect(rejected?.stderr).toContain("contradictory ralplan architect stage 1 review metadata");
+		} finally {
+			lstatSpy.mockRestore();
+		}
+
+		const rows = (await fs.readFile(indexPath, "utf-8"))
+			.trim()
+			.split("\n")
+			.map(line => JSON.parse(line) as Record<string, unknown>);
+		const architectRows = rows.filter(row => row.stage === "architect");
+		expect(architectRows).toHaveLength(1);
+		expect(["CLEAR", "BLOCK"].includes(String(architectRows[0]?.lane_verdict))).toBe(true);
 	});
 	it("uses one pre-persist ledger snapshot without claiming cross-process exclusivity", async () => {
 		const root = await tempDir();
@@ -3105,6 +3164,53 @@ describe("ralplan review lane budget rigor and receipts", () => {
 		);
 		expect(defaultResult.status).toBe(0);
 		expect(JSON.parse(defaultResult.stdout ?? "{}").review_budget_warning).toBeUndefined();
+	});
+});
+
+describe("Ralplan approval review joins fail closed", () => {
+	it("rejects contradictory same-pass review rows even when the last row is approval-eligible", async () => {
+		const root = await tempDir();
+		const runId = "contradictory-review-join";
+		expect((await writeRalplanArtifact(root, runId, "planner", 1, "# plan")).status).toBe(0);
+		const architect = await runNativeRalplanCommand(
+			[
+				"--write",
+				"--stage",
+				"architect",
+				"--stage_n",
+				"1",
+				"--artifact",
+				"# architecture",
+				"--run-id",
+				runId,
+				"--lane-verdict",
+				"CLEAR",
+				"--architect-decision",
+				"APPROVE",
+				"--json",
+			],
+			root,
+		);
+		expect(architect.status).toBe(0);
+		expect((await writeRalplanLaneVerdictArtifact(root, runId, "critic", 1, "# critique", "OKAY")).status).toBe(0);
+		expect((await writeRalplanArtifact(root, runId, "final", 1, "# final")).status).toBe(0);
+		expect((await captureExecutionApprovalPresentation(root, TEST_SESSION_ID, "ralplan")).run_id).toBe(runId);
+
+		const indexPath = path.join(ralplanRunDir(root, runId), "index.jsonl");
+		const rows = (await fs.readFile(indexPath, "utf-8"))
+			.trim()
+			.split("\n")
+			.map(line => JSON.parse(line) as Record<string, unknown>);
+		const architectRow = rows.find(row => row.stage === "architect");
+		if (!architectRow) throw new Error("expected the valid architect review row");
+		await fs.appendFile(
+			indexPath,
+			`${JSON.stringify({ ...architectRow, lane_verdict: "BLOCK" })}\n${JSON.stringify(architectRow)}\n`,
+		);
+
+		await expect(captureExecutionApprovalPresentation(root, TEST_SESSION_ID, "ralplan")).rejects.toThrow(
+			"verified same-pass Architect/Critic review join",
+		);
 	});
 });
 

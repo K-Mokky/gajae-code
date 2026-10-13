@@ -3758,6 +3758,14 @@ async function hasVerifiedRalplanApprovalReviewJoin(
 	let planner: RalplanPlannerReference | undefined;
 	let architect: RalplanReviewReceipt | undefined;
 	let critic: RalplanReviewReceipt | undefined;
+	type ReviewRowFingerprint = {
+		path?: string;
+		sha256?: string;
+		reviewed_planner?: string;
+		lane_verdict?: string;
+		architect_decision?: string;
+	};
+	const reviewRowFingerprints = new Map<string, ReviewRowFingerprint>();
 	let finalJoin:
 		| {
 				stageN: number;
@@ -3781,10 +3789,41 @@ async function hasVerifiedRalplanApprovalReviewJoin(
 			planner = await verifiedRalplanStageReference(runDir, row);
 			architect = undefined;
 			critic = undefined;
+			reviewRowFingerprints.clear();
 			finalJoin = undefined;
 			continue;
 		}
 		if ((row.stage === "architect" || row.stage === "critic") && planner && row.stage_n === planner.stage_n) {
+			const reviewKey = `${row.stage}\u0000${row.stage_n}`;
+			const reviewedPlanner = parseRalplanPlannerReference(row.reviewed_planner);
+			const fingerprint: ReviewRowFingerprint = {
+				...(typeof row.path === "string" ? { path: path.resolve(row.path) } : {}),
+				...(typeof row.sha256 === "string" ? { sha256: row.sha256 } : {}),
+				...(reviewedPlanner ? { reviewed_planner: JSON.stringify(reviewedPlanner) } : {}),
+				...(typeof row.lane_verdict === "string" ? { lane_verdict: row.lane_verdict } : {}),
+				...(typeof row.architect_decision === "string" ? { architect_decision: row.architect_decision } : {}),
+			};
+			const previousFingerprint = reviewRowFingerprints.get(reviewKey);
+			if (
+				previousFingerprint &&
+				((previousFingerprint.path !== undefined &&
+					fingerprint.path !== undefined &&
+					previousFingerprint.path !== fingerprint.path) ||
+					(previousFingerprint.sha256 !== undefined &&
+						fingerprint.sha256 !== undefined &&
+						previousFingerprint.sha256 !== fingerprint.sha256) ||
+					(previousFingerprint.reviewed_planner !== undefined &&
+						fingerprint.reviewed_planner !== undefined &&
+						previousFingerprint.reviewed_planner !== fingerprint.reviewed_planner) ||
+					(previousFingerprint.lane_verdict !== undefined &&
+						fingerprint.lane_verdict !== undefined &&
+						previousFingerprint.lane_verdict !== fingerprint.lane_verdict) ||
+					(previousFingerprint.architect_decision !== undefined &&
+						fingerprint.architect_decision !== undefined &&
+						previousFingerprint.architect_decision !== fingerprint.architect_decision))
+			)
+				return false;
+			reviewRowFingerprints.set(reviewKey, { ...previousFingerprint, ...fingerprint });
 			const receipt: RalplanReviewReceipt = {
 				valid:
 					sameRalplanPlannerReference(row.reviewed_planner, planner) &&

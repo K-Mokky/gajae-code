@@ -1999,11 +1999,68 @@ function compactRalplanIndexEntries(entries: readonly unknown[]): unknown[] {
 	return retained.map(item => item.entry);
 }
 
+function assertRalplanIndexReviewMetadataWriteSafe(
+	existing: readonly unknown[],
+	candidateValue: unknown,
+	runDir: string,
+): void {
+	if (!candidateValue || typeof candidateValue !== "object" || Array.isArray(candidateValue)) return;
+	const candidate = candidateValue as Record<string, unknown>;
+	const { stage, stage_n: stageN, sha256 } = candidate;
+	if (typeof stage !== "string" || typeof stageN !== "number" || typeof sha256 !== "string") return;
+	const matchingRows: Record<string, unknown>[] = [];
+	for (const row of existing) {
+		if (!row || typeof row !== "object" || Array.isArray(row)) continue;
+		const record = row as Record<string, unknown>;
+		if (record.stage === stage && record.stage_n === stageN && typeof record.sha256 === "string")
+			matchingRows.push(record);
+	}
+	const rejectConflict = (): never => {
+		throw new RalplanCommandError(
+			2,
+			`refusing to append contradictory ralplan ${stage} stage ${stageN} review metadata; the index changed during this write`,
+		);
+	};
+	const metadataFields = ["reviewed_planner", "lane_verdict", "architect_decision"] as const;
+	const metadataValue = (field: (typeof metadataFields)[number], value: unknown): string | undefined => {
+		if (value === undefined) return undefined;
+		if (field === "reviewed_planner") {
+			const reference = parseRalplanPlannerReference(value);
+			if (!reference) return rejectConflict();
+			return JSON.stringify(reference);
+		}
+		if (typeof value !== "string") return rejectConflict();
+		return value;
+	};
+	const priorMetadata = new Map<(typeof metadataFields)[number], string>();
+	for (const row of matchingRows) {
+		if (row.sha256 !== sha256) return rejectConflict();
+		for (const field of metadataFields) {
+			const value = metadataValue(field, row[field]);
+			if (value === undefined) continue;
+			const prior = priorMetadata.get(field);
+			if (prior !== undefined && prior !== value) return rejectConflict();
+			priorMetadata.set(field, value);
+		}
+	}
+	for (const field of metadataFields) {
+		const value = metadataValue(field, candidate[field]);
+		const prior = priorMetadata.get(field);
+		if (prior !== undefined && value !== prior) return rejectConflict();
+	}
+	const reviewedPlanner = metadataValue("reviewed_planner", candidate.reviewed_planner);
+	if (reviewedPlanner !== undefined) {
+		const latest = latestRalplanPlannerReference(serializeRalplanIndexEntries(existing), runDir, stageN);
+		if (!latest || JSON.stringify(latest) !== reviewedPlanner) return rejectConflict();
+	}
+}
+
 /** Append a ralplan index row under the ledger lock, compacting before the write. */
 async function appendRalplanIndexIdempotent(
 	targetPath: string,
 	entry: unknown,
 	options: AppendJsonlIdempotentOptions,
+	guard?: (existing: readonly unknown[], candidate: unknown) => void,
 ): Promise<AppendJsonlIdempotentResult> {
 	const { key, equals, ...writeOptions } = options;
 	const resolvedTargetPath = path.resolve(options.cwd ?? process.cwd(), targetPath);
@@ -2022,6 +2079,7 @@ async function appendRalplanIndexIdempotent(
 					malformed = true;
 				}
 			}
+			guard?.(existing, entry);
 			const candidateKey = key ? key(entry) : undefined;
 			const duplicate = equals
 				? existing.find(item => equals(entry, item))
@@ -2086,17 +2144,22 @@ async function persistArtifact(
 		...(laneVerdict?.architectDecision ? { architect_decision: laneVerdict.architectDecision } : {}),
 		...(finalAdmission ? { auto_handoff: finalAdmission } : {}),
 	};
-	await appendRalplanIndexIdempotent(path.join(runDir, "index.jsonl"), indexEntry, {
-		cwd,
-		audit: {
-			category: "ledger",
-			verb: "append",
-			owner: "gjc-runtime",
-			skill: "ralplan",
-			sessionId: resolved.sessionId,
+	await appendRalplanIndexIdempotent(
+		path.join(runDir, "index.jsonl"),
+		indexEntry,
+		{
+			cwd,
+			audit: {
+				category: "ledger",
+				verb: "append",
+				owner: "gjc-runtime",
+				skill: "ralplan",
+				sessionId: resolved.sessionId,
+			},
+			key: ralplanIndexKeyWithReviewMetadata,
 		},
-		key: ralplanIndexKeyWithReviewMetadata,
-	});
+		(existing, candidate) => assertRalplanIndexReviewMetadataWriteSafe(existing, candidate, runDir),
+	);
 
 	let pendingApprovalPath: string | undefined;
 	if (resolved.stage === "final") {
@@ -2358,6 +2421,12 @@ async function repairMissingStageArtifactLedger(
 			},
 			key: ralplanIndexKeyWithReviewMetadata,
 		},
+		(existing, candidate) =>
+			assertRalplanIndexReviewMetadataWriteSafe(
+				existing,
+				candidate,
+				path.join(sessionPlansDir(cwd, resolved.sessionId), "ralplan", resolved.runId),
+			),
 	);
 	const duplicate = result.duplicate;
 	if (duplicate && typeof duplicate === "object" && !Array.isArray(duplicate)) {
@@ -2648,6 +2717,7 @@ async function handleArtifactWrite(
 						sessionId: resolved.sessionId,
 					},
 				},
+				(existing, candidate) => assertRalplanIndexReviewMetadataWriteSafe(existing, candidate, runDir),
 			);
 		}
 		if (resolved.stage === "final") {
@@ -2676,6 +2746,7 @@ async function handleArtifactWrite(
 						sessionId: resolved.sessionId,
 					},
 				},
+				(existing, candidate) => assertRalplanIndexReviewMetadataWriteSafe(existing, candidate, runDir),
 			);
 			// The artifact and its authenticated ledger receipt are durable before the
 			// current-session admission projection. Repair that projection after a
