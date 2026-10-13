@@ -4615,10 +4615,6 @@ async function runLoopBody(
 		// after that follow-up turn.
 		const syntheticRecoveryMessage = await config.getSyntheticRecoveryMessage?.();
 		const followUpMessages = (await config.getFollowUpMessages?.()) || [];
-		if (loopSignal.aborted) {
-			finishCancelled(lastAttemptScope);
-			return;
-		}
 		if (followUpMessages.length > 0) {
 			// Set as pending so inner loop processes them
 			pendingMessages = followUpMessages;
