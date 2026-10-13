@@ -2108,7 +2108,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			}
 			const tasksWithUniqueIds = tasks.map((t, i) => ({ ...t, id: validateAllocatedTaskId(uniqueIds[i] ?? "") }));
 
-			const effectiveAutorouting = session.settings.getEffectiveAutorouting();
+			const isResumedRun = executionOverrides?.runMode === "resume" || executionOverrides?.runMode === "message";
+			const effectiveAutorouting = (isResumedRun ? this.#ownerSession : session).settings.getEffectiveAutorouting();
 			const registry = session.modelRegistry as
 				| {
 						getAvailable?: () => Model[];
