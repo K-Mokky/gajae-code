@@ -2399,6 +2399,21 @@ export class AuthStorage {
 		}
 	}
 
+	/** Return the stored API-key row pinned by a credential selector without resolving values. */
+	getSelectedApiKeyCredentialRowId(
+		provider: string,
+		sessionId?: string,
+		options?: Pick<AuthApiKeyOptions, "owner">,
+	): number | undefined {
+		const storageProvider = resolveOAuthStorageProvider(provider);
+		try {
+			const selected = this.#resolveSelectedStoredCredential(storageProvider, options, sessionId);
+			return selected?.credential.type === "api_key" ? selected.id : undefined;
+		} catch {
+			return undefined;
+		}
+	}
+
 	/**
 	 * Preview the stored API-key row request dispatch would try for this session.
 	 * Requires a session id so the deterministic session order is used instead

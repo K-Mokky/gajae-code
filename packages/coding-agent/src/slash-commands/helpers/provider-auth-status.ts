@@ -6,6 +6,7 @@ import {
 	listProvidersWithEnvKey,
 	resolveOAuthStorageProvider,
 } from "@gajae-code/ai/core";
+import { replaceTabs, truncateToWidth } from "@gajae-code/tui";
 import { sanitizeDisplayLine } from "@gajae-code/utils";
 import type { ModelRegistry } from "../../config/model-registry";
 import type { AgentSession } from "../../session/agent-session";
@@ -30,11 +31,13 @@ interface CredentialSource {
 	label: string;
 }
 
+const MAX_ACCOUNT_LABEL_WIDTH = 120;
+
 function displayAccountLabel(value: string): string {
-	const safe = sanitizeDisplayLine(value)
+	const safe = replaceTabs(sanitizeDisplayLine(value))
 		.replaceAll(/[\u2028\u2029]/gu, " ")
 		.trim();
-	return safe.length > 120 ? `${safe.slice(0, 117)}...` : safe || "unknown";
+	return truncateToWidth(safe, MAX_ACCOUNT_LABEL_WIDTH).trim() || "unknown";
 }
 
 function oauthLabel(entry: AuthCredentialSnapshotEntry): string {
@@ -215,6 +218,10 @@ function activeSource(
 			label: envName ? `API key (env ${envName})` : "API key (models.yml)",
 		};
 	}
+	const selectedRowId = authStorage.getSelectedApiKeyCredentialRowId(provider, sessionId, { owner });
+	if (selectedRowId !== undefined && authStorage.getStoredApiKeyUsability(provider, selectedRowId) === false) {
+		return { kind: "api_key", layer: "pending", label: "API key (selected credential unavailable)" };
+	}
 	const rowId = authStorage.getProspectiveApiKeyCredentialRowId(provider, sessionId, { owner });
 	const storedSource = storedApiKeySource(authStorage, provider, entries, rowId);
 	if (storedSource) return { kind: "api_key", ...storedSource };
@@ -240,7 +247,11 @@ export function buildProviderAuthStatusText(session: ProviderAuthStatusSession):
 		...listProvidersWithEnvKey().map(provider => resolveOAuthStorageProvider(provider)),
 	]);
 	const providers = [...providerIds]
-		.filter(provider => authStorage.hasAuth(provider, session.credentialSessionId, { owner }))
+		.filter(
+			provider =>
+				authStorage.hasSessionCredentialUnavailable(provider, session.credentialSessionId) ||
+				authStorage.hasAuth(provider, session.credentialSessionId, { owner }),
+		)
 		.sort((left, right) => left.localeCompare(right));
 	if (providers.length === 0) return "No configured provider credentials.";
 
@@ -249,8 +260,13 @@ export function buildProviderAuthStatusText(session: ProviderAuthStatusSession):
 		const entries = snapshot.credentials.filter(entry => resolveOAuthStorageProvider(entry.provider) === provider);
 		const activeType = authStorage.getEffectiveCredentialType(provider, session.credentialSessionId, { owner });
 		const sources = collectSources(provider, entries, modelRegistry, owner);
-		const active =
-			activeType === "oauth" || activeType === "api_key"
+		const sessionCredentialUnavailable = authStorage.hasSessionCredentialUnavailable(
+			provider,
+			session.credentialSessionId,
+		);
+		const active = sessionCredentialUnavailable
+			? { kind: "api_key" as const, layer: "pending" as const, label: "selected credential unavailable" }
+			: activeType === "oauth" || activeType === "api_key"
 				? activeSource(provider, entries, session, owner, activeType)
 				: undefined;
 		lines.push(`${sanitizeDisplayLine(provider)}: ${active?.label ?? "credential source unavailable"}`);

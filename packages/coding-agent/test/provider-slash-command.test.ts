@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { AuthStorage } from "@gajae-code/ai/core";
+import { visibleWidth } from "@gajae-code/tui";
 import { getAgentDir, setAgentDir } from "@gajae-code/utils";
 import { YAML } from "bun";
 import { ModelRegistry } from "../src/config/model-registry";
@@ -152,7 +153,12 @@ describe("provider slash command", () => {
 
 	it("shows credential status from the TUI provider command", async () => {
 		const registry = {
-			authStorage: { exportSnapshot: () => ({ credentials: [] }), hasAuth: () => false },
+			authStorage: {
+				exportSnapshot: () => ({ credentials: [] }),
+				hasAuth: () => false,
+				hasSessionCredentialUnavailable: () => false,
+				getSelectedApiKeyCredentialRowId: () => undefined,
+			},
 			getAll: () => [],
 			getAvailable: () => [],
 			getConfiguredProviderIds: () => [],
@@ -310,10 +316,119 @@ describe("provider slash command", () => {
 			expect(afterResolution).toContain("openai: API key (env OPENAI_API_KEY)");
 			expect(afterResolution).not.toContain("openai-fallback-secret-test-value");
 			expect(afterResolution).not.toContain("empty-command-key-secret");
+
+			const commandRow = authStorage
+				.exportSnapshot()
+				.credentials.find(entry => entry.provider === "openai" && entry.credential.type === "api_key");
+			if (commandRow?.credential.type !== "api_key") {
+				throw new Error("expected the stored command API-key row");
+			}
+			authStorage.setSessionCredentialSelector(sessionId, "openai", {
+				kind: "id",
+				value: String(commandRow.id),
+			});
+			expect(await authStorage.getApiKey("openai", sessionId)).toBeUndefined();
+			const pinnedStatus = await status();
+			expect(pinnedStatus).toContain("openai: API key (selected credential unavailable)");
+			expect(pinnedStatus).not.toContain("openai: API key (env OPENAI_API_KEY)");
 		} finally {
 			if (originalOpenAiKey === undefined) delete Bun.env.OPENAI_API_KEY;
 			else Bun.env.OPENAI_API_KEY = originalOpenAiKey;
 		}
+	});
+
+	it("reports unavailable session credentials instead of fallback or omission", async () => {
+		tempAgentDir = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-provider-slash-"));
+		setAgentDir(tempAgentDir);
+		const originalOpenAiKey = Bun.env.OPENAI_API_KEY;
+		Bun.env.OPENAI_API_KEY = "openai-unavailable-pin-fallback-secret";
+		try {
+			const authStorage = await AuthStorage.create(path.join(tempAgentDir, "auth.db"));
+			authStorages.push(authStorage);
+			await Bun.write(
+				path.join(tempAgentDir, "models.yml"),
+				YAML.stringify({
+					providers: {
+						"status-unavailable-empty": {
+							baseUrl: "https://unavailable.example.test/v1",
+							api: "openai-completions",
+							auth: "none",
+							models: [
+								{
+									id: "unavailable-model",
+									name: "Unavailable Model",
+									reasoning: false,
+									input: ["text"],
+									cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+									contextWindow: 100_000,
+									maxTokens: 8_000,
+								},
+							],
+						},
+					},
+				}),
+			);
+			const registry = new ModelRegistry(authStorage, path.join(tempAgentDir, "models.yml"));
+			modelRegistries.push(registry);
+			await registry.refresh("offline");
+			const sessionId = "unavailable-credential-status-session";
+			authStorage.markSessionCredentialUnavailable(sessionId, "openai", {
+				kind: "id",
+				value: "missing-openai-row",
+			});
+			authStorage.markSessionCredentialUnavailable(sessionId, "status-unavailable-empty", {
+				kind: "id",
+				value: "missing-custom-row",
+			});
+			const outputs: string[] = [];
+			const command = BUILTIN_SLASH_COMMANDS_INTERNAL.find(entry => entry.name === "provider");
+			await command?.handle?.({ name: "provider", args: "status", text: "/provider status" }, {
+				session: { modelRegistry: registry, credentialSessionId: sessionId },
+				output: (text: string) => outputs.push(text),
+			} as unknown as SlashCommandRuntime);
+
+			const output = outputs.join("\n");
+			expect(output).toContain("openai: selected credential unavailable");
+			expect(output).not.toContain("openai: API key (env OPENAI_API_KEY)");
+			expect(output).toContain("status-unavailable-empty: selected credential unavailable");
+			expect(output).not.toContain("openai-unavailable-pin-fallback-secret");
+		} finally {
+			if (originalOpenAiKey === undefined) delete Bun.env.OPENAI_API_KEY;
+			else Bun.env.OPENAI_API_KEY = originalOpenAiKey;
+		}
+	});
+
+	it("sanitizes and width-clips OAuth account labels by terminal columns", async () => {
+		tempAgentDir = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-provider-slash-"));
+		setAgentDir(tempAgentDir);
+		const authStorage = await AuthStorage.create(path.join(tempAgentDir, "auth.db"));
+		authStorages.push(authStorage);
+		await authStorage.set("status-sanitized-account", {
+			type: "oauth",
+			access: "sanitized-account-secret",
+			refresh: "sanitized-account-refresh-secret",
+			expires: Date.now() + 60 * 60_000,
+			accountId: `${"a".repeat(116)}😀\t界界`,
+		});
+		const registry = new ModelRegistry(authStorage, path.join(tempAgentDir, "models.yml"));
+		modelRegistries.push(registry);
+		const outputs: string[] = [];
+		const command = BUILTIN_SLASH_COMMANDS_INTERNAL.find(entry => entry.name === "provider");
+		await command?.handle?.({ name: "provider", args: "status", text: "/provider status" }, {
+			session: { modelRegistry: registry, credentialSessionId: "sanitized-account-session" },
+			output: (text: string) => outputs.push(text),
+		} as unknown as SlashCommandRuntime);
+
+		const statusLine = outputs
+			.join("\n")
+			.split("\n")
+			.find(line => line.startsWith("status-sanitized-account:"));
+		if (!statusLine) throw new Error("expected the OAuth account status line");
+		const accountLabel = statusLine.slice("status-sanitized-account: OAuth (account ".length, -1);
+		expect(accountLabel).toContain("😀");
+		expect(accountLabel).not.toContain("\t");
+		expect(visibleWidth(accountLabel)).toBeLessThanOrEqual(120);
+		expect(outputs.join("\n")).not.toContain("sanitized-account-secret");
 	});
 
 	it("reports the configured --api-key-env name instead of its value", async () => {
