@@ -143,6 +143,24 @@ describe("applyUltrafastTierModelPolicies", () => {
 		});
 		expect(models[4]?.compat).toEqual({ supportsReasoningEffort: true });
 	});
+
+	it("does not infer ultrafast support for GPT-5.6 models", () => {
+		const models = [
+			model("openai", "gpt-5.6-sol"),
+			model("openai-codex", "gpt-5.6-sol"),
+			model("github-copilot", "gpt-5.6-sol"),
+			model("opencode-zen", "gpt-5.6-sol"),
+		];
+
+		applyUltrafastTierModelPolicies(models);
+
+		expect(models.map(candidate => candidate.compat?.supportsUltrafastTier)).toEqual([
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+		]);
+	});
 });
 
 describe("restoreSeedLimits", () => {

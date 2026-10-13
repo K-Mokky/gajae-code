@@ -2072,7 +2072,7 @@ export function parseChunkUsage(
 		usage.cost.output *= multiplier;
 		usage.cost.cacheRead *= multiplier;
 		usage.cost.cacheWrite *= multiplier;
-		usage.cost.total *= multiplier;
+		usage.cost.total = usage.cost.input + usage.cost.output + usage.cost.cacheRead + usage.cost.cacheWrite;
 	}
 	return usage;
 }

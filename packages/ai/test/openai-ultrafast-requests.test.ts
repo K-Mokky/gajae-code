@@ -154,6 +154,12 @@ describe("ultrafast request serialization for bundled models", () => {
 			expect(bodies[0]?.service_tier).toBe(scenario.requestedTier);
 			expect(result.serviceTier).toBe(scenario.effectiveTier);
 			expect(result.usage.cost.total).toBeCloseTo(scenario.expectedCost, 12);
+			expect(result.usage.cost.total).toBe(
+				result.usage.cost.input +
+					result.usage.cost.output +
+					result.usage.cost.cacheRead +
+					result.usage.cost.cacheWrite,
+			);
 		}
 	});
 
@@ -181,6 +187,12 @@ describe("ultrafast request serialization for bundled models", () => {
 			expect(bodies[0]?.service_tier).toBe(scenario.requestedTier);
 			expect(result.serviceTier).toBe(scenario.effectiveTier);
 			expect(result.usage.cost.total).toBeCloseTo(scenario.expectedCost, 12);
+			expect(result.usage.cost.total).toBe(
+				result.usage.cost.input +
+					result.usage.cost.output +
+					result.usage.cost.cacheRead +
+					result.usage.cost.cacheWrite,
+			);
 		}
 	});
 

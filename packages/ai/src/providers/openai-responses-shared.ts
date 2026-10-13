@@ -1001,7 +1001,11 @@ export async function processResponsesStream<TApi extends Api>(
 				output.usage.cost.output *= multiplier;
 				output.usage.cost.cacheRead *= multiplier;
 				output.usage.cost.cacheWrite *= multiplier;
-				output.usage.cost.total *= multiplier;
+				output.usage.cost.total =
+					output.usage.cost.input +
+					output.usage.cost.output +
+					output.usage.cost.cacheRead +
+					output.usage.cost.cacheWrite;
 			}
 			// A `response.incomplete` frame is terminal because the response was cut
 			// short, so the event type itself proves truncation. Deriving `length`
