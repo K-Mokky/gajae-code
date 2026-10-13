@@ -1719,6 +1719,34 @@ export default class Sdk extends Command {
 	}
 }
 
+/** Captures and removes one-shot restart credentials before the broker forks descendants. */
+export function consumeBrokerRestartEnvironment(environment: NodeJS.ProcessEnv): {
+	requestIdEnv: string | undefined;
+	restartDeadlineAt: number | undefined;
+} {
+	const restartRequestEnv = environment.GJC_BROKER_RESTART_REQUEST;
+	const restartDeadlineEnv = environment.GJC_BROKER_RESTART_DEADLINE;
+	delete environment.GJC_BROKER_RESTART_REQUEST;
+	delete environment.GJC_BROKER_RESTART_DEADLINE;
+	const requestIdEnv =
+		typeof restartRequestEnv === "string" && /^[A-Za-z0-9_-]{1,256}$/.test(restartRequestEnv)
+			? restartRequestEnv
+			: undefined;
+	let restartDeadlineAt: number | undefined;
+	if (restartDeadlineEnv !== undefined) {
+		const parsedDeadlineAt = Number(restartDeadlineEnv);
+		if (
+			requestIdEnv === undefined ||
+			!/^[0-9]{1,16}$/.test(restartDeadlineEnv) ||
+			!Number.isSafeInteger(parsedDeadlineAt) ||
+			parsedDeadlineAt <= Date.now()
+		)
+			throw new Error("Invalid SDK broker restart deadline; refusing successor startup.");
+		restartDeadlineAt = parsedDeadlineAt;
+	}
+	return { requestIdEnv, restartDeadlineAt };
+}
+
 /**
  * Runs one parsed SDK internal entry point. `publicBrokerRun` is set only by
  * the stable `gjc sdk broker run` contract, which must report a lost ownership
@@ -1943,24 +1971,7 @@ async function runSdkInternal(internal: SdkInternalArgv, publicBrokerRun = false
 	};
 	let startupFenceAcquired = false;
 	try {
-		const restartRequestEnv = process.env.GJC_BROKER_RESTART_REQUEST;
-		const requestIdEnv =
-			typeof restartRequestEnv === "string" && /^[A-Za-z0-9_-]{1,256}$/.test(restartRequestEnv)
-				? restartRequestEnv
-				: undefined;
-		const restartDeadlineEnv = process.env.GJC_BROKER_RESTART_DEADLINE;
-		let restartDeadlineAt: number | undefined;
-		if (restartDeadlineEnv !== undefined) {
-			const parsedDeadlineAt = Number(restartDeadlineEnv);
-			if (
-				requestIdEnv === undefined ||
-				!/^[0-9]{1,16}$/.test(restartDeadlineEnv) ||
-				!Number.isSafeInteger(parsedDeadlineAt) ||
-				parsedDeadlineAt <= Date.now()
-			)
-				throw new Error("Invalid SDK broker restart deadline; refusing successor startup.");
-			restartDeadlineAt = parsedDeadlineAt;
-		}
+		const { requestIdEnv, restartDeadlineAt } = consumeBrokerRestartEnvironment(process.env);
 		const MAX_SESSION_INDEX_TIMEOUT_RETRIES = 2;
 		let sessionIndexTimeoutRetries = 0;
 		let activeStartupDeadlineAt = 0;

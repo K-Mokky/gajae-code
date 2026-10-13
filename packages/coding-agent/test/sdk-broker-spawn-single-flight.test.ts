@@ -5,7 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as native from "@gajae-code/natives";
 import packageJson from "../package.json" with { type: "json" };
-import Sdk from "../src/commands/sdk";
+import Sdk, { consumeBrokerRestartEnvironment } from "../src/commands/sdk";
 import {
 	FILE_LOCK_ORPHAN_TRANSITION_ADOPTION_AGE_MS,
 	FileLockAcquireError,
@@ -826,6 +826,21 @@ it("retries session-index acquisition timeouts within the startup fence before r
 		start.mockRestore();
 		await fs.rm(dir, { recursive: true, force: true });
 	}
+});
+
+it("consumes broker restart authorization before launching descendants", () => {
+	const deadlineAt = Date.now() + 60_000;
+	const environment: NodeJS.ProcessEnv = {
+		GJC_BROKER_RESTART_REQUEST: "single-use-request",
+		GJC_BROKER_RESTART_DEADLINE: String(deadlineAt),
+		KEEP_FOR_CHILDREN: "preserved",
+	};
+
+	expect(consumeBrokerRestartEnvironment(environment)).toEqual({
+		requestIdEnv: "single-use-request",
+		restartDeadlineAt: deadlineAt,
+	});
+	expect(environment).toEqual({ KEEP_FOR_CHILDREN: "preserved" });
 });
 
 it("refuses untagged startup when a restart intent cannot be read", async () => {

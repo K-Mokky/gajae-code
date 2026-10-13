@@ -535,6 +535,44 @@ describe("doctor broker restart protocol", () => {
 		}
 	}, 5_000);
 
+	it("retries successor validation after an operation deadline while its lease remains", async () => {
+		const { dir, broker, discovery } = await fixture();
+		const requestId = "retry-successor-validation";
+		const matchingDiscovery = { ...discovery, restartRequestId: requestId };
+		let lockAttempts = 0;
+		let discoveryReadAttempts = 0;
+		const startupLock = spyOn(brokerEnsure, "withBrokerStartupLock").mockImplementation(
+			async (_agentDir, operation) => {
+				lockAttempts++;
+				return operation(Date.now() + (lockAttempts === 1 ? 25 : 250));
+			},
+		);
+		const discoveryRead = spyOn(brokerDiscovery, "readBrokerDiscovery").mockImplementation(async () => {
+			discoveryReadAttempts++;
+			if (discoveryReadAttempts === 1) {
+				await Bun.sleep(75);
+				return null;
+			}
+			return matchingDiscovery;
+		});
+		try {
+			const result = await launchAuthorizedBrokerSuccessor({
+				agentDir: dir,
+				requestId,
+				deadlineAt: Date.now() + 500,
+				packageGeneration: discovery.packageGeneration,
+			});
+			expect(result).toEqual({ kind: "adopted", discovery: matchingDiscovery });
+			expect(lockAttempts).toBe(2);
+			expect(discoveryReadAttempts).toBe(2);
+		} finally {
+			discoveryRead.mockRestore();
+			startupLock.mockRestore();
+			await broker.stop();
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	}, 5_000);
+
 	it("retries a retained startup transition and revalidates the committed successor", async () => {
 		const dir = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-doctor-orphan-lock-"));
 		const requestId = "retained-orphan-lock";

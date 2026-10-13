@@ -51,6 +51,7 @@ export type AuthorizedBrokerSuccessorResult =
 
 type BrokerSuccessorSpawnOutcome =
 	| Exclude<AuthorizedBrokerSuccessorResult, { kind: "spawned" }>
+	| { kind: "retry" }
 	| {
 			kind: "spawned";
 			child: childProcess.ChildProcess;
@@ -139,8 +140,11 @@ export async function launchAuthorizedBrokerSuccessor(
 				options.agentDir,
 				async deadline => {
 					const operationDeadlineAt = Math.min(deadline, successorDeadlineAt);
-					if (Date.now() >= operationDeadlineAt)
-						return { kind: "refused" as const, reason: "deadline_elapsed" as const };
+					const deadlineOutcome = (): BrokerSuccessorSpawnOutcome =>
+						operationDeadlineAt < successorDeadlineAt && Date.now() < successorDeadlineAt
+							? { kind: "retry" }
+							: { kind: "refused", reason: "deadline_elapsed" };
+					if (Date.now() >= operationDeadlineAt) return deadlineOutcome();
 					// A matching published owner proves this request already succeeded; the
 					// broker may have cleared its committed intent after publication.
 					let existing: BrokerDiscovery | null;
@@ -151,12 +155,10 @@ export async function launchAuthorizedBrokerSuccessor(
 							"Timed out reading broker discovery before successor expiry.",
 						);
 					} catch (error) {
-						if (error instanceof BrokerSuccessorDeadlineError)
-							return { kind: "refused" as const, reason: "deadline_elapsed" as const };
+						if (error instanceof BrokerSuccessorDeadlineError) return deadlineOutcome();
 						throw error;
 					}
-					if (Date.now() >= operationDeadlineAt)
-						return { kind: "refused" as const, reason: "deadline_elapsed" as const };
+					if (Date.now() >= operationDeadlineAt) return deadlineOutcome();
 					if (
 						existing &&
 						existing.packageGeneration === options.packageGeneration &&
@@ -174,12 +176,10 @@ export async function launchAuthorizedBrokerSuccessor(
 							"Timed out validating the successor restart intent.",
 						);
 					} catch (error) {
-						if (error instanceof BrokerSuccessorDeadlineError)
-							return { kind: "refused" as const, reason: "deadline_elapsed" as const };
+						if (error instanceof BrokerSuccessorDeadlineError) return deadlineOutcome();
 						throw error;
 					}
-					if (Date.now() >= operationDeadlineAt)
-						return { kind: "refused" as const, reason: "deadline_elapsed" as const };
+					if (Date.now() >= operationDeadlineAt) return deadlineOutcome();
 					if (intent?.phase !== "committed" || intent.requestId !== options.requestId)
 						return { kind: "refused" as const, reason: "intent_not_committed" as const };
 					if (intent.expiresAt <= Date.now())
@@ -244,6 +244,14 @@ export async function launchAuthorizedBrokerSuccessor(
 				},
 				{ deadlineAt: options.deadlineAt },
 			);
+			if (spawnOutcome.kind === "retry") {
+				// The validation read exhausted this short lock operation, not the
+				// committed lease. The lock has been released; revalidate under a fresh
+				// operation window while the request is still authorized.
+				const remainingMs = successorDeadlineAt - Date.now();
+				if (remainingMs > 0) await Bun.sleep(Math.min(SUCCESSOR_SPAWN_POLL_MS, remainingMs));
+				continue;
+			}
 			break;
 		} catch (lockError) {
 			if (!(lockError instanceof FileLockAcquireError)) throw lockError;
