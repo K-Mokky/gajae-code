@@ -510,12 +510,11 @@ function resolveModelApiOverrideFromDiscovery(
 	// An OpenAI-shaped models list can advertise Anthropic models that must use
 	// the Anthropic transport even when the provider's default is OpenAI-family.
 	if (discovery.type === "openai-models-list") {
-		const detected =
-			entry !== undefined
-				? detectDiscoveredApiFamily(entry)
-				: allowModelIdDetection
-					? detectDiscoveredApiFamily({ id: modelId })
-					: undefined;
+		let candidateEntry = entry;
+		if (candidateEntry === undefined && allowModelIdDetection) {
+			candidateEntry = { id: modelId };
+		}
+		const detected = candidateEntry === undefined ? undefined : detectDiscoveredApiFamily(candidateEntry);
 		if (detected === "anthropic-messages") return "anthropic-messages";
 		if (detected === "openai-completions") {
 			return isOpenAIFamilyApi(providerApi) ? providerApi : "openai-completions";
@@ -801,24 +800,39 @@ function validateProviderConfiguration(
 		}
 	}
 	if (config.streamIdleTimeoutMs !== undefined) {
+		const bundledApis = getKnownProviderApis(providerName);
+		const hasCompatibleBundledApi = [...bundledApis].some(isRequestTransformApi);
+		const hasCompatibleModelApi = models.some(model => {
+			const api = model.api ?? config.api;
+			return api !== undefined && isRequestTransformApi(api);
+		});
+		const hasCompatibleDiscoveryApi =
+			config.openaiCompat !== undefined ||
+			(config.discovery !== undefined &&
+				((configuredApi !== undefined && isRequestTransformApi(configuredApi)) ||
+					Object.values(config.discovery.apiByModelPrefix ?? {}).some(isRequestTransformApi)));
+		const implicitDiscoveryApi =
+			(config.api as Api | undefined) ??
+			dominantOpenAIFamilyModelApi(models) ??
+			(config.openaiCompat ? "openai-completions" : undefined);
+		const implicitDiscoveryBaseUrl = config.baseUrl ?? resolveProviderBaseUrlFromEnv(providerName);
+		const hasCompatibleImplicitDiscoveryApi =
+			!config.discovery &&
+			(config.openaiCompat !== undefined ||
+				(providerName !== "vllm" &&
+					providerName !== "sglang" &&
+					implicitDiscoveryApi !== undefined &&
+					isOpenAIFamilyApi(implicitDiscoveryApi) &&
+					implicitDiscoveryBaseUrl !== undefined));
+		const hasCompatibleDiscoveryRoute = hasCompatibleDiscoveryApi || hasCompatibleImplicitDiscoveryApi;
 		if (models.length > 0) {
-			const hasCompatibleModelApi = models.some(modelDef => {
-				const api = modelDef.api ?? config.api;
-				return api !== undefined && isRequestTransformApi(api);
-			});
-			if (!hasCompatibleModelApi) {
+			if (!hasCompatibleModelApi && !hasCompatibleBundledApi && !hasCompatibleDiscoveryRoute) {
 				throw new Error(
 					`Provider ${providerName}: "streamIdleTimeoutMs" is only supported with openai-completions or openai-responses APIs.`,
 				);
 			}
 		} else {
-			const bundledApis = getKnownProviderApis(providerName);
-			const hasCompatibleBundledApi = [...bundledApis].some(isRequestTransformApi);
-			const hasCompatibleDiscoveryApi =
-				config.discovery !== undefined &&
-				((configuredApi !== undefined && isRequestTransformApi(configuredApi)) ||
-					Object.values(config.discovery.apiByModelPrefix ?? {}).some(isRequestTransformApi));
-			if (!hasCompatibleBundledApi && !hasCompatibleDiscoveryApi) {
+			if (!hasCompatibleBundledApi && !hasCompatibleDiscoveryRoute) {
 				if (bundledApis.size > 0) {
 					assertStreamIdleTimeoutSupportedForKnownProvider(providerName, '"streamIdleTimeoutMs"');
 				} else if (configuredApi) {

@@ -6682,6 +6682,25 @@ describe("ModelRegistry", () => {
 		expect(registry.find("github-copilot", "claude-sonnet-4")).not.toHaveProperty("streamIdleTimeoutMs");
 	});
 
+	test("validates provider timeouts against retained bundled models when custom models are Anthropic-only", () => {
+		writeRawModelsConfig({
+			providers: {
+				"github-copilot": {
+					baseUrl: "https://copilot-proxy.example.com/v1",
+					auth: "none",
+					streamIdleTimeoutMs: 300_000,
+					models: [{ id: "custom-claude", api: "anthropic-messages" }],
+				},
+			},
+		});
+
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, Settings.isolated(), { automaticRefresh: false });
+		expect(registry.getError()).toBeUndefined();
+		expect(registry.find("github-copilot", "gpt-4.1")).toMatchObject({ streamIdleTimeoutMs: 300_000 });
+		expect(registry.find("github-copilot", "custom-claude")).toMatchObject({ api: "anthropic-messages" });
+		expect(registry.find("github-copilot", "custom-claude")).not.toHaveProperty("streamIdleTimeoutMs");
+	});
+
 	test("applies provider stream idle timeouts only to OpenAI models in mixed custom lists", () => {
 		writeRawModelsConfig({
 			providers: {
@@ -6719,6 +6738,33 @@ describe("ModelRegistry", () => {
 		expect(String(registry.getError()?.message)).toContain(
 			'"streamIdleTimeoutMs" is only supported with openai-completions or openai-responses APIs',
 		);
+	});
+
+	test.each([
+		["implicit OpenAI discovery", { api: "openai-completions" }],
+		[
+			"explicit OpenAI prefix discovery",
+			{
+				api: "anthropic-messages",
+				discovery: { type: "openai-models-list", apiByModelPrefix: { "gpt-": "openai-completions" } },
+			},
+		],
+	] as const)("validates provider timeouts against %s with Anthropic-only custom models", (_route, routeConfig) => {
+		writeRawModelsConfig({
+			providers: {
+				proxy: {
+					baseUrl: "https://proxy.example.com/v1",
+					auth: "none",
+					streamIdleTimeoutMs: 300_000,
+					models: [{ id: "claude-model", api: "anthropic-messages" }],
+					...routeConfig,
+				},
+			},
+		});
+
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, Settings.isolated(), { automaticRefresh: false });
+		expect(registry.getError()).toBeUndefined();
+		expect(registry.find("proxy", "claude-model")).not.toHaveProperty("streamIdleTimeoutMs");
 	});
 
 	test("drops inherited provider timeouts when a custom model changes a bundled model API", () => {
