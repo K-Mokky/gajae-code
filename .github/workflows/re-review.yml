@@ -141,8 +141,12 @@ jobs:
               }
             }
 
-            // GitHub's request-reviewers endpoint only accepts current write
-            // collaborators. A single ineligible user would reject a batch,
+            function canRequestReviewer(permission) {
+              return ['admin', 'maintain', 'write', 'triage', 'read'].includes(permission);
+            }
+
+            // GitHub permits review requests for users with repository read
+            // access. A single ineligible user would reject a batch,
             // so filter candidates before submitting the request.
             const eligibleReviewers = [];
             for (const reviewer of reviewersToRequest) {
@@ -153,7 +157,7 @@ jobs:
                   username: reviewer,
                 });
 
-                if (['admin', 'maintain', 'write'].includes(collaborator.data.permission)) {
+                if (canRequestReviewer(collaborator.data.permission)) {
                   eligibleReviewers.push(reviewer);
                 } else {
                   console.log(`Skipping ${reviewer}: permission ${collaborator.data.permission} cannot be requested`);
@@ -224,5 +228,5 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
-              body: 'No eligible reviewers to re-request (reviewers with pending feedback may already be requested or lack write access).',
+              body: 'No eligible reviewers to re-request (reviewers with pending feedback may already be requested or lack repository access).',
             });

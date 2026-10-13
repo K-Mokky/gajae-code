@@ -322,13 +322,32 @@ describe("workflow permission policy", () => {
 		expect(documentRecord(authorizationStep.with)["result-encoding"]).toBe("string");
 		expect(documentRecord(reviewerSelectionStep.with)["result-encoding"]).toBe("string");
 		expect(reviewerScript).toContain("getCollaboratorPermissionLevel");
-		expect(reviewerScript).toContain("['admin', 'maintain', 'write']");
+		expect(reviewerScript).toContain("canRequestReviewer(collaborator.data.permission)");
 		expect(reviewerScript).toContain("eligibleReviewers.push(reviewer)");
 		expect(reviewerScript).toContain("return JSON.stringify(eligibleReviewers)");
 		expect(requestStep.env).toEqual({ REVIEWERS_JSON: "${{ steps.get-reviewers.outputs.result }}" });
 		expect(requestScript).toContain("JSON.parse(process.env.REVIEWERS_JSON)");
 		expect(requestScript).not.toContain("${{");
 		expect(requestScript).toContain("requested_reviewers/rerequest");
+	});
+
+	test("allows re-requesting reviewers with read and triage access", async () => {
+		const source = await parsedWorkflow(RE_REVIEW_WORKFLOW);
+		const jobs = documentRecord(source.jobs);
+		const steps = documentRecord(jobs["request-review-on-comment"]).steps as unknown[];
+		const getReviewers = steps.map(documentRecord).find(step => step.id === "get-reviewers");
+		const reviewerScript = documentRecord(documentRecord(getReviewers).with).script as string;
+		const helper = reviewerScript.match(/function canRequestReviewer\(permission\) \{[\s\S]*?^\}/m);
+		expect(helper).not.toBeNull();
+
+		const createCanRequestReviewer = new Function(
+			`${helper?.[0]}\nreturn canRequestReviewer;`,
+		) as () => (permission: string) => boolean;
+		const canRequestReviewer = createCanRequestReviewer();
+
+		expect(canRequestReviewer("read")).toBe(true);
+		expect(canRequestReviewer("triage")).toBe(true);
+		expect(canRequestReviewer("none")).toBe(false);
 	});
 
 	test("re-requests a previously reviewing collaborator through GitHub's dedicated endpoint", async () => {
