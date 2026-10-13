@@ -2,6 +2,7 @@ import type * as childProcess from "node:child_process";
 import { FileLockAcquireError } from "../../config/file-lock";
 import {
 	type BrokerDiscovery,
+	type BrokerRestartIntentWithIdentity,
 	brokerProcessIncarnation,
 	readBrokerDiscovery,
 	readBrokerRestartIntent,
@@ -49,6 +50,20 @@ export type AuthorizedBrokerSuccessorResult =
 	  };
 
 const SUCCESSOR_SPAWN_POLL_MS = 25;
+
+class BrokerSuccessorDeadlineError extends Error {}
+
+async function readBeforeBrokerDeadline<T>(read: Promise<T>, deadlineAt: number, message: string): Promise<T> {
+	const remainingMs = deadlineAt - Date.now();
+	if (remainingMs <= 0) throw new BrokerSuccessorDeadlineError(message);
+	const timeout = Promise.withResolvers<T>();
+	const timer = setTimeout(() => timeout.reject(new BrokerSuccessorDeadlineError(message)), remainingMs);
+	try {
+		return await Promise.race([read, timeout.promise]);
+	} finally {
+		clearTimeout(timer);
+	}
+}
 
 async function refuseFailedBrokerLaunch(
 	launched: BrokerLaunchResult,
@@ -109,11 +124,25 @@ export async function launchAuthorizedBrokerSuccessor(
 			spawnOutcome = await withBrokerStartupLock(
 				options.agentDir,
 				async deadline => {
-					if (Date.now() >= Math.min(deadline, successorDeadlineAt))
+					const operationDeadlineAt = Math.min(deadline, successorDeadlineAt);
+					if (Date.now() >= operationDeadlineAt)
 						return { kind: "refused" as const, reason: "deadline_elapsed" as const };
 					// A matching published owner proves this request already succeeded; the
 					// broker may have cleared its committed intent after publication.
-					const existing = await readBrokerDiscovery(options.agentDir);
+					let existing: BrokerDiscovery | null;
+					try {
+						existing = await readBeforeBrokerDeadline(
+							readBrokerDiscovery(options.agentDir),
+							operationDeadlineAt,
+							"Timed out reading broker discovery before successor expiry.",
+						);
+					} catch (error) {
+						if (error instanceof BrokerSuccessorDeadlineError)
+							return { kind: "refused" as const, reason: "deadline_elapsed" as const };
+						throw error;
+					}
+					if (Date.now() >= operationDeadlineAt)
+						return { kind: "refused" as const, reason: "deadline_elapsed" as const };
 					if (
 						existing &&
 						existing.packageGeneration === options.packageGeneration &&
@@ -123,7 +152,20 @@ export async function launchAuthorizedBrokerSuccessor(
 					// Only a durably COMMITTED intent for this exact requestId authorizes a
 					// new spawn. Re-read it on every lock attempt so a retry cannot use stale
 					// authorization or launch a duplicate successor.
-					const intent = await readBrokerRestartIntent(options.agentDir);
+					let intent: BrokerRestartIntentWithIdentity | null;
+					try {
+						intent = await readBeforeBrokerDeadline(
+							readBrokerRestartIntent(options.agentDir),
+							operationDeadlineAt,
+							"Timed out validating the successor restart intent.",
+						);
+					} catch (error) {
+						if (error instanceof BrokerSuccessorDeadlineError)
+							return { kind: "refused" as const, reason: "deadline_elapsed" as const };
+						throw error;
+					}
+					if (Date.now() >= operationDeadlineAt)
+						return { kind: "refused" as const, reason: "deadline_elapsed" as const };
 					if (intent?.phase !== "committed" || intent.requestId !== options.requestId)
 						return { kind: "refused" as const, reason: "intent_not_committed" as const };
 					if (intent.expiresAt <= Date.now())

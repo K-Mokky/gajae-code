@@ -5,6 +5,8 @@ import { FileLockAcquireError } from "../src/config/file-lock";
 import { Broker } from "../src/sdk/broker/broker";
 import { readBrokerExitRecord, readBrokerStartupExitRecord } from "../src/sdk/broker/broker-exit";
 import { launchAuthorizedBrokerSuccessor, oldOwnerConfirmedExited } from "../src/sdk/broker/daemon-entry";
+import type { BrokerRestartIntentWithIdentity } from "../src/sdk/broker/discovery";
+import * as brokerDiscovery from "../src/sdk/broker/discovery";
 import {
 	brokerRestartIntentPath,
 	publishBrokerDiscovery,
@@ -507,6 +509,30 @@ describe("doctor broker restart protocol", () => {
 		expect(result.kind).toBe("refused");
 		if (result.kind === "refused") expect(result.reason).toBe("intent_not_committed");
 	});
+
+	it("bounds restart intent reads by the successor deadline", async () => {
+		const dir = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-doctor-stalled-intent-"));
+		const stalledRead = Promise.withResolvers<BrokerRestartIntentWithIdentity | null>();
+		const readIntent = spyOn(brokerDiscovery, "readBrokerRestartIntent").mockImplementation(
+			() => stalledRead.promise,
+		);
+		const startedAt = Date.now();
+		try {
+			const result = await launchAuthorizedBrokerSuccessor({
+				agentDir: dir,
+				requestId: "stalled-intent",
+				deadlineAt: startedAt + 1_000,
+				packageGeneration: "test-generation",
+			});
+			expect(result).toEqual({ kind: "refused", reason: "deadline_elapsed" });
+			expect(Date.now() - startedAt).toBeLessThan(2_000);
+			expect(readIntent).toHaveBeenCalledTimes(1);
+		} finally {
+			readIntent.mockRestore();
+			stalledRead.resolve(null);
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	}, 5_000);
 
 	it("retries a retained startup transition and revalidates the committed successor", async () => {
 		const dir = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-doctor-orphan-lock-"));
