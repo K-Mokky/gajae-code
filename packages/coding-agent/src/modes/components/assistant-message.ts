@@ -56,7 +56,7 @@ function getAssistantMarkdownTheme(): MarkdownTheme {
 					palette,
 					onChange: context.onChange,
 				});
-			figure.update(source, context.closed || !context.streaming, palette);
+			figure.update(source, context.closed || !context.streaming, context.closed, palette);
 			if (figure.retryable) {
 				// A failed preview remains a code block, but must observe layout changes
 				// so a smaller terminal canvas can retry the same source.

@@ -37,7 +37,7 @@ describe("SvgFigure", () => {
 		const rasterized = Promise.withResolvers<void>();
 		const figure = new SvgFigure({ theme, palette, onChange: () => rasterized.resolve() });
 		try {
-			figure.update(SVG, true);
+			figure.update(SVG, true, true);
 			expect(figure.render(80)).toEqual([]);
 			await rasterized.promise;
 			expect(figure.pending).toBe(false);
@@ -73,7 +73,7 @@ describe("SvgFigure", () => {
 		});
 		setTerminalImageProtocol(ImageProtocol.Kitty);
 		try {
-			figure.update(SVG, true);
+			figure.update(SVG, true, true);
 			figure.render(80);
 			await rasterized.promise;
 			expect(figure.render(80).join("")).toContain("\x1b_G");
@@ -98,14 +98,14 @@ describe("SvgFigure", () => {
 		let changed = Promise.withResolvers<void>();
 		const figure = new SvgFigure({ theme, palette, onChange: () => changed.resolve() });
 		try {
-			figure.update(SVG, true);
+			figure.update(SVG, true, true);
 			figure.render(80);
 			await changed.promise;
 			expect(figure.debugState()).toMatchObject({ current: true, raster: "18x18" });
 
 			setTerminalImageProtocol(null);
 			expect(figure.render(80)).toEqual([]);
-			figure.update('<svg width="24" height="7"><rect width="24" height="7" fill="#00f"/></svg>', true);
+			figure.update('<svg width="24" height="7"><rect width="24" height="7" fill="#00f"/></svg>', true, true);
 			expect(figure.render(80)).toEqual([]);
 
 			changed = Promise.withResolvers<void>();
@@ -134,7 +134,7 @@ describe("SvgFigure", () => {
 		let changed = Promise.withResolvers<void>();
 		const figure = new SvgFigure({ theme, palette, onChange: () => changed.resolve() });
 		try {
-			figure.update(WIDE_SVG, true);
+			figure.update(WIDE_SVG, true, true);
 			figure.render(80);
 			await changed.promise;
 			expect(figure.debugState().raster).toBe("684x342");
@@ -167,7 +167,7 @@ describe("SvgFigure", () => {
 		let changed = Promise.withResolvers<void>();
 		const figure = new SvgFigure({ theme, palette, onChange: () => changed.resolve() });
 		try {
-			figure.update(SVG, true);
+			figure.update(SVG, true, true);
 			figure.render(80);
 			await changed.promise;
 			expect(figure.failed).toBe(true);
@@ -201,7 +201,7 @@ describe("SvgFigure", () => {
 			},
 		});
 		try {
-			figure.update("not an SVG document", true);
+			figure.update("not an SVG document", true, true);
 			figure.render(80);
 			await changed.promise;
 			expect(figure.failed).toBe(true);
@@ -227,17 +227,45 @@ describe("SvgFigure", () => {
 		let changed = Promise.withResolvers<void>();
 		const figure = new SvgFigure({ theme, palette, onChange: () => changed.resolve() });
 		try {
-			figure.update(SVG, false);
+			figure.update(SVG, false, false);
 			figure.render(80);
 			await changed.promise;
 			expect(figure.debugState()).toMatchObject({ current: true, raster: "18x18" });
 
 			changed = Promise.withResolvers<void>();
-			figure.update('<svg><image href="data:image/png;base64,invalid"/></svg>', true);
+			figure.update('<svg><image href="data:image/png;base64,invalid"/></svg>', true, true);
 			figure.render(80);
 			await changed.promise;
 			expect(figure.failed).toBe(true);
 			expect(figure.debugState()).toMatchObject({ current: false, raster: null });
+		} finally {
+			figure.dispose();
+			setCellDimensions(previousCellDimensions);
+			setTerminalImageProtocol(previousProtocol);
+		}
+	});
+
+	it("repairs an incomplete XML construct only while its fence is open", async () => {
+		const previousProtocol = TERMINAL.imageProtocol;
+		const previousCellDimensions = getCellDimensions();
+		setTerminalImageProtocol(ImageProtocol.Kitty);
+		setCellDimensions({ widthPx: 9, heightPx: 18 });
+		let changed = Promise.withResolvers<void>();
+		const figure = new SvgFigure({ theme, palette, onChange: () => changed.resolve() });
+		const source = '<svg width="10" height="10"></svg><';
+		try {
+			figure.update(source, true, false, palette);
+			figure.render(80);
+			await changed.promise;
+			expect(figure.debugState()).toMatchObject({ current: true, failed: false });
+
+			changed = Promise.withResolvers<void>();
+			figure.update(source, true, true, palette);
+			figure.render(80);
+			await changed.promise;
+
+			expect(figure.failed).toBe(true);
+			expect(figure.debugState()).toMatchObject({ current: false, failed: true, raster: null });
 		} finally {
 			figure.dispose();
 			setCellDimensions(previousCellDimensions);
@@ -251,13 +279,13 @@ describe("SvgFigure", () => {
 		let changed = Promise.withResolvers<void>();
 		const figure = new SvgFigure({ theme, palette, onChange: () => changed.resolve() });
 		try {
-			figure.update("not an SVG document", true);
+			figure.update("not an SVG document", true, true);
 			figure.render(80);
 			await changed.promise;
 			expect(figure.failed).toBe(true);
 
 			changed = Promise.withResolvers<void>();
-			figure.update(SVG, true);
+			figure.update(SVG, true, true);
 			figure.render(80);
 			await changed.promise;
 			expect(figure.failed).toBe(false);

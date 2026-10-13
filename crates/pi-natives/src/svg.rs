@@ -116,8 +116,8 @@ fn rasterize_svg_sync_with_cells(
 	let scale = (max_width_px as f32 / source.width())
 		.min(max_height_px as f32 / source.height())
 		.min(1.0);
-	let content_width = (source.width() * scale).ceil().max(1.0) as u32;
-	let content_height = (source.height() * scale).ceil().max(1.0) as u32;
+	let content_width = ((source.width() * scale).ceil().max(1.0) as u32).min(max_width_px);
+	let content_height = ((source.height() * scale).ceil().max(1.0) as u32).min(max_height_px);
 	let (width, height) = if let Some((cell_width, cell_height)) = cell_size {
 		let width = content_width
 			.div_ceil(cell_width)
@@ -320,6 +320,15 @@ mod tests {
 		assert_eq!(image.get_pixel(14, 11).0, [255, 0, 0, 255]);
 		assert_eq!(image.get_pixel(1, 5).0, [0, 0, 0, 0]);
 		assert_eq!(image.get_pixel(15, 11).0, [0, 0, 0, 0]);
+	}
+
+	#[test]
+	fn rounds_exact_width_limit_before_cell_padding() {
+		let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="162" height="18"><rect width="162" height="18" fill="red"/></svg>"#;
+		let png = rasterize_svg_sync_with_cells(svg, 90, 18, Some(9), Some(9))
+			.expect("exact-limit SVG should rasterize into a cell-aligned canvas");
+		let image = image::load_from_memory(&png).expect("result should be PNG");
+		assert_eq!((image.width(), image.height()), (90, 18));
 	}
 
 	#[test]

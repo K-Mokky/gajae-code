@@ -551,8 +551,13 @@ export class Markdown implements Component {
 			this.setStreaming(options.streaming);
 		}
 		if (this.#text !== text) this.#rejectedParseKey = undefined;
+		const previousText = this.#text;
 		this.#text = text;
-		this.#mayHaveDynamicSvgFigures = this.#theme.resolveSvgFigure !== undefined && hasSvgFence(text);
+		const svgResolverAvailable = this.#theme.resolveSvgFigure !== undefined;
+		// A positive fence decision remains conservative as source is appended; replacements must be rescanned.
+		const canReusePositiveSvgFenceResult =
+			svgResolverAvailable && this.#mayHaveDynamicSvgFigures && text.startsWith(previousText);
+		this.#mayHaveDynamicSvgFigures = svgResolverAvailable && (canReusePositiveSvgFenceResult || hasSvgFence(text));
 		if (this.#streaming) {
 			return;
 		}

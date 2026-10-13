@@ -60,6 +60,11 @@ describe("closePartialSvg", () => {
 		expect(closePartialSvg("<svg><text>a &amp; b &am")).toBe("<svg><text>a &amp; b </text></svg>");
 		expect(closePartialSvg("<svg><g><rect/></")).toBe("<svg><g><rect/></g></svg>");
 	});
+
+	it("returns null for partial source that exceeds the UTF-8 byte limit", () => {
+		const source = `<svg>${"π".repeat(512 * 1024)}`;
+		expect(closePartialSvg(source)).toBeNull();
+	});
 });
 
 describe("prepareSvg", () => {
@@ -103,6 +108,35 @@ describe("prepareSvg", () => {
 		expect(prepareSvg(svg, palette)).toBe(
 			'<svg font-family="sans-serif" color="#eeeeee" xmlns="http://www.w3.org/2000/svg"><rect stroke="currentColor"/></svg>',
 		);
+	});
+
+	it("discovers Unicode-qualified roots and resolves child presentation attributes", () => {
+		const prepared = prepareSvg(
+			'<π:svg xmlns:π="http://www.w3.org/2000/svg"><π:path fill="var(--gjc-accent)"/></π:svg>',
+			palette,
+		);
+
+		expect(prepared).toContain('<π:svg color="#eeeeee" font-family="sans-serif" xmlns="http://www.w3.org/2000/svg"');
+		expect(prepared).toContain('<π:path fill="#ff8800"/>');
+	});
+
+	it("does not treat uppercase XML attributes as lowercase SVG presentation attributes", () => {
+		const prepared = prepareSvg('<svg COLOR="red"><rect COLOR="var(--gjc-accent)"/></svg>', palette);
+
+		expect(prepared).toContain(
+			'<svg color="#eeeeee" font-family="sans-serif" xmlns="http://www.w3.org/2000/svg" COLOR="red">',
+		);
+		expect(prepared).toContain('<rect COLOR="var(--gjc-accent)"/>');
+	});
+
+	it("resolves root inline color currentColor while preserving other declarations", () => {
+		const prepared = prepareSvg(
+			'<svg style="color: currentColor; fill: var(--gjc-accent)"><rect color="currentColor" fill="currentColor"/></svg>',
+			palette,
+		);
+
+		expect(prepared).toContain('style="color: #eeeeee; fill: #ff8800"');
+		expect(prepared).toContain('<rect color="currentColor" fill="currentColor"/>');
 	});
 
 	it("scans the complete root tag when an attribute value contains a greater-than sign", () => {

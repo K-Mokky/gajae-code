@@ -243,6 +243,30 @@ describe("AssistantMessageComponent SVG markdown", () => {
 			setTerminalImageProtocol(originalProtocol);
 		}
 	});
+
+	it("keeps an incomplete trailing XML construct from a closed SVG fence in code", async () => {
+		const originalProtocol = TERMINAL.imageProtocol;
+		setTerminalImageProtocol(ImageProtocol.Kitty);
+		const failed = Promise.withResolvers<void>();
+		const source = '<svg width="10" height="10"></svg><';
+		const component = new AssistantMessageComponent(
+			createAssistantMessage(`\`\`\`svg\n${source}\n\`\`\``),
+			false,
+			() => failed.resolve(),
+		);
+		try {
+			component.render(100);
+			await failed.promise;
+
+			const rendered = component.render(100).join("\n");
+			expect(Bun.stripANSI(rendered)).toContain("```svg");
+			expect(Bun.stripANSI(rendered)).toContain(source);
+			expect(rendered).not.toContain("\x1b_G");
+		} finally {
+			component.dispose();
+			setTerminalImageProtocol(originalProtocol);
+		}
+	});
 });
 
 describe("AssistantMessageComponent thinking rendering", () => {

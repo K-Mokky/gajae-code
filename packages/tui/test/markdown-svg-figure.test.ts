@@ -145,6 +145,58 @@ describe("Markdown asynchronous SVG figures", () => {
 		markdown.dispose();
 	});
 
+	it("keeps appended SVG messages eligible and disposes figures when a replacement removes the fence", () => {
+		const figures: DeferredFigure[] = [];
+		let resolverCalls = 0;
+		const markdown = new Markdown(
+			"",
+			0,
+			0,
+			figureTheme(figures, () => resolverCalls++),
+		);
+		markdown.setStreaming(true);
+		try {
+			const source = "```svg\n<svg/>\n```";
+			markdown.setText(source, { streaming: true });
+			markdown.render(80);
+			const figure = figures[0];
+			if (!figure) throw new Error("Expected the SVG resolver to create a figure");
+
+			markdown.setText(`${source}\n\nMore prose`, { streaming: true });
+			markdown.render(80);
+			expect(resolverCalls).toBe(2);
+			expect(figure.disposed).toBe(false);
+
+			markdown.setText("```text\nordinary code\n```", { streaming: true });
+			const rendered = Bun.stripANSI(markdown.render(80).join("\n"));
+			expect(rendered).toContain("ordinary code");
+			expect(resolverCalls).toBe(2);
+			expect(figure.disposed).toBe(true);
+		} finally {
+			markdown.dispose();
+		}
+	});
+
+	it("disables the SVG fast path when its resolver becomes unavailable", () => {
+		const figures: DeferredFigure[] = [];
+		const theme = figureTheme(figures);
+		const source = "```svg\n<svg/>\n```";
+		const markdown = new Markdown(source, 0, 0, theme);
+		markdown.setStreaming(true);
+		try {
+			markdown.render(80);
+			const figure = figures[0];
+			if (!figure) throw new Error("Expected the SVG resolver to create a figure");
+
+			theme.resolveSvgFigure = undefined;
+			markdown.setText(source, { streaming: true });
+			markdown.render(80);
+			expect(figure.disposed).toBe(true);
+		} finally {
+			markdown.dispose();
+		}
+	});
+
 	it("rerenders pending figures after completion and keeps them out of both render caches", () => {
 		const source = "Intro\n\n~~~ SVG title\n<SVG/>\n~~~\n\nOutro";
 		const figures: DeferredFigure[] = [];

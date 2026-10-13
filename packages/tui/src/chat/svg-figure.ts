@@ -51,6 +51,7 @@ interface Attempt {
 	cell: CellDimensions;
 	limits: Limits;
 	final: boolean;
+	closed: boolean;
 }
 
 interface Layout {
@@ -85,6 +86,8 @@ export class SvgFigure implements Component {
 	#source = "";
 	/** No more text arrives for this fence: no throttling, and a failed raster falls back to code. */
 	#final = false;
+	/** Whether the fence had its closing marker; only open fences are repaired. */
+	#closed = false;
 	#raster: Raster | undefined;
 	#attempt: Attempt | undefined;
 	/** Final source that could not be drawn; rendered as plaintext. */
@@ -108,17 +111,19 @@ export class SvgFigure implements Component {
 		this.#palette = options.palette;
 	}
 
-	/** Feed the fence body; `final` once the fence closed or the message stopped streaming. */
-	update(source: string, final: boolean, palette = this.#palette): void {
+	/** Feed the fence body; `final` stops streaming, while `closed` records its closing marker. */
+	update(source: string, final: boolean, closed: boolean, palette = this.#palette): void {
 		const sourceChanged = source !== this.#source;
 		const paletteChanged = palette !== this.#palette;
-		if (!sourceChanged && !paletteChanged && final === this.#final) return;
-		if (sourceChanged || paletteChanged) {
+		const closedChanged = closed !== this.#closed;
+		if (!sourceChanged && !paletteChanged && final === this.#final && !closedChanged) return;
+		if (sourceChanged || paletteChanged || closedChanged) {
 			this.#failed = undefined;
 			this.#failedLayoutDependent = false;
 		}
 		this.#source = source;
 		this.#final = final;
+		this.#closed = closed;
 		this.#palette = palette;
 		// Deferred: a block built mid-stream is marked streaming right after it
 		// is mounted, when render() was called already (e.g. by diffing); a
@@ -220,6 +225,7 @@ export class SvgFigure implements Component {
 			attempt === undefined ||
 			attempt.source !== this.#source ||
 			attempt.palette !== this.#palette ||
+			attempt.closed !== this.#closed ||
 			attempt.cell.widthPx !== cell.widthPx ||
 			attempt.cell.heightPx !== cell.heightPx ||
 			// A streaming attempt that failed is retried once as final.
@@ -273,9 +279,10 @@ export class SvgFigure implements Component {
 			cell,
 			limits: limitsFor(width, cell),
 			final: this.#final,
+			closed: this.#closed,
 		};
 		this.#attempt = attempt;
-		const svg = closePartialSvg(attempt.source);
+		const svg = attempt.closed ? attempt.source : closePartialSvg(attempt.source);
 		let png: Uint8Array | undefined;
 		let layoutDependentFailure = false;
 		if (svg !== null) {
@@ -308,7 +315,12 @@ export class SvgFigure implements Component {
 		const size = data ? getImageDimensions(data, "image/png") : null;
 		if (data && size) {
 			this.#show(attempt, data, size.widthPx, size.heightPx);
-		} else if (attempt.final && attempt.source === this.#source && attempt.palette === this.#palette) {
+		} else if (
+			attempt.final &&
+			attempt.source === this.#source &&
+			attempt.palette === this.#palette &&
+			attempt.closed === this.#closed
+		) {
 			this.#failed = attempt.source;
 			this.#failedLayoutDependent = layoutDependentFailure;
 			// Clear the raster and image on terminal failure to keep preview only while a replacement is in flight.

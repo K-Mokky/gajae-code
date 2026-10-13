@@ -124,6 +124,8 @@ function closesFence(line: string, marker: string): boolean {
  * `<svg …>` start tag is complete — before that there is nothing to draw.
  */
 export function closePartialSvg(source: string): string | null {
+	if (source.length > MAX_SVG_SOURCE_BYTES) return null;
+	if (Buffer.byteLength(source, "utf8") > MAX_SVG_SOURCE_BYTES) return null;
 	const open: string[] = [];
 	let rootSeen = false;
 	let end = 0;
@@ -286,7 +288,7 @@ function rejectEmbeddedRasterImages(svg: string): void {
 
 /** Bound work performed synchronously while preparing assistant-controlled SVG. */
 function validateSvgSource(svg: string): void {
-	if (Buffer.byteLength(svg, "utf8") > MAX_SVG_SOURCE_BYTES) {
+	if (svg.length > MAX_SVG_SOURCE_BYTES || Buffer.byteLength(svg, "utf8") > MAX_SVG_SOURCE_BYTES) {
 		throw new Error(`SVG source exceeds the ${MAX_SVG_SOURCE_BYTES}-byte limit`);
 	}
 
@@ -360,24 +362,148 @@ export function prepareSvg(svg: string, palette: Readonly<Record<string, string>
 	const root = findRootSvgTag(resolved);
 	if (!root) return resolved;
 	let added = "";
-	let rootTag = root.tag;
-	let rootColor: { value: string; start: number; end: number } | undefined;
+	const replacements: Array<{ start: number; end: number; value: string }> = [];
+	let rootColor = false;
 	forEachSvgAttribute(root.tag, (name, value, start, end) => {
-		if (name === "color") rootColor = { value, start, end };
+		if (name === "color") {
+			rootColor = true;
+			if (value.trim().toLowerCase() === "currentcolor") replacements.push({ start, end, value: fg });
+		} else if (name === "style") {
+			const style = resolveRootStyleColor(value, fg);
+			if (style !== value) replacements.push({ start, end, value: style });
+		}
 	});
 	if (!rootColor) {
 		added += ` color="${fg}"`;
-	} else if (rootColor.value.trim().toLowerCase() === "currentcolor") {
-		rootTag = `${root.tag.slice(0, rootColor.start)}${fg}${root.tag.slice(rootColor.end)}`;
 	}
 	if (!hasSvgAttribute(root.tag, "font-family")) added += ` font-family="sans-serif"`;
 	if (!hasSvgAttribute(root.tag, "xmlns")) added += ` xmlns="http://www.w3.org/2000/svg"`;
 	if (usesXlink && !hasSvgAttribute(root.tag, "xmlns:xlink")) {
 		added += ` xmlns:xlink="http://www.w3.org/1999/xlink"`;
 	}
+	let rootTag = root.tag;
+	for (const replacement of replacements.sort((left, right) => right.start - left.start)) {
+		rootTag = `${rootTag.slice(0, replacement.start)}${replacement.value}${rootTag.slice(replacement.end)}`;
+	}
 	if (!added && rootTag === root.tag) return resolved;
 	const tag = rootTag.replace(/^<[^\s/>]+/, `$&${added}`);
 	return `${resolved.slice(0, root.start)}${tag}${resolved.slice(root.end)}`;
+}
+
+/** Resolve only root inline `color: currentColor`; descendants retain inherited CSS semantics. */
+function resolveRootStyleColor(style: string, fg: string): string {
+	const replacements: Array<{ start: number; end: number }> = [];
+	let declarationStart = 0;
+	let quote: string | undefined;
+	let depth = 0;
+	for (let index = 0; index <= style.length; index++) {
+		if (index === style.length || (style[index] === ";" && quote === undefined && depth === 0)) {
+			const declaration = style.slice(declarationStart, index);
+			const colon = findCssDeclarationColon(declaration);
+			const property =
+				colon < 0
+					? ""
+					: declaration
+							.slice(0, colon)
+							.replace(/\/\*[\s\S]*?\*\//g, "")
+							.trim()
+							.toLowerCase();
+			if (property === "color") {
+				const value = declaration.slice(colon + 1);
+				const token = rootCurrentColorToken(value);
+				if (token) {
+					replacements.push({
+						start: declarationStart + colon + 1 + token.start,
+						end: declarationStart + colon + 1 + token.end,
+					});
+				}
+			}
+			declarationStart = index + 1;
+			continue;
+		}
+		if (style.startsWith("/*", index) && quote === undefined) {
+			const commentEnd = style.indexOf("*/", index + 2);
+			if (commentEnd < 0) break;
+			index = commentEnd + 1;
+			continue;
+		}
+		const char = style[index];
+		if (quote !== undefined) {
+			if (char === "\\") index++;
+			else if (char === quote) quote = undefined;
+		} else if (char === '"' || char === "'") {
+			quote = char;
+		} else if (char === "(") {
+			depth++;
+		} else if (char === ")") {
+			depth = Math.max(0, depth - 1);
+		}
+	}
+	if (replacements.length === 0) return style;
+	let output = "";
+	let cursor = 0;
+	for (const replacement of replacements) {
+		output += style.slice(cursor, replacement.start) + fg;
+		cursor = replacement.end;
+	}
+	return output + style.slice(cursor);
+}
+
+/** Locate a declaration's property/value separator outside strings and comments. */
+function findCssDeclarationColon(declaration: string): number {
+	let quote: string | undefined;
+	let depth = 0;
+	for (let index = 0; index < declaration.length; index++) {
+		if (declaration.startsWith("/*", index) && quote === undefined) {
+			const commentEnd = declaration.indexOf("*/", index + 2);
+			if (commentEnd < 0) return -1;
+			index = commentEnd + 1;
+			continue;
+		}
+		const char = declaration[index];
+		if (quote !== undefined) {
+			if (char === "\\") index++;
+			else if (char === quote) quote = undefined;
+		} else if (char === '"' || char === "'") {
+			quote = char;
+		} else if (char === "(") {
+			depth++;
+		} else if (char === ")") {
+			depth = Math.max(0, depth - 1);
+		} else if (char === ":" && depth === 0) {
+			return index;
+		}
+	}
+	return -1;
+}
+
+/** Return the exact currentColor token only when it is the whole color value. */
+function rootCurrentColorToken(value: string): { start: number; end: number } | undefined {
+	const skipTrivia = (from: number): number => {
+		let index = from;
+		while (index < value.length) {
+			if (/\s/.test(value[index] ?? "")) {
+				index++;
+			} else if (value.startsWith("/*", index)) {
+				const commentEnd = value.indexOf("*/", index + 2);
+				if (commentEnd < 0) return value.length;
+				index = commentEnd + 2;
+			} else {
+				break;
+			}
+		}
+		return index;
+	};
+	const start = skipTrivia(0);
+	const end = start + "currentcolor".length;
+	if (value.slice(start, end).toLowerCase() !== "currentcolor") return undefined;
+	let remaining = skipTrivia(end);
+	if (value[remaining] === "!") {
+		remaining = skipTrivia(remaining + 1);
+		if (value.slice(remaining, remaining + "important".length).toLowerCase() !== "important") return undefined;
+		remaining = skipTrivia(remaining + "important".length);
+	}
+	return remaining === value.length ? { start, end } : undefined;
 }
 
 /** Resolve CSS variables only in stylesheet text and CSS-bearing XML attributes. */
@@ -391,8 +517,8 @@ function resolveSvgCssVariables(source: string, palette: Readonly<Record<string,
 		const end = constructEnd(source, start);
 		if (end < 0) return output + source.slice(start);
 		const tag = source.slice(start, end);
-		const styleTagName = /^<((?:[\w.-]+:)?style)(?=[\s/>])/i.exec(tag)?.[1];
-		if (styleTagName && !isSelfClosingSvgTag(tag)) {
+		const styleTagName = svgElementName(tag);
+		if (styleTagName?.split(":").at(-1)?.toLowerCase() === "style" && !isSelfClosingSvgTag(tag)) {
 			output += resolveCssAttributes(tag, palette, fg);
 			const closingTag = findStyleClosingTag(source, end, styleTagName);
 			if (closingTag < 0) return output + resolveCssValue(source.slice(end), palette, fg);
@@ -450,7 +576,7 @@ type SvgAttributeVisitor = (name: string, value: string, valueStart: number, val
 
 /** Visit quoted attributes in a complete XML start tag with source offsets. */
 function forEachSvgAttribute(tag: string, visit: SvgAttributeVisitor): void {
-	if (!/^<[A-Za-z_]/.test(tag)) return;
+	if (!svgElementName(tag)) return;
 	let index = 1;
 	while (index < tag.length && !/[\s/>]/.test(tag[index] ?? "")) index++;
 	while (index < tag.length) {
@@ -458,7 +584,7 @@ function forEachSvgAttribute(tag: string, visit: SvgAttributeVisitor): void {
 		if (tag[index] === "/" || tag[index] === ">") return;
 		const nameStart = index;
 		while (index < tag.length && !/[\s=/>]/.test(tag[index] ?? "")) index++;
-		const name = tag.slice(nameStart, index).toLowerCase();
+		const name = tag.slice(nameStart, index);
 		while (/\s/.test(tag[index] ?? "")) index++;
 		if (tag[index] !== "=") continue;
 		index++;
@@ -632,17 +758,22 @@ function findRootSvgTag(source: string): { start: number; end: number; tag: stri
 		const end = constructEnd(source, start);
 		if (end < 0) return undefined;
 		const tag = source.slice(start, end);
-		if (/^<(?:[\w.-]+:)?svg(?=[\s/>])/.test(tag)) return { start, end, tag };
+		if (svgElementName(tag)?.split(":").at(-1) === "svg") return { start, end, tag };
 		start = source.indexOf("<", end);
 	}
 	return undefined;
 }
 
+/** The qualified name of an XML start tag, without ASCII-only name restrictions. */
+function svgElementName(tag: string): string | undefined {
+	return /^<([^!?/\s>]+)(?=[\s/>])/.exec(tag)?.[1];
+}
+
 /** Whether the quote-aware root tag declares `attribute` outside another value. */
 function hasSvgAttribute(tag: string, attribute: string): boolean {
-	const name = /^<(?:[\w.-]+:)?svg(?=[\s/>])/.exec(tag)?.[0];
-	if (!name) return false;
-	let index = name.length;
+	const elementName = svgElementName(tag);
+	if (elementName?.split(":").at(-1) !== "svg") return false;
+	let index = elementName.length + 1;
 	while (index < tag.length) {
 		while (/\s/.test(tag[index] ?? "")) index++;
 		if (tag[index] === "/" || tag[index] === ">") return false;
