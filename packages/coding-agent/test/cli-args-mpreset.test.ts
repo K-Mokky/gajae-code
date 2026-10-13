@@ -46,7 +46,7 @@ function fakeRegistry(
 		getError: () => undefined,
 		getApiKeyForProvider: async () => "key",
 		getAll: () => activeModels,
-		getAvailableForProfileActivation: () =>
+		getAvailable: () =>
 			options.excludeModelsFromProfileActivationUntilRefresh && !modelsRefreshed ? [] : activeModels,
 		async refresh(strategy = "online-if-uncached", credentialSessionId?: string) {
 			registry.refreshCalls.push(strategy);
@@ -1236,7 +1236,7 @@ test("interactive retry skips later profile preparation after a newer selection"
 	const models = [model("default-provider", "default"), model("explicit-provider", "default")];
 	const base = fakeRegistry([defaultProfile, explicitProfile]);
 	base.getAll = () => models;
-	base.getAvailableForProfileActivation = () => models;
+	base.getAvailable = () => models;
 	let credentialAvailable = false;
 	let retryProbeStarted = false;
 	let explicitProviderRequests = 0;
@@ -1308,7 +1308,7 @@ test("serializes replacement profile preparation after stale recovery rollback",
 	];
 	const registry = fakeRegistry([startupProfile, replacementProfile]);
 	registry.getAll = () => models;
-	registry.getAvailableForProfileActivation = () => models;
+	registry.getAvailable = () => models;
 	const settings = Settings.isolated();
 	const flushStarted = Promise.withResolvers<void>();
 	const allowFlush = Promise.withResolvers<void>();
@@ -1568,7 +1568,11 @@ test("registry errors are not mistaken for a stale default", async () => {
 			applyStartupModelProfilesForRoot({
 				session: fakeSession(),
 				settings: Settings.isolated({ "modelProfile.default": "deleted-profile" }),
-				modelRegistry: { ...fakeRegistry([]), getError: () => new Error("invalid models.yml") } as never,
+				modelRegistry: {
+					...fakeRegistry([]),
+					getError: () => new Error("invalid models.yml"),
+					withConsumerLease: async <T>(body: () => T | Promise<T>): Promise<T> => await body(),
+				} as never,
 				parsedArgs: {},
 				isInteractive: true,
 				hasInteractiveTerminal: true,

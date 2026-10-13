@@ -258,4 +258,31 @@ describe("model cache migrations", () => {
 		tempDir = "";
 		dbPath = "";
 	});
+
+	it("finalizes cached read statements before releasing the database file", async () => {
+		writeModelCache("ollama-cloud", Date.now(), [createModel("cached", "Cached")], true, "static", dbPath);
+		expect(readModelCache("ollama-cloud", TTL_MS, Date.now, dbPath)).not.toBeNull();
+		expect(closeModelCache(dbPath)).toBe(true);
+		await fs.rm(tempDir, { recursive: true, force: true });
+		tempDir = "";
+		dbPath = "";
+	});
+
+	it("fully releases a database it switches away from", async () => {
+		const otherPath = path.join(tempDir, "other-models.db");
+		readModelCache("ollama-cloud", TTL_MS, Date.now, dbPath);
+		readModelCache("ollama-cloud", TTL_MS, Date.now, otherPath);
+		try {
+			// Leaving WAL mode needs exclusive access; a zombie connection to dbPath keeps it locked
+			// (and keeps the files open, which blocks temp-dir removal on Windows).
+			const probe = new Database(dbPath);
+			try {
+				expect(probe.query("PRAGMA journal_mode=DELETE").get()).toEqual({ journal_mode: "delete" });
+			} finally {
+				probe.close();
+			}
+		} finally {
+			closeModelCache(otherPath);
+		}
+	});
 });

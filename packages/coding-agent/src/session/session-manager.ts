@@ -2660,8 +2660,10 @@ export function createReadonlySessionManager(manager: SessionManager): ReadonlyS
 }
 
 /** Internal artifact-writing capability. Read-only facades expose it only through a private weak-map lookup. */
+export type SessionArtifactPublication = (content: string, toolType: string) => Promise<string | undefined>;
+
 export type SessionArtifactCapability = Readonly<
-	Pick<SessionManager, "allocateArtifactPath" | "saveArtifact" | "putBlob">
+	Pick<SessionManager, "allocateArtifactPath" | "saveArtifact" | "putBlob" | "captureArtifactPublication">
 >;
 
 const sessionArtifactCapabilities = new WeakMap<SessionManager, SessionArtifactCapability>();
@@ -2679,6 +2681,7 @@ export function sessionArtifactCapability(value: unknown): SessionArtifactCapabi
 				allocateArtifactPath: value.allocateArtifactPath.bind(value),
 				saveArtifact: value.saveArtifact.bind(value),
 				putBlob: value.putBlob.bind(value),
+				captureArtifactPublication: value.captureArtifactPublication.bind(value),
 			});
 			sessionArtifactCapabilities.set(value, capability);
 		}
@@ -17271,6 +17274,18 @@ export class SessionManager {
 		if (observedPersistError && outcome.kind === "closed") {
 			return { kind: "close_unknown", error: observedPersistError };
 		}
+		// Always release managed sidecar cache to prevent file handle leaks on Windows (#6566).
+		// This must happen even if the close is retryable, because the sidecar cache holds
+		// directory handles that prevent temp directory deletion during test cleanup.
+		if (!observedPersistError && !this.#persistWriter && outcome.kind === "closed") {
+			try {
+				this.#releaseManagedSidecarCache();
+			} catch (error) {
+				logger.warn("Failed to release managed sidecar cache during closeStrict", {
+					error: String(error),
+				});
+			}
+		}
 		return outcome;
 	}
 
@@ -17938,6 +17953,28 @@ export class SessionManager {
 		if (store) store.publishNoReplaceSync(filename, Buffer.from(published, "utf8"));
 		else publishManagedFileNoReplaceSync(path.join(manager.dir, filename), Buffer.from(published, "utf8"));
 		return id;
+	}
+
+	/** Capture artifact publication authority for one session lifecycle. */
+	captureArtifactPublication(): SessionArtifactPublication {
+		this.#assertArtifactOpen();
+		const lifecycle = this.#syncArtifactLifecycle();
+		const sessionId = this.#sessionId;
+		const sessionFile = this.#sessionFile;
+		const manager = this.#getOrCreateArtifactManager() ?? this.#ephemeralArtifactManager;
+		if (manager) this.#assertArtifactContinuation(lifecycle, sessionId, sessionFile, manager);
+
+		return async (content, toolType) => {
+			this.#assertArtifactOpen();
+			if (
+				lifecycle !== this.#syncArtifactLifecycle() ||
+				sessionId !== this.#sessionId ||
+				sessionFile !== this.#sessionFile
+			)
+				throw new Error("Session artifact continuation is no longer authorized.");
+			if (manager) this.#assertArtifactContinuation(lifecycle, sessionId, sessionFile, manager);
+			return this.saveArtifact(content, toolType);
+		};
 	}
 
 	async #validatedEvictedToolOutputHandle(

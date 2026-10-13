@@ -77,14 +77,14 @@ function getDb(dbPath?: string): Database {
 export function closeModelCache(dbPath?: string): boolean {
 	const resolvedPath = dbPath ?? getModelDbPath();
 	if (!sharedDb || sharedDbPath !== resolvedPath) return false;
-	sharedDb.close();
+	sharedDb.close(true);
 	sharedDb = null;
 	sharedDbPath = null;
 	return true;
 }
 
 function migrateCacheSchema(db: Database): void {
-	const columns = db.prepare("PRAGMA table_info(model_cache)").all() as TableInfoRow[];
+	const columns = db.query("PRAGMA table_info(model_cache)").all() as TableInfoRow[];
 	if (!columns.some(column => column.name === "static_fingerprint")) {
 		db.run("ALTER TABLE model_cache ADD COLUMN static_fingerprint TEXT NOT NULL DEFAULT ''");
 	}

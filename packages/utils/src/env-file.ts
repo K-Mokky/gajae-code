@@ -142,13 +142,10 @@ export function parseEnvFileContent(content: string): Record<string, string> {
 		if (!isValidEnvName(key)) continue;
 
 		// Strip an unquoted trailing `# comment` the way Bun's dotenv loader
-		// does (`KEY=v#note` loads as `v`); quoted `#` survives.
+		// does (`KEY=v#note` loads as `v`); quoted `#` survives. A quoted value
+		// then ends at the first unescaped closer; Bun drops the suffix.
 		let value = stripInlineDotenvComment(match[2] ?? "").trim();
-
-		// Remove surrounding quotes (" or ')
-		if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
-			value = value.slice(1, -1);
-		}
+		value = dotenvQuotedLiteral(value);
 		if (!isSafeEnvValue(value)) continue;
 
 		result[key] = value;
@@ -161,9 +158,9 @@ export function parseEnvFileContent(content: string): Record<string, string> {
  * What the caller's checkout declares through its dotenv files.
  *
  * `values` is the merged declaration set, later layers winning. `dynamic` holds
- * the keys whose surviving declaration is one Bun expands at load time, which
- * every provenance guard refuses outright because a value comparison cannot see
- * what such a declaration became.
+ * the keys whose surviving declaration is one Bun expands at load time, or whose
+ * raw text is quoted in a way this line parser does not decode. Provenance
+ * refuses those keys instead of comparing a value Bun may have loaded differently.
  */
 export interface ProjectEnvSnapshot {
 	values: Record<string, string>;
@@ -179,6 +176,75 @@ export interface ProjectEnvSnapshot {
  */
 export function canonicalEnvKey(name: string): string {
 	return process.platform === "win32" ? name.toUpperCase() : name;
+}
+
+/**
+ * Keys whose last declaration is not safe to value-compare.
+ *
+ * The line parser drops the suffix after the first unescaped closing quote,
+ * matching Bun, and strips an unquoted `#` comment. Classification refuses a
+ * value that parser would not store the way Bun loaded it. Other backslashes
+ * stay in the compared text. The bytes inside the quotes are not decoded.
+ */
+function quotedDeclarationKeys(content: string): Set<string> {
+	const quoted = new Set<string>();
+	for (const line of content.split("\n")) {
+		const trimmed = line.trim();
+		if (!trimmed || trimmed.startsWith("#")) continue;
+		// `.` stops at a carriage return, which is why the line parser drops the key.
+		const match = /^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*(?:=|:)\s*([\s\S]*)$/.exec(trimmed);
+		const key = match?.[1];
+		if (!key || !isValidEnvName(key)) continue;
+		const canonical = canonicalEnvKey(key);
+		const comparable = stripInlineDotenvComment(match[2] ?? "");
+		if (rawValueDisagreesWithLineParser(comparable)) quoted.add(canonical);
+		else quoted.delete(canonical);
+	}
+	return quoted;
+}
+
+/** Index of the first unescaped closer, or -1. A backslash skips the next character. */
+function indexOfUnescapedCloser(value: string, opener: '"' | "'"): number {
+	for (let i = 1; i < value.length; i++) {
+		if (value[i] === "\\") {
+			i++;
+			continue;
+		}
+		if (value[i] === opener) return i;
+	}
+	return -1;
+}
+
+/**
+ * Bun ends a quoted dotenv value at the first unescaped closer and drops the
+ * suffix (`KEY="v" ignored` loads as `v`). Bytes inside the quotes are not decoded.
+ * An unclosed value keeps the previous surrounding-pair cut.
+ */
+function dotenvQuotedLiteral(value: string): string {
+	const opener = value[0];
+	if (opener !== '"' && opener !== "'") return value;
+	const closed = indexOfUnescapedCloser(value, opener);
+	if (closed !== -1) return value.slice(1, closed);
+	if (value.endsWith(opener)) return value.slice(1, -1);
+	return value;
+}
+
+function rawValueDisagreesWithLineParser(raw: string): boolean {
+	const trimmed = raw.trim();
+	const opener = trimmed[0];
+	if (opener === '"' || opener === "'") {
+		const closed = indexOfUnescapedCloser(trimmed, opener);
+		if (closed !== -1) {
+			const inner = trimmed.slice(1, closed);
+			if (inner.includes(opener) || inner.includes("`") || inner.includes("\r") || inner.includes("\n")) return true;
+			// Bun turns only `\n` and `\r` into controls inside double quotes.
+			if (opener === '"' && /\\[nr]/.test(inner)) return true;
+			// Provenance trims the snapshot and compares it with Bun's untrimmed runtime value.
+			if (inner !== inner.trim()) return true;
+			return false;
+		}
+	}
+	return /["'`\r]/.test(trimmed);
 }
 
 /**
@@ -209,11 +275,30 @@ export function projectEnvSnapshot(cwd = process.cwd()): ProjectEnvSnapshot {
 	const values: Record<string, string> = {};
 	const dynamic = new Set<string>();
 	for (const file of files) {
-		for (const [rawKey, value] of Object.entries(parseEnvFile(path.join(cwd, file)))) {
+		const filePath = path.join(cwd, file);
+		let content: string;
+		try {
+			content = fs.readFileSync(filePath, "utf-8");
+		} catch {
+			continue;
+		}
+		const quoted = quotedDeclarationKeys(content);
+		const seen = new Set<string>();
+		for (const [rawKey, value] of Object.entries(parseEnvFileContent(content))) {
 			const key = canonicalEnvKey(rawKey);
+			seen.add(key);
 			values[key] = value;
-			if (/[$`]/.test(value)) dynamic.add(key);
+			// A quoted declaration Bun may decode differently is refused, same as `$`.
+			// Unquoted values, and one plain pair of quotes, still compare by text.
+			if (quoted.has(key) || /[$`]/.test(value)) dynamic.add(key);
 			else dynamic.delete(key);
+		}
+		// The line parser drops a key when `.` cannot cross a carriage return.
+		// Keep that key in the snapshot so the value Bun loaded is not an override.
+		for (const key of quoted) {
+			if (seen.has(key)) continue;
+			values[key] = "";
+			dynamic.add(key);
 		}
 	}
 	return { values, dynamic };

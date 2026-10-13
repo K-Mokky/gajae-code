@@ -407,7 +407,7 @@ export const TOOL_CATALOG: Readonly<Record<string, ToolCatalogEntry>> = {
 	"debug": {
 		"name": "debug",
 		"label": "Debug",
-		"description": "Provides debugger access through the Debug Adapter Protocol (DAP).\nUse for launching or attaching debuggers, setting breakpoints, stepping through execution, inspecting threads/stack/variables, evaluating expressions, capturing output, and interrupting hung programs.\n\n<instruction>\n- Prefer over bash for program state, breakpoints, stepping, thread inspection, or interrupting a running process.\n- `action: \"launch\"` starts a session; `program` is required, `adapter` optional (auto-selected from target path and workspace).\n  For Python, set `adapter: \"debugpy\"` and `program` to the target `.py` file; put interpreter/script flags in `args`.\n- `action: \"attach\"` connects to an existing process: `pid` for local attach, `port` for remote attach (where the adapter supports it), `adapter` to force a specific debugger.\n- **Breakpoints**: `set_breakpoint`/`remove_breakpoint` with source (`file`+`line`) or function (`function`); optional `condition` for conditional breakpoints.\n- **Flow control**: `continue` (resumes; briefly waits to observe whether the program stops or keeps running), `step_over`/`step_in`/`step_out` (single-step), `pause` (interrupt a running program so you can inspect state).\n- **Inspect**: `threads` (list), `stack_trace` (frames for current stopped thread), `scopes` (needs `frame_id` or a current stopped frame), `variables` (needs `variable_ref` or `scope_id`), `evaluate` (needs `expression`; `context: \"repl\"` for raw debugger commands when the adapter supports them), `output` (captured stdout/stderr/console), `sessions` (tracked debug sessions), `terminate`.\n- Timeouts apply per-request, not to the full session lifetime.\n</instruction>\n\n<caution>\n- Only one active debug session is supported at a time.\n- Some adapters require a launched session to receive `configurationDone` before the target actually runs; if the tool says configuration is pending, set breakpoints and then call `continue`.\n- Adapter availability depends on local binaries. Common built-ins: `gdb`, `lldb-dap`, `python -m debugpy.adapter`, `dlv dap`.\n- `program` must be an executable file or debug target, not a directory or interpreter name that resolves to a workspace directory.\n</caution>\n\n<examples>\n# Launch and inspect hang\n1. `debug(action: \"launch\", program: \"./my_app\")`\n2. `debug(action: \"set_breakpoint\", file: \"src/main.c\", line: 42)`\n3. `debug(action: \"continue\")`\n4. If the program appears hung: `debug(action: \"pause\")`\n5. Inspect state with `threads`, `stack_trace`, `scopes`, and `variables`\n# Launch a Python script with debugpy\n`debug(action: \"launch\", adapter: \"debugpy\", program: \"scripts/job.py\", args: [\"--flag\"])`\n# Raw debugger command through repl\n`debug(action: \"evaluate\", expression: \"info registers\", context: \"repl\")`\n</examples>",
+		"description": "Provides debugger access through the Debug Adapter Protocol (DAP).\nUse for launching or attaching debuggers, setting breakpoints, stepping through execution, inspecting threads/stack/variables, evaluating expressions, capturing output, and interrupting hung programs.\n\n<instruction>\n- Prefer over bash for program state, breakpoints, stepping, thread inspection, or interrupting a running process.\n- `action: \"launch\"` starts a session; `program` is required, `adapter` optional (auto-selected from target path and workspace).\n  For Python, set `adapter: \"debugpy\"` and `program` to the target `.py` file; put interpreter/script flags in `args`.\n- `action: \"attach\"` connects to an existing process: `pid` for local attach, `port` for remote attach (where the adapter supports it), `adapter` to force a specific debugger.\n- **Breakpoints**: `set_breakpoint`/`remove_breakpoint` with source (`file`+`line`) or function (`function`); optional `condition` for conditional breakpoints.\n- **Flow control**: `continue` (resumes; briefly waits to observe whether the program stops or keeps running), `step_over`/`step_in`/`step_out` (single-step), `pause` (interrupt a running program so you can inspect state).\n- **Inspect**: `threads` (list), `stack_trace` (frames for current stopped thread), `scopes` (needs `frame_id` or a current stopped frame), `variables` (needs `variable_ref` or `scope_id`), `evaluate` (needs `expression`; `context: \"repl\"` for raw debugger commands when the adapter supports them), `output` (captured stdout/stderr/console), `sessions` (tracked debug sessions), `terminate`.\n- Timeouts apply per-request, not to the full session lifetime.\n</instruction>\n\n<caution>\n- Only one active debug session is supported at a time.\n- Some adapters require a launched session to receive `configurationDone` before the target actually runs; if the tool says configuration is pending, set breakpoints and then call `continue`.\n- Adapter availability depends on local binaries. Common built-ins: `gdb`, `lldb-dap`, `python -I -m debugpy.adapter`, `dlv dap`.\n- `program` must be an executable file or debug target, not a directory or interpreter name that resolves to a workspace directory.\n</caution>\n\n<examples>\n# Launch and inspect hang\n1. `debug(action: \"launch\", program: \"./my_app\")`\n2. `debug(action: \"set_breakpoint\", file: \"src/main.c\", line: 42)`\n3. `debug(action: \"continue\")`\n4. If the program appears hung: `debug(action: \"pause\")`\n5. Inspect state with `threads`, `stack_trace`, `scopes`, and `variables`\n# Launch a Python script with debugpy\n`debug(action: \"launch\", adapter: \"debugpy\", program: \"scripts/job.py\", args: [\"--flag\"])`\n# Raw debugger command through repl\n`debug(action: \"evaluate\", expression: \"info registers\", context: \"repl\")`\n</examples>",
 		"parameters": {
 			"type": "object",
 			"properties": {
@@ -2953,6 +2953,34 @@ export const TOOL_CATALOG: Readonly<Record<string, ToolCatalogEntry>> = {
 		"loadMode": "essential",
 		"nonAbortable": true,
 		"concurrency": "exclusive",
+		"intent": "omit"
+	},
+	"report_issue": {
+		"name": "report_issue",
+		"label": "Report Issue",
+		"description": "Records a tool that behaved inconsistently with its own description, for local quality tracking.\n\n<instruction>\n- Call this when a tool's output contradicts what its description or parameters promise: ignored or misapplied parameters, wrong or truncated results, misleading errors, silent no-ops.\n- `tool` is the misbehaving tool's name; `report` states what you called, what you expected, and what actually happened, in one or two sentences.\n- Do not report your own mistakes, user-caused failures, or expected errors (missing files, failing tests, network outages).\n- Do not paste secrets, tokens, credentials, or raw tool output into report; summarize it instead.\n- False positives are acceptable. Report once per distinct problem, then continue the task; this never fixes or retries anything.\n</instruction>\n\n<output>\nConfirms whether the report was recorded. Reports stay on this machine.\n</output>",
+		"parameters": {
+			"type": "object",
+			"properties": {
+				"tool": {
+					"type": "string",
+					"description": "name of the tool that misbehaved"
+				},
+				"report": {
+					"type": "string",
+					"description": "what was called, what was expected, what happened"
+				}
+			},
+			"required": [
+				"tool",
+				"report"
+			],
+			"additionalProperties": false
+		},
+		"strict": true,
+		"deferrable": false,
+		"loadMode": "essential",
+		"summary": "Record a tool that behaved inconsistently with its description",
 		"intent": "omit"
 	},
 	"yield": {

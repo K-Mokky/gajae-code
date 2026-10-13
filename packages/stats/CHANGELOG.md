@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [0.18.11] - 2026-10-12
+
+## [0.18.10] - 2026-10-12
+
+## [0.18.9] - 2026-10-11
+
+## [0.18.8] - 2026-10-08
+
+### Fixed
+
+- By-model stats charts keep a model label of `__proto__` in its own bucket instead of writing the shared object prototype.
+
 ## [0.18.7] - 2026-10-04
 
 ## [0.18.6] - 2026-10-03

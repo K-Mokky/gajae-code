@@ -298,6 +298,92 @@ describe("default launch worktrees", () => {
 		expect(() => prepareLaunchWorktree(repo, ["--worktree"])).toThrow(/worktree_dirty:/);
 	});
 
+	it("refuses to discard committed work when a clean detached launch worktree is reused", async () => {
+		const repo = await createRepo("gjc-launch-diverged-worktree-");
+		const first = prepareLaunchWorktree(repo, ["--worktree"]);
+		expect(first.worktree.enabled && first.worktree.created).toBe(true);
+
+		await Bun.write(path.join(first.cwd, "user-work.txt"), "important\n");
+		run("git", ["add", "user-work.txt"], first.cwd);
+		run("git", ["commit", "-m", "user work"], first.cwd);
+		const userCommit = run("git", ["rev-parse", "HEAD"], first.cwd);
+		expect(run("git", ["status", "--porcelain"], first.cwd)).toBe("");
+
+		await Bun.write(path.join(repo, "next.txt"), "next\n");
+		run("git", ["add", "next.txt"], repo);
+		run("git", ["commit", "-m", "next"], repo);
+
+		let message = "";
+		try {
+			prepareLaunchWorktree(repo, ["--worktree"]);
+		} catch (error) {
+			message = error instanceof Error ? error.message : String(error);
+		}
+		expect(message.startsWith(`worktree_diverged:${first.cwd}`)).toBe(true);
+		expect(message).toContain(userCommit);
+		expect(message).toContain("GJC did not change HEAD");
+		expect(run("git", ["rev-parse", "HEAD"], first.cwd)).toBe(userCommit);
+		expect(await Bun.file(path.join(first.cwd, "user-work.txt")).text()).toBe("important\n");
+	});
+
+	it("refuses to reset a detached launch worktree that has its own commits while source HEAD is unchanged", async () => {
+		const repo = await createRepo("gjc-launch-diverged-unchanged-source-");
+		const first = prepareLaunchWorktree(repo, ["--worktree"]);
+		expect(first.worktree.enabled && first.worktree.created).toBe(true);
+
+		await Bun.write(path.join(first.cwd, "user-work.txt"), "important\n");
+		run("git", ["add", "user-work.txt"], first.cwd);
+		run("git", ["commit", "-m", "user work"], first.cwd);
+		const userCommit = run("git", ["rev-parse", "HEAD"], first.cwd);
+		expect(run("git", ["status", "--porcelain"], first.cwd)).toBe("");
+
+		expect(() => prepareLaunchWorktree(repo, ["--worktree"])).toThrow(/worktree_diverged:/);
+		expect(run("git", ["rev-parse", "HEAD"], first.cwd)).toBe(userCommit);
+		expect(await Bun.file(path.join(first.cwd, "user-work.txt")).text()).toBe("important\n");
+	});
+
+	it("keeps the dirty refusal when a diverged detached launch worktree also has uncommitted changes", async () => {
+		const repo = await createRepo("gjc-launch-dirty-diverged-worktree-");
+		const first = prepareLaunchWorktree(repo, ["--worktree"]);
+		expect(first.worktree.enabled && first.worktree.created).toBe(true);
+
+		await Bun.write(path.join(first.cwd, "user-work.txt"), "important\n");
+		run("git", ["add", "user-work.txt"], first.cwd);
+		run("git", ["commit", "-m", "user work"], first.cwd);
+		const userCommit = run("git", ["rev-parse", "HEAD"], first.cwd);
+		await Bun.write(path.join(first.cwd, "dirty.txt"), "dirty\n");
+
+		await Bun.write(path.join(repo, "next.txt"), "next\n");
+		run("git", ["add", "next.txt"], repo);
+		run("git", ["commit", "-m", "next"], repo);
+
+		expect(() => prepareLaunchWorktree(repo, ["--worktree"])).toThrow(/worktree_dirty:/);
+		expect(run("git", ["rev-parse", "HEAD"], first.cwd)).toBe(userCommit);
+		expect(await Bun.file(path.join(first.cwd, "user-work.txt")).text()).toBe("important\n");
+	});
+
+	it("refuses to discard committed work on the cancellable detached reuse path", async () => {
+		const repo = await createRepo("gjc-launch-diverged-cancellable-");
+		const first = prepareLaunchWorktree(repo, ["--worktree"]);
+		expect(first.worktree.enabled && first.worktree.created).toBe(true);
+
+		await Bun.write(path.join(first.cwd, "user-work.txt"), "important\n");
+		run("git", ["add", "user-work.txt"], first.cwd);
+		run("git", ["commit", "-m", "user work"], first.cwd);
+		const userCommit = run("git", ["rev-parse", "HEAD"], first.cwd);
+		expect(run("git", ["status", "--porcelain"], first.cwd)).toBe("");
+
+		await Bun.write(path.join(repo, "next.txt"), "next\n");
+		run("git", ["add", "next.txt"], repo);
+		run("git", ["commit", "-m", "next"], repo);
+
+		const planned = planLaunchWorktree(repo, { enabled: true, detached: true, name: null });
+		expect(planned.enabled).toBe(true);
+		await expect(ensureLaunchWorktreeCancellable(planned)).rejects.toThrow(/worktree_diverged:/);
+		expect(run("git", ["rev-parse", "HEAD"], first.cwd)).toBe(userCommit);
+		expect(await Bun.file(path.join(first.cwd, "user-work.txt")).text()).toBe("important\n");
+	});
+
 	it("creates named worktrees without reusing a dirty detached source-branch worktree", async () => {
 		const repo = await createRepo("gjc-launch-dirty-detached-named-worktree-");
 		const detached = prepareLaunchWorktree(repo, ["--worktree"]);
@@ -372,8 +458,9 @@ describe("default launch worktrees", () => {
 	it("allows a valid directory symlink or Windows junction as the worktree bucket", async () => {
 		const repo = await createRepo("gjc-launch-valid-bucket-symlink-");
 		const bucket = path.join(repo, ".worktrees");
-		const target = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-launch-bucket-target-"));
-		cleanupPaths.push(target);
+		// The target stays inside the repo. A symlink that leaves the repo is refused below.
+		const target = path.join(repo, "inside-worktree-bucket");
+		await fs.mkdir(target);
 		await fs.symlink(target, bucket, process.platform === "win32" ? "junction" : "dir");
 
 		const launched = prepareLaunchWorktree(repo, ["--worktree", "feature/demo"]);
@@ -384,6 +471,36 @@ describe("default launch worktrees", () => {
 		const reused = prepareLaunchWorktree(repo, ["--worktree", "feature/demo"]);
 		expect(await fs.realpath(reused.cwd)).toBe(await fs.realpath(expectedPath));
 		expect(reused.worktree.enabled && reused.worktree.reused).toBe(true);
+		expect(path.relative(await fs.realpath(repo), await fs.realpath(launched.cwd)).startsWith("..")).toBe(false);
+	});
+
+	it("refuses a gitignored in-repo bucket symlink that resolves to a sibling outside the repository", async () => {
+		const repo = await createRepo("gjc-launch-bucket-symlink-escape-");
+		expect(await Bun.file(path.join(repo, ".gitignore")).text()).toContain(".worktrees");
+		const outside = await fs.mkdtemp(path.join(path.dirname(repo), "gjc-launch-bucket-outside-"));
+		cleanupPaths.push(outside);
+		const bucket = path.join(repo, ".worktrees");
+		await fs.symlink(outside, bucket, process.platform === "win32" ? "junction" : "dir");
+
+		expect(() => prepareLaunchWorktree(repo, ["--worktree", "feature/demo"])).toThrow(
+			/worktree_bucket_escapes_repository/,
+		);
+		expect(await fs.readdir(outside)).toEqual([]);
+		expect(fsSync.existsSync(path.join(outside, testSlug("feature/demo")))).toBe(false);
+		expect((await fs.lstat(bucket)).isSymbolicLink()).toBe(true);
+	});
+
+	it("allows an ordinary ignored in-repo directory bucket", async () => {
+		const repo = await createRepo("gjc-launch-bucket-ignored-directory-");
+		const bucket = path.join(repo, ".worktrees");
+		await fs.mkdir(bucket);
+
+		const launched = prepareLaunchWorktree(repo, ["--worktree", "feature/demo"]);
+		const expectedPath = path.join(bucket, testSlug("feature/demo"));
+
+		expect(await fs.realpath(launched.cwd)).toBe(await fs.realpath(expectedPath));
+		expect(path.relative(await fs.realpath(repo), await fs.realpath(launched.cwd)).startsWith("..")).toBe(false);
+		expect(launched.worktree.enabled && launched.worktree.created).toBe(true);
 	});
 
 	it("reports a symlink to a non-directory target without disclosing or deleting the target", async () => {

@@ -12,6 +12,18 @@ import {
 	withFileLock,
 } from "../src/config/file-lock";
 
+/** Canonicalize file IDs the same way production code does. */
+function canonicalLockFileId(value: bigint): bigint {
+	if (value < -(1n << 63n) || value > (1n << 64n) - 1n) throw new Error("file_lock_identity_out_of_range");
+	return BigInt.asUintN(64, value);
+}
+
+function canonicalLockDeviceId(value: bigint): bigint {
+	if (process.platform !== "win32") return canonicalLockFileId(value);
+	if (value < -(1n << 31n) || value > (1n << 32n) - 1n) throw new Error("file_lock_identity_out_of_range");
+	return BigInt.asUintN(32, value);
+}
+
 const roots: string[] = [];
 // A real NTFS lock directory exhibited this signed/unsigned file-ID pair
 // under Bun and the native snapshot API. The fixture also models the Windows
@@ -57,6 +69,7 @@ async function signedIdentityFixture(component: "root" | "info" | "both", detach
 	await fs.mkdir(lock);
 	await Bun.write(path.join(lock, "info"), JSON.stringify({ pid: DEAD_PID, timestamp: 1000 }));
 	let nativeIdentityChanged = false;
+	const pathObservations: string[] = [];
 	const realLstat = fs.lstat;
 	const transformStat = (target: string, stat: BigIntStats): BigIntStats => {
 		const isRoot =
@@ -70,6 +83,7 @@ async function signedIdentityFixture(component: "root" | "info" | "both", detach
 			sameFixturePath(target, path.join(parked, "info")) ||
 			sameFixturePath(target, path.join(cleanupLock, "info")) ||
 			sameFixturePath(target, path.join(cleanupParked, "info"));
+		pathObservations.push(`stat ${String(target)} root=${isRoot} info=${isInfo} dev=${stat.dev} ino=${stat.ino}`);
 		const id = isRoot && component !== "info" ? ROOT_ID : isInfo && component !== "root" ? INFO_ID : null;
 		if (!isRoot && !isInfo) return stat;
 		return Object.assign(Object.create(Object.getPrototypeOf(stat)), stat, {
@@ -84,10 +98,11 @@ async function signedIdentityFixture(component: "root" | "info" | "both", detach
 	const realOpen = fs.open;
 	vi.spyOn(fs, "open").mockImplementation(async (target, flags, mode) => {
 		const handle = await realOpen(target, flags, mode);
-		if (
+		const matchesInfo =
 			sameFixturePath(String(target), path.join(lock, "info")) ||
-			sameFixturePath(String(target), path.join(cleanupLock, "info"))
-		) {
+			sameFixturePath(String(target), path.join(cleanupLock, "info"));
+		pathObservations.push(`open ${String(target)} info=${matchesInfo}`);
+		if (matchesInfo) {
 			const realStat = handle.stat.bind(handle);
 			vi.spyOn(handle, "stat").mockImplementation((async options => {
 				const stat = await realStat(options);
@@ -96,21 +111,29 @@ async function signedIdentityFixture(component: "root" | "info" | "both", detach
 		}
 		return handle;
 	});
-	const nativeSnapshot = (snapshot: NativeDirectoryTreeSnapshot): NativeDirectoryTreeSnapshot => ({
-		...snapshot,
-		rootDev: process.platform === "win32" ? DEVICE_ID.toString() : snapshot.rootDev,
-		rootIno: component === "info" ? snapshot.rootIno : ROOT_ID.toString(),
-		entries: snapshot.entries.map(entry => ({
-			...entry,
-			dev: process.platform === "win32" ? DEVICE_ID.toString() : entry.dev,
-			ino:
-				entry.relativePath === "" && component !== "info"
-					? ROOT_ID.toString()
-					: entry.relativePath === "info" && component !== "root"
-						? (INFO_ID + (nativeIdentityChanged ? 1n : 0n)).toString()
-						: entry.ino,
-		})),
-	});
+	const nativeSnapshot = (snapshot: NativeDirectoryTreeSnapshot): NativeDirectoryTreeSnapshot => {
+		// Canonicalize IDs the same way production code does when comparing identities
+		const canonicalRootId = canonicalLockFileId(BigInt.asIntN(64, ROOT_ID));
+		const canonicalInfoId = canonicalLockFileId(BigInt.asIntN(64, INFO_ID));
+		// On Windows, canonicalize DEVICE_ID; on other platforms, preserve the snapshot's dev
+		const canonicalRootDev =
+			process.platform === "win32" ? canonicalLockDeviceId(DEVICE_ID).toString() : snapshot.rootDev;
+		return {
+			...snapshot,
+			rootDev: canonicalRootDev,
+			rootIno: component === "info" ? snapshot.rootIno : canonicalRootId.toString(),
+			entries: snapshot.entries.map(entry => ({
+				...entry,
+				dev: process.platform === "win32" ? canonicalLockDeviceId(DEVICE_ID).toString() : entry.dev,
+				ino:
+					entry.relativePath === "" && component !== "info"
+						? canonicalRootId.toString()
+						: entry.relativePath === "info" && component !== "root"
+							? (canonicalInfoId + (nativeIdentityChanged ? 1n : 0n)).toString()
+							: entry.ino,
+			})),
+		};
+	};
 	const originals = new Map<string, NativeDirectoryTreeSnapshot>();
 	const remove = vi.fn(
 		(
@@ -137,6 +160,7 @@ async function signedIdentityFixture(component: "root" | "info" | "both", detach
 	FileLockTestHooks.nativeExactRemovalProbe = () => !detach;
 	FileLockTestHooks.nativeQuarantineBindings = () => ({
 		snapshotDirectoryTree: target => {
+			pathObservations.push(`snapshot ${target}`);
 			const captured = snapshotDirectoryTree(target);
 			if (!captured.ok || !captured.snapshot) return captured;
 			originals.set(target, captured.snapshot);
@@ -149,6 +173,7 @@ async function signedIdentityFixture(component: "root" | "info" | "both", detach
 		lock,
 		parked,
 		remove,
+		pathObservations,
 		changeNativeIdentity: () => {
 			nativeIdentityChanged = true;
 		},
@@ -159,7 +184,11 @@ test.each(["root", "info"] as const)("reclaims a dead-owner lock with a signed %
 	const fixture = await signedIdentityFixture(component);
 	const observed = await readFileLockObservationForGc(fixture.lock);
 	if (!observed) throw new Error("Expected a lock observation");
-	expect(await removeFileLockDirForGc(fixture.lock, observed.info, observed.identity)).toBe("removed");
+	const result = await removeFileLockDirForGc(fixture.lock, observed.info, observed.identity);
+	if (result !== "removed")
+		throw new Error(
+			JSON.stringify({ result, identity: observed.identity, paths: fixture.pathObservations }, null, 2),
+		);
 	expect(fixture.remove).toHaveBeenCalledTimes(1);
 	expect(await fs.exists(fixture.lock)).toBe(false);
 });

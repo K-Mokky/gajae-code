@@ -11,6 +11,7 @@ import {
 } from "@gajae-code/coding-agent/gjc-runtime/session-layout";
 import { runNativeStateCommand } from "@gajae-code/coding-agent/gjc-runtime/state-runtime";
 import {
+	assertWorkflowMutationAllowed,
 	assertWorkflowMutationRawPathsAllowed,
 	DEEP_INTERVIEW_MUTATION_BLOCK_MESSAGE,
 	getWorkflowMutationDecision,
@@ -27,6 +28,28 @@ async function makeTempRoot(): Promise<string> {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-deep-interview-guard-"));
 	tempRoots.push(root);
 	return root;
+}
+
+/** A directory that is not the project cwd and not a platform temp root. */
+async function makeNonNeutralDir(): Promise<string> {
+	const tmpParent = path.dirname(path.resolve(os.tmpdir()));
+	const parent = tmpParent === path.parse(tmpParent).root ? os.homedir() : tmpParent;
+	return fs.mkdtemp(path.join(parent, "gjc-plan-tmpdir-"));
+}
+
+async function removeDirLeafFirst(dir: string): Promise<void> {
+	let names: string[] = [];
+	try {
+		names = await fs.readdir(dir);
+	} catch {
+		return;
+	}
+	for (const name of names) {
+		const child = path.join(dir, name);
+		if ((await fs.lstat(child)).isDirectory()) await removeDirLeafFirst(child);
+		else await fs.rm(child, { force: true });
+	}
+	await fs.rmdir(dir);
 }
 
 async function writeActiveDeepInterview(cwd: string, sessionId = "session-a", phase = "interviewing"): Promise<void> {
@@ -94,6 +117,50 @@ function tool(name: string, extra: Record<string, unknown> = {}): AgentTool {
 function parseStateCommandJson(stdout: string | undefined): Record<string, unknown> {
 	if (!stdout) throw new Error("missing state command stdout");
 	return JSON.parse(stdout) as Record<string, unknown>;
+}
+
+const projectTmpdirProbe = path.join(import.meta.dir, "fixtures/workflow-mutation-tmpdir-probe.ts");
+
+async function runProjectTmpdirProbe(input: {
+	cwd: string;
+	target: string;
+	sessionId: string;
+	drop?: "unlink" | "chdir";
+	expectedTmpdir?: string;
+}): Promise<{ blocked: boolean; message?: string }> {
+	const env: Record<string, string> = {};
+	for (const [key, value] of Object.entries(process.env)) {
+		if (value !== undefined && key !== "TMPDIR") env[key] = value;
+	}
+	env.GJC_TMPDIR_PROBE_CWD = input.cwd;
+	env.GJC_TMPDIR_PROBE_PATH = input.target;
+	env.GJC_TMPDIR_PROBE_SESSION = input.sessionId;
+	if (input.drop) env.GJC_TMPDIR_PROBE_DROP = input.drop;
+	if (input.expectedTmpdir !== undefined) env.GJC_TMPDIR_PROBE_EXPECT = input.expectedTmpdir;
+	const proc = Bun.spawn([process.execPath, projectTmpdirProbe], {
+		cwd: input.cwd,
+		env,
+		stdin: "ignore",
+		stdout: "pipe",
+		stderr: "pipe",
+	});
+	const [stdout, stderr, exitCode] = await Promise.all([
+		new Response(proc.stdout).text(),
+		new Response(proc.stderr).text(),
+		proc.exited,
+	]);
+	if (exitCode !== 0) throw new Error(`tmpdir probe failed (${exitCode}): ${stderr || stdout}`);
+	let parsed: { blocked?: unknown; message?: unknown };
+	try {
+		parsed = JSON.parse(stdout.trim()) as { blocked?: unknown; message?: unknown };
+	} catch {
+		throw new Error(`tmpdir probe did not print JSON: ${stdout}`);
+	}
+	if (typeof parsed.blocked !== "boolean") throw new Error(`tmpdir probe JSON missing blocked: ${stdout}`);
+	if (parsed.message !== undefined && typeof parsed.message !== "string") {
+		throw new Error(`tmpdir probe JSON message was not a string: ${stdout}`);
+	}
+	return { blocked: parsed.blocked, message: parsed.message };
 }
 
 afterEach(async () => {
@@ -726,6 +793,26 @@ describe("workflow mutation guard", () => {
 		expect(gjcBash.blocked).toBe(false);
 	});
 
+	it("keeps an unsigned stricter phase when the active entry has left planning", async () => {
+		const cwd = await makeTempRoot();
+		const sessionId = "session-a";
+		await writeActiveSkill(cwd, "ultragoal", "active", sessionId);
+		await fs.writeFile(
+			modeStatePath(cwd, sessionId, "ultragoal"),
+			`${JSON.stringify({ active: true, current_phase: "goal-planning", session_id: sessionId }, null, 2)}\n`,
+		);
+		const edit = {
+			cwd,
+			sessionId,
+			tool: tool("edit"),
+			args: { path: "src/product.ts", edits: [{ old_text: "a", new_text: "b" }] },
+		};
+		await expect(assertWorkflowMutationAllowed(edit)).rejects.toBeInstanceOf(ToolError);
+		const decision = await getWorkflowMutationDecision(edit);
+		expect(decision.blocked).toBe(true);
+		expect(decision.reason).toBe("phase-boundary");
+	});
+
 	it("blocks product mutation only during the ultragoal goal-planning phase", async () => {
 		const cwd = await makeTempRoot();
 		await writeActiveSkill(cwd, "ultragoal", "goal-planning");
@@ -1053,6 +1140,47 @@ describe("workflow mutation guard", () => {
 		expect(decision.blocked).toBe(true);
 	});
 
+	it("blocks a project dotenv TMPDIR as a planning temp root", async () => {
+		// The parent already imported the guard. The child imports it after `.env` exists.
+		for (const drop of ["unlink", "chdir"] as const) {
+			const workspace = await makeTempRoot();
+			await writeActiveDeepInterview(workspace);
+			const projectTmp = await makeNonNeutralDir();
+			try {
+				const product = path.join(projectTmp, "src", "product.ts");
+				await fs.mkdir(path.dirname(product), { recursive: true });
+				await Bun.write(product, "original\n");
+				await Bun.write(path.join(workspace, ".env"), `TMPDIR=${projectTmp}\n`);
+
+				const decision = await runProjectTmpdirProbe({
+					cwd: workspace,
+					target: product,
+					sessionId: "session-a",
+					drop,
+					expectedTmpdir: projectTmp,
+				});
+				expect(decision.blocked, drop).toBe(true);
+				expect(decision.message, drop).toBe(DEEP_INTERVIEW_MUTATION_BLOCK_MESSAGE);
+				expect(await Bun.file(product).text(), drop).toBe("original\n");
+			} finally {
+				await removeDirLeafFirst(projectTmp);
+			}
+		}
+	}, 60_000);
+
+	it("still allows the real OS temp dir during an active planning phase", async () => {
+		const workspace = await makeTempRoot();
+		await writeActiveDeepInterview(workspace);
+		const realOsTemp = process.env.TMPDIR?.trim() || os.tmpdir();
+		const scratch = path.join(realOsTemp, `gjc-plan-os-scratch-${process.pid}.md`);
+		const allowed = await runProjectTmpdirProbe({
+			cwd: workspace,
+			target: scratch,
+			sessionId: "session-a",
+		});
+		expect(allowed.blocked).toBe(false);
+	}, 60_000);
+
 	it("blocks .gjc raw paths in deferred ast_edit apply even with no planning skill or forceOverride", async () => {
 		const cwd = await makeTempRoot();
 		await expect(
@@ -1096,6 +1224,94 @@ describe("workflow mutation guard", () => {
 		const modeAfter = await fs.readFile(modePath);
 		expect(productAfter).toBe(productBefore);
 		expect(Buffer.compare(modeBefore, modeAfter)).toBe(0);
+	});
+
+	it("keeps the planning block when mode-state is forged out of band", async () => {
+		for (const [skill, phase] of [
+			["ralplan", "planner"],
+			["deep-interview", "interviewing"],
+		] as const) {
+			const cwd = await makeTempRoot();
+			const sessionId = "session-a";
+			const written = await runNativeStateCommand(
+				[
+					"write",
+					"--mode",
+					skill,
+					"--input",
+					JSON.stringify({ current_phase: phase }),
+					"--session-id",
+					sessionId,
+					"--json",
+				],
+				cwd,
+			);
+			expect(written.status, skill).toBe(0);
+
+			const edit = {
+				cwd,
+				sessionId,
+				tool: tool("edit"),
+				args: { path: "src/product.ts", edits: [{ old_text: "a", new_text: "b" }] },
+			};
+			await expect(assertWorkflowMutationAllowed(edit)).rejects.toBeInstanceOf(ToolError);
+
+			const statePath = modeStatePath(cwd, sessionId, skill);
+			const stamped = JSON.parse(await fs.readFile(statePath, "utf8")) as Record<string, unknown>;
+			await fs.writeFile(statePath, `${JSON.stringify({ ...stamped, current_phase: "complete" }, null, 2)}\n`);
+			await expect(assertWorkflowMutationAllowed(edit)).rejects.toBeInstanceOf(ToolError);
+			const forgedPhase = await getWorkflowMutationDecision(edit);
+			expect(forgedPhase.blocked, skill).toBe(true);
+			expect(forgedPhase.reason, skill).toBe("phase-boundary");
+
+			await fs.writeFile(
+				statePath,
+				`${JSON.stringify({ ...stamped, active: false, current_phase: "complete" }, null, 2)}\n`,
+			);
+			await expect(assertWorkflowMutationAllowed(edit)).rejects.toBeInstanceOf(ToolError);
+
+			await fs.writeFile(
+				statePath,
+				`${JSON.stringify({ active: true, current_phase: "complete", session_id: sessionId }, null, 2)}\n`,
+			);
+			await expect(assertWorkflowMutationAllowed(edit)).rejects.toBeInstanceOf(ToolError);
+
+			await fs.writeFile(
+				statePath,
+				`${JSON.stringify({ active: true, current_phase: phase, session_id: "session-b" }, null, 2)}\n`,
+			);
+			await expect(assertWorkflowMutationAllowed(edit)).rejects.toBeInstanceOf(ToolError);
+			await fs.writeFile(
+				statePath,
+				`${JSON.stringify({ active: true, current_phase: "complete", session_id: "session-b" }, null, 2)}\n`,
+			);
+			await expect(assertWorkflowMutationAllowed(edit)).rejects.toBeInstanceOf(ToolError);
+
+			const restored = await runNativeStateCommand(
+				[
+					"write",
+					"--mode",
+					skill,
+					"--input",
+					JSON.stringify({ current_phase: phase }),
+					"--session-id",
+					sessionId,
+					"--force",
+					"--json",
+				],
+				cwd,
+			);
+			expect(restored.status, skill).toBe(0);
+			await expect(assertWorkflowMutationAllowed(edit)).rejects.toBeInstanceOf(ToolError);
+
+			const cleared = await runNativeStateCommand(
+				["clear", "--mode", skill, "--session-id", sessionId, "--force", "--json"],
+				cwd,
+			);
+			expect(cleared.status, skill).toBe(0);
+			await assertWorkflowMutationAllowed(edit);
+			expect((await getWorkflowMutationDecision(edit)).blocked, skill).toBe(false);
+		}
 	});
 });
 

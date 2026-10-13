@@ -164,6 +164,8 @@ export interface BrokerSettings {
 	restartRequestId?: string;
 	/** Cancel bootstrap before retained publication when the owning CLI receives a signal. */
 	startupAbortSignal?: AbortSignal;
+	/** Monotonic checkpoint deadline, leaving time for retained publication. */
+	startupCheckpointDeadline?: number;
 	/** Called synchronously when retained publication establishes broker readiness. */
 	onStartupReady?: () => void;
 	/** Test-only delay after session checkpoint to verify unpublished discovery ownership. */
@@ -1572,12 +1574,14 @@ export class Broker {
 	#transport: BrokerTransport | null = null;
 	#heartbeatTimer: NodeJS.Timeout | null = null;
 	#startupAbortSignal: AbortSignal | undefined;
+	#startupCheckpointDeadline: number | undefined;
 	#onStartupReady: (() => void) | undefined;
 	#startupPrePublicationDelayMs: number;
 	#startupPrePublicationTestHook: (() => Promise<void>) | undefined;
 	#startupAfterDiscoveryWriteTestHook: (() => Promise<void>) | undefined;
 	#startupPostPublicationDelayMs: number;
 	#completionTask: Promise<void> | null = null;
+	#terminalExit: { mode: BrokerExitMode; reason: BrokerExitReason } | null = null;
 	#completion!: Promise<void>;
 	#resolveCompletion!: () => void;
 	#rejectCompletion!: (error: unknown) => void;
@@ -1611,6 +1615,7 @@ export class Broker {
 		this.#ownsResolveModelPin = settings.resolveModelPin === undefined;
 		this.#resolveModelPin = settings.resolveModelPin ?? createDefaultSdkHostModelResolver(this.settings.agentDir);
 		this.#startupAbortSignal = settings.startupAbortSignal;
+		this.#startupCheckpointDeadline = settings.startupCheckpointDeadline;
 		this.#onStartupReady = settings.onStartupReady;
 		this.#startupPrePublicationDelayMs =
 			Number.isSafeInteger(settings.startupPrePublicationDelayMs) &&
@@ -3940,7 +3945,7 @@ export class Broker {
 			// checkpoint settles. The bootstrap watchdog owns this pre-publication
 			// interval; publishing first allowed it to kill an endpoint already handed
 			// to callers when a legitimate index-lock wait outlived the fence.
-			await this.#checkpointSessionHeartbeats();
+			await this.#checkpointSessionHeartbeats(this.#startupAbortSignal, this.#startupCheckpointDeadline);
 			this.#throwIfStartupAborted();
 			await this.#startupPrePublicationTestHook?.();
 			if (this.#startupPrePublicationDelayMs > 0) await Bun.sleep(this.#startupPrePublicationDelayMs);
@@ -4014,6 +4019,10 @@ export class Broker {
 	}
 	get completion(): Promise<void> {
 		return this.#completion;
+	}
+	/** Why this broker completed, or null while it is still running. */
+	get terminalExit(): { readonly mode: BrokerExitMode; readonly reason: BrokerExitReason } | null {
+		return this.#terminalExit;
 	}
 	#restartIdentity(): BrokerRestartOwnerIdentity | undefined {
 		const d = this.discovery;
@@ -4273,14 +4282,16 @@ export class Broker {
 		if (publication) await this.#writeHeartbeat(publication);
 	}
 	/** Re-observes provably live session hosts and checkpoints their liveness. */
-	async heartbeatSessions(now = Date.now()): Promise<number> {
-		return await this.index.checkpointLiveHeartbeats(now);
+	async heartbeatSessions(now = Date.now(), abortSignal?: AbortSignal, deadlineAt?: number): Promise<number> {
+		return await this.index.checkpointLiveHeartbeats(now, abortSignal, deadlineAt);
 	}
-	async #checkpointSessionHeartbeats(): Promise<void> {
+	async #checkpointSessionHeartbeats(abortSignal?: AbortSignal, startupCheckpointDeadline?: number): Promise<void> {
 		if (this.#checkpointInFlight || this.#stopping) return;
 		this.#checkpointInFlight = true;
 		try {
-			await this.heartbeatSessions();
+			// The CLI reserves publication headroom in this startup deadline.
+			// Periodic passes use their own budget, not a retired startup signal.
+			await this.heartbeatSessions(Date.now(), abortSignal, startupCheckpointDeadline);
 		} catch (error) {
 			if (
 				error instanceof FileLockAcquireError &&
@@ -4306,6 +4317,7 @@ export class Broker {
 		blockingLockPath?: string,
 	): Promise<void> {
 		if (this.#completionTask) return this.#completionTask;
+		this.#terminalExit = { mode, reason };
 		const now = process.hrtime.bigint();
 		const fenceStartedAt = this.#lossAt ?? this.#ambiguousAt;
 		const exitRecord: BrokerExitRecord & Record<string, unknown> = {
@@ -5082,7 +5094,7 @@ export class Broker {
 				} else if (
 					this.ledger.hasLegacyIdentity(
 						new Set(this.#spawnAuthority?.claims().map(claim => claim.lifecycleIdentity) ?? []),
-						{ ignoreTerminalRows: operation === "session.create" },
+						{ ignoreFinalRows: operation === "session.create" },
 					)
 				) {
 					return error("idempotency_conflict", "legacy lifecycle request has an ambiguous target");

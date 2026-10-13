@@ -22,7 +22,7 @@ import {
 } from "@gajae-code/utils";
 
 import type { Settings } from "../config/settings";
-import { resolveGlobalUserSkillLinkTrust } from "../config/skill-settings-defaults";
+import { resolveGlobalUserSkillLinkTrust, resolveSkillScopeTrust } from "../config/skill-settings-defaults";
 import { clearCache as clearFsCache, findRepoRoot, cacheStats as fsCacheStats, invalidate as invalidateFs } from "./fs";
 import type {
 	Capability,
@@ -73,6 +73,17 @@ const EXPLICIT_HOME_PROVIDER_ROOTS = [
 ] as const;
 
 const ANCESTOR_SCOPED_PROJECT_PROVIDERS = new Set(["agents", "agents-md", "cline"]);
+
+function resolveExternalUserSkillSymlinkTrust(settings: Settings | undefined): boolean {
+	const userOwnedTrust = resolveGlobalUserSkillLinkTrust({
+		trustUserSkills:
+			typeof settings?.getGlobal === "function" ? settings.getGlobal("skills.trustUserSkills") : undefined,
+		enablePiUser: typeof settings?.getGlobal === "function" ? settings.getGlobal("skills.enablePiUser") : undefined,
+	});
+	const effectiveScopeTrust =
+		typeof settings?.getGroup === "function" ? resolveSkillScopeTrust(settings.getGroup("skills"), "user") : true;
+	return userOwnedTrust && effectiveScopeTrust;
+}
 
 function isWithinOrEqual(root: string, candidate: string): boolean {
 	const relative = path.relative(root, candidate);
@@ -415,7 +426,6 @@ export async function loadCapability<T>(capabilityId: string, options: LoadOptio
 	const cwd = ordinaryOptions.cwd ?? getProjectDir();
 	const home = getTrustedHomeDir();
 	const activeSettings = ordinaryOptions.settings ?? settingsByCwd.get(path.normalize(cwd));
-	const globalSettings = typeof activeSettings?.getGlobal === "function" ? activeSettings : undefined;
 	const userAgentDir = ordinaryOptions.agentDir ? path.resolve(ordinaryOptions.agentDir) : getAgentDir();
 	const profileAuthority =
 		ordinaryOptions.profileAuthority ??
@@ -432,10 +442,7 @@ export async function loadCapability<T>(capabilityId: string, options: LoadOptio
 		repoRoot,
 		isolatedHome: false,
 		settings: ordinaryOptions.settings,
-		allowExternalUserSkillSymlinks: resolveGlobalUserSkillLinkTrust({
-			trustUserSkills: globalSettings?.getGlobal("skills.trustUserSkills"),
-			enablePiUser: globalSettings?.getGlobal("skills.enablePiUser"),
-		}),
+		allowExternalUserSkillSymlinks: resolveExternalUserSkillSymlinkTrust(activeSettings),
 		bypassCache: ordinaryOptions.bypassCache,
 	};
 	const providers = filterProviders(capability, ordinaryOptions);
@@ -475,7 +482,7 @@ export async function loadCapabilityForHome<T>(
 	// read another profile's SYSTEM/RULES/AGENTS, skills, commands, hooks,
 	// settings, or executable descriptors.
 	const canonicalHome = await canonicalizeThroughExistingAncestor(resolvedHome);
-	const homeStats = await fs.stat(canonicalHome);
+	const homeStats = await fs.stat(canonicalHome, { bigint: true });
 	const homeIdentity = { dev: homeStats.dev, ino: homeStats.ino };
 	const trustedHome = await canonicalizeThroughExistingAncestor(getTrustedHomeDir());
 	const isolatedHome = canonicalHome !== trustedHome;
@@ -503,7 +510,7 @@ export async function loadCapabilityForHome<T>(
 					"user agent directory",
 				)
 			: path.join(canonicalHome, getConfigDirName(), "agent");
-	const userAgentStats = await fs.stat(userAgentDir).catch(() => null);
+	const userAgentStats = await fs.stat(userAgentDir, { bigint: true }).catch(() => null);
 	const userAgentIdentity = userAgentStats ? { dev: userAgentStats.dev, ino: userAgentStats.ino } : null;
 	await assertExplicitHomeRoots(canonicalHome, cwd, Boolean(options.agentDir), effectiveProviderIds, isolatedHome);
 	const repoRootCandidate = await findRepoRoot(cwd, canonicalHome, {
@@ -528,16 +535,7 @@ export async function loadCapabilityForHome<T>(
 		isolatedHome,
 		homeIdentity,
 		settings: isolatedOptions.settings,
-		allowExternalUserSkillSymlinks: resolveGlobalUserSkillLinkTrust({
-			trustUserSkills:
-				typeof isolatedOptions.settings?.getGlobal === "function"
-					? isolatedOptions.settings.getGlobal("skills.trustUserSkills")
-					: undefined,
-			enablePiUser:
-				typeof isolatedOptions.settings?.getGlobal === "function"
-					? isolatedOptions.settings.getGlobal("skills.enablePiUser")
-					: undefined,
-		}),
+		allowExternalUserSkillSymlinks: resolveExternalUserSkillSymlinkTrust(isolatedOptions.settings),
 	};
 
 	return await loadImpl(capability, providers, ctx, isolatedOptions);

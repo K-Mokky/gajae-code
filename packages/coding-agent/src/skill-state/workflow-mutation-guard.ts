@@ -3,13 +3,16 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentTool } from "@gajae-code/agent-core";
 import { logger } from "@gajae-code/utils";
+import { canonicalEnvKey, type ProjectEnvSnapshot, projectEnvSnapshot } from "@gajae-code/utils/env-file";
 import { isAutoresearchAuthorizedResearchPath } from "../autoresearch/git";
 import { expandApplyPatchToEntries } from "../edit/modes/apply-patch";
 import { GJC_SESSION_PREFIX, modeStatePath as sessionModeStatePath } from "../gjc-runtime/session-layout";
 import { resolveGjcSessionForRead } from "../gjc-runtime/session-resolution";
 import { ModeStateSchema } from "../gjc-runtime/state-schema";
+import { workflowEnvelopeChecksumStatus } from "../gjc-runtime/state-writer";
 import { getSkillManifest } from "../gjc-runtime/workflow-manifest";
 import { LocalProtocolHandler, resolveLocalUrlToPath } from "../internal-urls/local-protocol";
+import { isGithubReadOnlyArgs } from "../tools/github-side-effect";
 import { resolveToCwd } from "../tools/path-utils";
 import { ToolError } from "../tools/tool-errors";
 import { listActiveSkills, readVisibleSkillActiveState, type SkillActiveEntry } from "./active-state";
@@ -38,7 +41,14 @@ function planningPhaseBlockMessage(skill: CanonicalGjcWorkflowSkill): string {
 	return DEEP_INTERVIEW_MUTATION_BLOCK_MESSAGE;
 }
 
-const BLOCKED_TOOL_NAMES = new Set(["edit", "write", "ast_edit", "bash"]);
+/** Tools whose execute path can mutate product state. `github` is included so side-effect ops share this guard. */
+export const WORKFLOW_MUTATION_TOOL_NAMES = ["edit", "write", "ast_edit", "bash", "github"] as const;
+
+const BLOCKED_TOOL_NAMES = new Set<string>(WORKFLOW_MUTATION_TOOL_NAMES);
+
+export function isWorkflowMutationTool(name: string): boolean {
+	return BLOCKED_TOOL_NAMES.has(name);
+}
 /**
  * Only `/dev/null` is exempt. `/dev/stdout`, `/dev/stderr`, and `/dev/fd/<n>` are descriptor
  * aliases: `exec 1<>src/product.ts; printf x >/dev/stdout` reaches a real repository file
@@ -317,10 +327,20 @@ function resolveCurrentWorkflowEntry(entries: SkillActiveEntry[], topLevelSkill:
  * governs, so a stale planning entry can never block while an executor runs and
  * a resumed planning phase reliably re-blocks.
  *
- * Fail-open contract: a missing or invalid durable mode-state releases the block
- * (a corrupt state file must not lock all mutation), matching the guard's
- * historical behavior — this is intentionally looser than the Stop hook, which
- * fails closed for handoff-required skills.
+ * Fail-open contract: a missing or schema-invalid durable mode-state releases
+ * the block (a corrupt state file must not lock all mutation), matching the
+ * guard's historical behavior — this is intentionally looser than the Stop
+ * hook, which fails closed for handoff-required skills. A checksum mismatch is
+ * not that case: the file is still schema-valid, and the CLI already refuses
+ * it as an out-of-band edit. The guard keeps the active entry's phase instead
+ * of letting the forged `current_phase` or `active: false` release the block.
+ * An unsigned envelope may restate that entry, but it may not release a block
+ * the entry still holds. It may still name a stricter blocking phase: the
+ * pre-fix guard honored that phase, and dropping it would allow an edit the
+ * base rejected. A `session_id` or `thread_id` that does not match this
+ * session is the same kind of claim: it does not make the file someone else's,
+ * and it does not open the block. A matching `content_sha256` whose context
+ * also matches is the existing writer stamp and is trusted.
  */
 async function getActivePlanningSkill(
 	cwd: string,
@@ -343,11 +363,73 @@ async function getActivePlanningSkill(
 	const modeState = guardContext.modeStates.get(current.skill) ?? null;
 
 	if (!modeState) return null;
-	if (modeState.active !== true) return null;
-	if (!modeStateMatchesContext(modeState, resolvedSessionId, threadId)) return null;
-	const phase = String(modeState.current_phase ?? current.phase ?? "").trim();
-	if (!isBlockingPlanningPhase(current.skill, phase)) return null;
-	return { skill: current.skill, phase };
+	const activePhase = String(current.phase ?? "").trim();
+	const posture = planningPostureFromModeState(current.skill, activePhase, modeState, resolvedSessionId, threadId);
+	if (posture.tampered) {
+		warnInvalidModeState(
+			modeStatePath(cwd, current.skill, resolvedSessionId),
+			"out-of-band edit detected (content_sha256 mismatch)",
+		);
+	}
+	if (!posture.blocking) return null;
+	return { skill: current.skill, phase: posture.phase };
+}
+
+/**
+ * Decide whether `modeState` may release the planning block.
+ *
+ * The active entry is the seal. A mode-state file releases that seal only when
+ * its writer-stamped `content_sha256` matches and its session context matches,
+ * or when an unsigned file in the same context does not claim a looser posture
+ * than the entry. An unsigned file may still impose a stricter blocking phase.
+ * Checksum mismatch ignores the file. A context mismatch does not release the
+ * entry's block: the file was read from this session's path.
+ */
+function planningPostureFromModeState(
+	skill: MutationGatedSkill,
+	activePhase: string,
+	modeState: ModeState,
+	sessionId?: string,
+	threadId?: string,
+): { blocking: boolean; phase: string; tampered: boolean } {
+	const status = workflowEnvelopeChecksumStatus(modeState);
+	if (status === "mismatch") {
+		return {
+			blocking: isBlockingPlanningPhase(skill, activePhase),
+			phase: activePhase,
+			tampered: true,
+		};
+	}
+	if (!modeStateMatchesContext(modeState, sessionId, threadId)) {
+		return {
+			blocking: isBlockingPlanningPhase(skill, activePhase),
+			phase: activePhase,
+			tampered: false,
+		};
+	}
+	if (status === "match") {
+		if (modeState.active !== true) return { blocking: false, phase: activePhase, tampered: false };
+		const phase = String(modeState.current_phase ?? activePhase).trim();
+		return { blocking: isBlockingPlanningPhase(skill, phase), phase, tampered: false };
+	}
+	if (!isBlockingPlanningPhase(skill, activePhase)) {
+		const stricterPhase = String(modeState.current_phase ?? "").trim();
+		if (modeState.active === true && stricterPhase && isBlockingPlanningPhase(skill, stricterPhase)) {
+			return { blocking: true, phase: stricterPhase, tampered: false };
+		}
+		return { blocking: false, phase: activePhase, tampered: false };
+	}
+	if (modeState.active !== true) return { blocking: true, phase: activePhase, tampered: false };
+	const modePhase = String(modeState.current_phase ?? "").trim();
+	if (
+		modePhase &&
+		!isBlockingPlanningPhase(skill, modePhase) &&
+		modePhase.trim().toLowerCase() !== activePhase.trim().toLowerCase()
+	) {
+		return { blocking: true, phase: activePhase, tampered: false };
+	}
+	const phase = modePhase || activePhase;
+	return { blocking: isBlockingPlanningPhase(skill, phase), phase, tampered: false };
 }
 
 function normalizePosix(value: string): string {
@@ -1607,11 +1689,22 @@ function extractBashTargets(args: unknown, depth = 0): ExtractedTargets {
 	}
 	return targets;
 }
+/**
+ * Read-only github ops extract no mutation. Every other op fails closed during
+ * planning: remote push, PR creation, and worktree/config writes are not a
+ * filesystem path the planning allowlist can clear.
+ */
+function extractGithubTargets(args: unknown): ExtractedTargets {
+	if (isGithubReadOnlyArgs(args)) return { paths: [], unknown: false };
+	return { paths: [], unknown: true, explicitMutation: true };
+}
+
 function extractTargets(tool: ToolWithEditMode, args: unknown): ExtractedTargets {
 	if (tool.name === "write") return extractWriteTargets(args);
 	if (tool.name === "ast_edit") return extractAstEditTargets(args);
 	if (tool.name === "edit") return extractEditTargets(args, tool);
 	if (tool.name === "bash") return extractBashTargets(args);
+	if (tool.name === "github") return extractGithubTargets(args);
 	return { paths: [], unknown: true };
 }
 
@@ -1695,15 +1788,96 @@ function allTargetsAllowlisted(cwd: string, targets: ExtractedTargets): boolean 
 	);
 }
 
-function neutralTempRoots(): string[] {
+/** POSIX directories that are temp roots even when `TMPDIR` is unset or poisoned. */
+const POSIX_SYSTEM_TEMP_ROOTS = ["/tmp", "/var/tmp", "/private/tmp", "/private/var/tmp"];
+
+/**
+ * `os.tmpdir()` follows `TMPDIR`, and Bun copies `cwd/.env` into the environment
+ * when that variable was unset. A repository can therefore name an arbitrary
+ * directory. Declarations below are not neutral scratch roots.
+ */
+function tempEnvNames(): readonly string[] {
+	return process.platform === "win32" ? ["TEMP", "TMP", "TMPDIR"] : ["TMPDIR"];
+}
+
+// The snapshot is the cwd at module import, not a directory created later or a chdir before this module is imported.
+const startupTempSnapshot = projectEnvSnapshot();
+
+function projectTempSnapshots(_cwd: string): ProjectEnvSnapshot[] {
+	return [startupTempSnapshot];
+}
+
+/** macOS account temp directory. `getconf` does not read `TMPDIR`. */
+let darwinUserTempDirCache: string | undefined | null = null;
+function darwinUserTempDir(): string | undefined {
+	if (process.platform !== "darwin") return undefined;
+	if (darwinUserTempDirCache !== null) return darwinUserTempDirCache;
+	darwinUserTempDirCache = undefined;
+	try {
+		const result = Bun.spawnSync({
+			cmd: ["/usr/bin/getconf", "DARWIN_USER_TEMP_DIR"],
+			env: { PATH: "/usr/bin:/bin:/usr/sbin:/sbin", LC_ALL: "C" },
+			stdout: "pipe",
+			stderr: "ignore",
+		});
+		if (result.exitCode !== 0) return undefined;
+		const value = new TextDecoder().decode(result.stdout).trim();
+		if (value) darwinUserTempDirCache = value;
+	} catch {
+		// Fixed `/tmp` roots still cover the POSIX default.
+	}
+	return darwinUserTempDirCache ?? undefined;
+}
+
+function addResolvedTempRoot(roots: Set<string>, value: string | undefined): void {
+	const trimmed = value?.trim();
+	if (trimmed) roots.add(path.resolve(trimmed));
+}
+
+function isPlatformTempPath(resolved: string): boolean {
+	for (const root of POSIX_SYSTEM_TEMP_ROOTS) {
+		const resolvedRoot = path.resolve(root);
+		if (resolved === resolvedRoot || isPathWithin(resolvedRoot, resolved)) return true;
+	}
+	const darwin = darwinUserTempDir();
+	if (!darwin) return false;
+	const resolvedDarwin = path.resolve(darwin);
+	return resolved === resolvedDarwin || isPathWithin(resolvedDarwin, resolved);
+}
+
+/** True when `live` is the temp directory a project dotenv file declares. */
+function projectDeclaresTempPath(cwd: string, live: string): boolean {
+	const trimmedLive = live.trim();
+	if (!trimmedLive) return false;
+	const resolvedLive = path.resolve(trimmedLive);
+	for (const snapshot of projectTempSnapshots(cwd)) {
+		for (const name of tempEnvNames()) {
+			const key = canonicalEnvKey(name);
+			const declared = snapshot.values[key];
+			if (declared === undefined) continue;
+			if (snapshot.dynamic.has(key)) {
+				// Expansion is not comparable. A dynamic value that landed on a
+				// real system temp dir is already allowed through those roots.
+				if (!isPlatformTempPath(resolvedLive)) return true;
+				continue;
+			}
+			const trimmedDeclared = declared.trim();
+			if (trimmedDeclared && path.resolve(trimmedDeclared) === resolvedLive) return true;
+		}
+	}
+	return false;
+}
+
+function neutralTempRoots(cwd: string): string[] {
 	const roots = new Set<string>();
-	const add = (value: string | undefined): void => {
-		const trimmed = value?.trim();
-		if (trimmed) roots.add(path.resolve(trimmed));
-	};
-	add(os.tmpdir());
-	add(process.env.TMPDIR);
-	for (const fixed of ["/tmp", "/var/tmp", "/private/tmp", "/private/var/tmp"]) add(fixed);
+	for (const fixed of POSIX_SYSTEM_TEMP_ROOTS) addResolvedTempRoot(roots, fixed);
+	addResolvedTempRoot(roots, darwinUserTempDir());
+	const candidates = [os.tmpdir(), process.env.TMPDIR];
+	if (process.platform === "win32") candidates.push(process.env.TEMP, process.env.TMP);
+	for (const candidate of candidates) {
+		if (!candidate || projectDeclaresTempPath(cwd, candidate)) continue;
+		addResolvedTempRoot(roots, candidate);
+	}
 	return [...roots];
 }
 
@@ -1757,10 +1931,15 @@ async function isNeutralTempPath(cwd: string, rawPath: string): Promise<boolean>
 	if (unknown || !absolutePath) return false;
 	const resolvedCwd = path.resolve(cwd);
 	if (isPathWithin(resolvedCwd, absolutePath)) return false;
-	if (!neutralTempRoots().some(root => isPathWithin(root, absolutePath))) return false;
+	const roots = neutralTempRoots(cwd);
+	const realRoots = await Promise.all(roots.map(realpathOrSelf));
+	// Accept both spellings (`/var/folders` and `/private/var/folders`) before the
+	// canonical re-check. The re-check still rejects a temp path whose real
+	// target is inside the project.
+	const lexicalRoots = new Set([...roots, ...realRoots]);
+	if (![...lexicalRoots].some(root => isPathWithin(root, absolutePath))) return false;
 	const realTarget = await canonicalizeForContainment(absolutePath);
 	if (isPathWithin(await realpathOrSelf(resolvedCwd), realTarget)) return false;
-	const realRoots = await Promise.all(neutralTempRoots().map(realpathOrSelf));
 	return realRoots.some(root => isPathWithin(root, realTarget));
 }
 

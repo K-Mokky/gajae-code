@@ -133,7 +133,7 @@ import {
 	syntheticModelInputError,
 	syntheticNamespaceCollision,
 } from "../model-profile-model";
-import { flushWorktreeOnPromptDeadline } from "../prompt-deadline-flush";
+import { autosaveWorktreeOnPromptDeadline, deadlineFlushSuppressed } from "../prompt-deadline-flush";
 import {
 	createPromptDeadlineLease,
 	isAttributableProgressEventType,
@@ -6479,21 +6479,12 @@ export function createNotificationsExtension(
 				if (
 					winner.kind === "failed" &&
 					winner.code === "prompt_deadline_exceeded" &&
-					settings?.get("sdk.flushWorktreeOnDeadline") !== false
+					!deadlineFlushSuppressed(settings)
 				) {
-					// `has` is true only for a value the user actually wrote, so this
-					// separates an explicit opt-in from the schema default. The flush only
-					// honours the default inside a linked worktree the session owns.
-					const configured = settings?.get("sdk.flushWorktreeOnDeadline");
-					const hasExplicitSetting =
-						typeof settings?.has === "function"
-							? settings.has("sdk.flushWorktreeOnDeadline")
-							: configured === true;
-					const explicitOptIn = hasExplicitSetting === true && configured === true;
+					// Same opt-in as the session runtime: user/global config or a runtime
+					// override, never a project `.gjc` file or the schema default.
 					await runBoundedDeadlineFlush(signal =>
-						flushWorktreeOnPromptDeadline(ctx.cwd, {
-							agentDir: settings?.getAgentDir(),
-							explicitOptIn,
+						autosaveWorktreeOnPromptDeadline(ctx.cwd, settings, {
 							isCurrent: () =>
 								deadlineAttemptStatus(promptSubmissionKey(correlation), submission, deadlineAttempt) ===
 								"current",
@@ -10158,11 +10149,6 @@ export function createNotificationsExtension(
 		const id = sessionId(ctx);
 		const rt = runtimes.get(id);
 		if (!rt) return;
-		void rt.host
-			.reportActivity("idle")
-			.catch(error => logger.warn(`notifications: idle activity checkpoint failed: ${String(error)}`));
-		// Clear the streaming flag for SDK consumers even when notifications are off.
-		rt.busy = false;
 		// The Agent's terminal owner is independent of delivery correlation. Never
 		// borrow a successor's run handle to settle a predecessor's SDK prompts.
 		const terminalOwner = terminalAbortSeams?.getTerminalRunOwnerForEvent?.(event);

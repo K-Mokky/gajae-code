@@ -10,6 +10,7 @@ import { Settings } from "@gajae-code/coding-agent/config/settings";
 import type { ModelSelectorComponent } from "@gajae-code/coding-agent/modes/components/model-selector";
 import { SelectorController } from "@gajae-code/coding-agent/modes/controllers/selector-controller";
 import { getThemeByName, setThemeInstance } from "@gajae-code/coding-agent/modes/theme/theme";
+import type { AgentSessionProfileInstalledOverrideState } from "../src/session/agent-session";
 
 let testTheme = await getThemeByName("red-claw");
 
@@ -38,9 +39,23 @@ function createControllerContext() {
 			onMutationStarted?: () => void;
 		};
 	}> = [];
-	const setModelTemporary = vi.fn(async () => {});
+	const setModelTemporary = vi.fn(
+		async (_model: Model, _thinkingLevel?: ThinkingLevel, options?: { onMutationStarted?: () => void }) => {
+			options?.onMutationStarted?.();
+		},
+	);
 	const markUserModelSelection = vi.fn();
 	const setDefaultFallbackRuntimeModel = vi.fn();
+	let activeModelProfile: string | undefined;
+	let profileInstalledOverrideState: AgentSessionProfileInstalledOverrideState = {
+		modelRoles: new Map(),
+		agentModelOverrides: new Map(),
+		installedModelRoles: new Map(),
+		installedAgentModelOverrides: new Map(),
+		manualModelRoles: new Set(),
+		manualAgentModelOverrides: new Set(),
+		preProfileModel: undefined,
+	};
 
 	const session = {
 		model: model("provider-a", "current") as Model | undefined,
@@ -78,6 +93,7 @@ function createControllerContext() {
 			options?.onMutationStarted?.();
 			this.model = nextModel;
 			if (options?.thinkingLevel) this.thinkingLevel = options.thinkingLevel;
+			this.markProfileRoleOverrideManual("modelRoles", role);
 		},
 		markUserModelSelection,
 		setModelTemporary,
@@ -108,8 +124,35 @@ function createControllerContext() {
 			exhaustedLastTurn: false,
 		}),
 		restoreDefaultFallbackRuntimeState: vi.fn(),
-		setActiveModelProfile: vi.fn(),
+		setActiveModelProfile(name: string | undefined) {
+			if (name !== activeModelProfile) {
+				profileInstalledOverrideState = {
+					...profileInstalledOverrideState,
+					manualModelRoles: new Set(),
+					manualAgentModelOverrides: new Set(),
+				};
+			}
+			activeModelProfile = name;
+		},
 		recordResumeDefaultModel: vi.fn(),
+		getProfileInstalledOverrideState: () => profileInstalledOverrideState,
+		restoreProfileInstalledOverrideState: (state: AgentSessionProfileInstalledOverrideState) => {
+			profileInstalledOverrideState = state;
+		},
+		markProfileRoleOverrideManual(path: "modelRoles" | "task.agentModelOverrides", role: string) {
+			if (activeModelProfile === undefined) return;
+			profileInstalledOverrideState = {
+				...profileInstalledOverrideState,
+				...(path === "modelRoles"
+					? { manualModelRoles: new Set([...profileInstalledOverrideState.manualModelRoles, role]) }
+					: {
+							manualAgentModelOverrides: new Set([
+								...profileInstalledOverrideState.manualAgentModelOverrides,
+								role,
+							]),
+						}),
+			};
+		},
 		sessionManager: {
 			buildSessionContext: (): { models: { default: string | undefined } } => ({
 				models: { default: "provider-a/original-default:medium" },
@@ -120,7 +163,7 @@ function createControllerContext() {
 		setThinkingLevel(thinkingLevel: ThinkingLevel) {
 			this.thinkingLevel = thinkingLevel;
 		},
-		getActiveModelProfile: () => undefined,
+		getActiveModelProfile: () => activeModelProfile,
 		isFastForProvider: () => false,
 		isFastForSubagentProvider: () => false,
 		isFastModeActive: () => false,
@@ -238,6 +281,25 @@ describe("SelectorController model batch assignments", () => {
 			"All model targets set to provider-a/selected for DEFAULT, EXECUTOR, ARCHITECT, PLANNER, CRITIC, IMAGE.",
 		);
 		expect(ctx.restoreComposer).toHaveBeenCalledTimes(1);
+	});
+
+	test("failed default assignment restores profile-installed manual ownership", async () => {
+		const { ctx, session } = createControllerContext();
+		session.setModel = async (nextModel, role, options) => {
+			options?.onMutationStarted?.();
+			session.model = nextModel;
+			session.markProfileRoleOverrideManual("modelRoles", role);
+			throw new Error("post-selection synchronization failed");
+		};
+		const selector = await openReadySelector(ctx);
+		session.setActiveModelProfile("profile-a");
+
+		selectMenuAction(selector, 0);
+		await settleSelectorInput();
+
+		expect(ctx.showError).toHaveBeenCalledWith(expect.stringContaining("post-selection synchronization failed"));
+		expect(session.getActiveModelProfile()).toBe("profile-a");
+		expect(session.getProfileInstalledOverrideState().manualModelRoles).toEqual(new Set());
 	});
 
 	test("rolls back all targets when a later role setting write fails", async () => {
@@ -449,6 +511,7 @@ describe("SelectorController model batch assignments", () => {
 		failure.reject(new Error("credential rejected"));
 		await settleSelectorInput();
 		expect(ctx.showError).toHaveBeenCalledTimes(1);
+		expect(session.markUserModelSelection).not.toHaveBeenCalled();
 		expect(settings.get("task.agentModelOverrides")).toMatchObject({ executor: "provider-a/original-executor:low" });
 
 		selectMenuAction(selector, 1);
@@ -457,6 +520,23 @@ describe("SelectorController model batch assignments", () => {
 
 		expect(session.modelRegistry.getApiKey).toHaveBeenCalledTimes(2);
 		expect(settings.get("task.agentModelOverrides")).toMatchObject({ executor: "provider-a/selected" });
+	});
+
+	test("does not fence a temporary selection rejected before mutation", async () => {
+		const { ctx, session, setModelTemporary } = createControllerContext();
+		setModelTemporary.mockRejectedValueOnce(new Error("No API key for provider-a/selected"));
+		const selector = await openSelector(ctx);
+
+		await selector.__testSelectAssignment({
+			model: selectedModel,
+			role: null,
+			thinkingLevel: ThinkingLevel.Low,
+			selector: "provider-a/selected:low",
+		});
+		await settleSelectorInput();
+
+		expect(ctx.showError).toHaveBeenCalledWith(expect.stringContaining("No API key"));
+		expect(session.markUserModelSelection).not.toHaveBeenCalled();
 	});
 
 	test("temporary selection replaces the live fallback chain with the selected model", async () => {
@@ -472,6 +552,7 @@ describe("SelectorController model batch assignments", () => {
 
 		expect(setModelTemporary).toHaveBeenCalledWith(selectedModel, ThinkingLevel.Low, {
 			cause: "temporary-operation",
+			onMutationStarted: expect.any(Function),
 			reason: "other",
 		});
 		expect(session.markUserModelSelection).toHaveBeenCalledTimes(1);
@@ -549,7 +630,7 @@ describe("SelectorController model batch assignments", () => {
 		});
 
 		expect(session.markUserModelSelection).toHaveBeenCalledTimes(1);
-		expect(marksAtCredentialProbe).toBe(1);
+		expect(marksAtCredentialProbe).toBe(0);
 		expect(settings.get("task.agentModelOverrides")).toEqual({
 			executor: "provider-a/profile-executor:medium",
 			architect: "provider-a/selected:high",

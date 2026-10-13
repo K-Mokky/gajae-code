@@ -215,20 +215,26 @@ import {
 	type AsyncJob,
 	type AsyncJobDeliveryState,
 	AsyncJobManager,
-	asyncJobEndpointId as deriveAsyncJobEndpointId,
 	type FoldReason,
 	type JobFoldEvent,
 	type OwnerSubagentShutdownLease,
 	type SubagentLifecycle,
 } from "../async";
+import { asyncJobEndpointId as deriveAsyncJobEndpointId } from "../async/endpoint-id";
 import { reset as resetCapabilities } from "../capability";
 import type { Rule } from "../capability/rule";
 import type { CasReceipt } from "../config/atomic-yaml-patch";
+import type { ConfigHotReloadCandidate, ConfigHotReloadPaths } from "../config/config-hot-reload";
 import {
 	activateModelProfile,
 	applyModelProfileRuntimeBindings,
+	finishPreparedModelProfileActivation,
 	materializeActiveModelProfileAssignment,
+	type PreparedModelProfileActivation,
+	prepareModelProfileActivation,
+	publishPreparedModelProfileActivation,
 	resolveMissingSessionModelRecovery,
+	rollbackPreparedModelProfileActivation,
 } from "../config/model-profile-activation";
 import {
 	ModelProfileRegistryError,
@@ -238,11 +244,8 @@ import {
 } from "../config/model-profile-contract";
 import {
 	commitDurableModelProfileOwnership,
-	type DurableModelProfileOwnership,
 	InvalidModelProfileOwnershipError,
 	ModelProfileOwnershipConflictError,
-	type ModelProfileOwnershipMarker,
-	modelProfileOwnershipMarkersEqual,
 	readDurableModelProfileOwnership,
 } from "../config/model-profile-ownership";
 import { resolveProfileBindings } from "../config/model-profiles";
@@ -252,6 +255,7 @@ import {
 	kNoAuth,
 	MODEL_ROLE_IDS,
 	type ModelRegistry,
+	type ModelsConfigReloadCandidate,
 } from "../config/model-registry";
 import {
 	extractExplicitThinkingSelector,
@@ -267,10 +271,14 @@ import {
 } from "../config/model-resolver";
 import { type ModelSelectorValue, normalizeModelSelectorValue } from "../config/model-selector-value";
 import { expandPromptTemplate, type PromptTemplate } from "../config/prompt-templates";
-import type { Settings, SkillsSettings } from "../config/settings";
+import type {
+	Settings,
+	SettingsConfigReloadPublication,
+	SettingsGlobalConfigCandidate,
+	SkillsSettings,
+} from "../config/settings";
 import { onAppendOnlyModeChanged } from "../config/settings";
-import type { SettingPath } from "../config/settings-schema";
-import { getDefault } from "../config/settings-schema";
+import { getDefault, SETTINGS_SCHEMA, type SettingPath } from "../config/settings-schema";
 import { resolveEagerTaskDelegation } from "../config/task-delegation";
 import { RawSseDebugBuffer } from "../debug/raw-sse-buffer";
 import { loadCapability } from "../discovery";
@@ -415,11 +423,15 @@ import type { LazyService } from "../runtime/lazy-service";
 import type { NetworkPrewarmRuntime } from "../runtime/network-prewarm-service";
 import type { WorkspaceTreeRuntime } from "../runtime/workspace-tree-service";
 import { type ExactMcpServerControlResult, MCPManager } from "../runtime-mcp/manager";
+import {
+	omitPluginMcpNameShadows,
+	retainPluginMcpMandatoryNames,
+} from "../runtime-mcp/plugin-mcp-name-filter";
 import { attachExactMcpControls, getExactMcpControls, revokeExactMcpControls } from "../runtime-mcp/redaction";
 import type { NotificationSessionController } from "../sdk/bus/session-control";
 import { buildSyntheticModelId, syntheticNamespaceCollision } from "../sdk/model-profile-model";
 import { sanitizePromptFailure } from "../sdk/prompt-failure";
-import type { SecretObfuscator } from "../secrets/obfuscator";
+import { obfuscateMessages, type SecretObfuscator } from "../secrets/obfuscator";
 import { formatNoCredentialOnboardingError, NoModelSelectedError } from "../setup/model-onboarding-guidance";
 import {
 	isCanonicalGjcWorkflowSkill,
@@ -427,7 +439,7 @@ import {
 	readVisibleSkillActiveState,
 	syncSkillActiveState,
 } from "../skill-state/active-state";
-import { assertWorkflowMutationAllowed } from "../skill-state/workflow-mutation-guard";
+import { assertWorkflowMutationAllowed, isWorkflowMutationTool } from "../skill-state/workflow-mutation-guard";
 import { invalidateHostMetadata } from "../ssh/connection-manager";
 import { buildVolatileProjectContext } from "../system-prompt";
 import { DelegationHintController } from "../task/delegation-hint";
@@ -452,6 +464,7 @@ import {
 import { assertEditableFile } from "../tools/auto-generated-guard";
 import { releaseTabsForOwner } from "../tools/browser/tab-supervisor";
 import type { CheckpointState } from "../tools/checkpoint";
+import { githubPermissionIntent } from "../tools/github-side-effect";
 import { outputMeta, wrapToolWithMetaNotice } from "../tools/output-meta";
 import { normalizeLocalScheme, resolveReadPath, resolveToCwd } from "../tools/path-utils";
 import { registerResourceGcSession } from "../tools/resource-gc";
@@ -535,6 +548,7 @@ import type {
 	SessionEntry,
 	SessionManagerCloseOutcome,
 	SessionMemoryStats,
+	SessionArtifactPublication,
 } from "./session-manager";
 import {
 	createReadonlySessionManager,
@@ -921,6 +935,28 @@ export interface QueuedInputSubmission {
 
 /** Listener function for agent session events */
 export type AgentSessionEventListener = (event: AgentSessionEvent) => void;
+
+/**
+ * Deliver one event to one listener, containing both synchronous throws and
+ * async rejections. Listeners are `void`-typed but interactive mode subscribes
+ * with an `async` one whose handlers can persist (plan approval calls
+ * `session.prompt()`); a rejection there, e.g. the managed append fence after
+ * another process took over the transcript, must not escape as an unhandled
+ * rejection and terminate the process.
+ */
+function deliverSessionEvent(
+	listener: AgentSessionEventListener,
+	event: AgentSessionEvent,
+	onError: (error: unknown) => void,
+): void {
+	try {
+		const result: unknown = listener(event);
+		if (result instanceof Promise) result.catch(onError);
+	} catch (error) {
+		onError(error);
+	}
+}
+
 export type AsyncJobSnapshotItem = Pick<
 	AsyncJob,
 	"id" | "type" | "status" | "label" | "startTime" | "endTime" | "metadata"
@@ -1802,20 +1838,14 @@ function summarizeAgentBashArtifactSave(
 	};
 }
 
-export interface AgentBashArtifactStore {
-	saveArtifact(content: string, toolType: string): Promise<string | undefined>;
-	getArtifactPath(id: string): Promise<string | null>;
-}
-
 export async function saveAgentBashOriginalArtifact(
-	store: AgentBashArtifactStore,
+	publication: SessionArtifactPublication,
 	originalText: string,
 ): Promise<BashArtifactSaveResult> {
 	try {
-		const artifactId = await store.saveArtifact(originalText, "bash-original");
-		if (!artifactId) return { status: "failed", diagnostic: "storage returned no artifact id" };
-		const artifactPath = await store.getArtifactPath(artifactId);
-		return artifactPath ? summarizeAgentBashArtifactSave(artifactId, originalText) : { status: "unavailable" };
+		const artifactId = await publication(originalText, "bash-original");
+		if (!artifactId) return { status: "unavailable" };
+		return summarizeAgentBashArtifactSave(artifactId, originalText);
 	} catch (error) {
 		return { status: "failed", diagnostic: boundAgentBashArtifactSaveDiagnostic(error) };
 	}
@@ -1995,7 +2025,7 @@ async function discardPreparedNewSessionAfterFailure(
 // ============================================================================
 
 /** Tools that require user permission before execution when an ACP client is connected. */
-const PERMISSION_REQUIRED_TOOLS = new Set(["bash", "monitor", "eval", "edit", "delete", "move"]);
+const PERMISSION_REQUIRED_TOOLS = new Set(["bash", "monitor", "eval", "edit", "delete", "move", "github"]);
 
 function isShellExecutionPermissionTool(toolName: string): boolean {
 	return toolName === "bash" || toolName === "monitor";
@@ -2119,6 +2149,7 @@ function getPermissionIntent(
 			cacheKey: "edit:move",
 		};
 	}
+	if (toolName === "github") return githubPermissionIntent(args);
 	return undefined;
 }
 
@@ -2665,6 +2696,67 @@ export interface DefaultFallbackRuntimeState {
 	exhaustedLastTurn: boolean;
 }
 
+export interface AgentSessionProfileInstalledOverrideState {
+	modelRoles: ReadonlyMap<string, ModelSelectorValue | undefined>;
+	agentModelOverrides: ReadonlyMap<string, ModelSelectorValue | undefined>;
+	installedModelRoles: ReadonlyMap<string, ModelSelectorValue>;
+	installedAgentModelOverrides: ReadonlyMap<string, ModelSelectorValue>;
+	manualModelRoles: ReadonlySet<string>;
+	manualAgentModelOverrides: ReadonlySet<string>;
+	preProfileModel: Model | undefined;
+}
+
+export interface PreparedProfileModelSelection {
+	readonly sessionId: string;
+	readonly model: Model;
+	readonly thinkingLevel: ThinkingLevel | undefined;
+	readonly committedThinkingLevel: ThinkingLevel | undefined;
+	readonly previousModel: Model | undefined;
+	readonly previousThinkingLevel: ThinkingLevel | undefined;
+	readonly previousEditMode: EditMode;
+	readonly signal: AbortSignal | undefined;
+}
+
+export interface ConfigurationReloadResult {
+	readonly applied: boolean;
+	readonly settingsChanged: boolean;
+	readonly modelsChanged: boolean;
+	readonly changedSettings: readonly SettingPath[];
+}
+
+export type ConfigurationReloadErrorCode =
+	| "SESSION_UNAVAILABLE"
+	| "PATH_CHANGED"
+	| "SETTINGS_INVALID"
+	| "MODELS_INVALID"
+	| "MODEL_UNAVAILABLE"
+	| "ACTIVE_PROFILE_INVALID"
+	| "PUBLICATION_FAILED"
+	| "VALIDATION_CLEANUP_FAILED";
+
+const CONFIGURATION_RELOAD_ERROR_MESSAGES: Record<ConfigurationReloadErrorCode, string> = {
+	SESSION_UNAVAILABLE: "Configuration reload is unavailable for this session.",
+	PATH_CHANGED: "Configuration files changed while reload was pending.",
+	SETTINGS_INVALID: "The updated settings configuration is invalid.",
+	MODELS_INVALID: "The updated model catalog is invalid.",
+	MODEL_UNAVAILABLE: "The selected model is unavailable in the updated configuration.",
+	ACTIVE_PROFILE_INVALID: "The active model preset is invalid for the updated configuration.",
+	PUBLICATION_FAILED: "Configuration reload could not be applied.",
+	VALIDATION_CLEANUP_FAILED: "Configuration validation could not release its staged catalog.",
+};
+
+export class ConfigurationReloadError extends Error {
+	readonly code: ConfigurationReloadErrorCode;
+	readonly retryable: boolean;
+
+	constructor(code: ConfigurationReloadErrorCode, cause?: unknown, options?: { readonly retryable?: boolean }) {
+		super(CONFIGURATION_RELOAD_ERROR_MESSAGES[code], cause === undefined ? undefined : { cause });
+		this.name = "ConfigurationReloadError";
+		this.code = code;
+		this.retryable = options?.retryable === true;
+	}
+}
+
 /**
  * Fire-and-forget continuations (auto-compaction retries, queued follow-ups) race a
  * still-busy agent whose current turn can legitimately hold the run for minutes.
@@ -2771,6 +2863,10 @@ export class AgentSession {
 	#unavailableModelProfile: string | undefined;
 	#activeProfileInstalledRoles = new Map<string, ModelSelectorValue | undefined>();
 	#activeProfileInstalledAgentOverrides = new Map<string, ModelSelectorValue | undefined>();
+	#activeProfileInstalledRoleValues = new Map<string, ModelSelectorValue>();
+	#activeProfileInstalledAgentOverrideValues = new Map<string, ModelSelectorValue>();
+	#activeProfileManualModelRoles = new Set<string>();
+	#activeProfileManualAgentModelOverrides = new Set<string>();
 	#preProfileModel: Model | undefined;
 	#sessionAdmissionQueue: SessionAdmissionEntry[] = [];
 	#activeSessionAdmission: SessionAdmissionEntry | undefined;
@@ -2781,6 +2877,7 @@ export class AgentSession {
 	#successorSessionAdmissionContext = new AsyncLocalStorage<SuccessorSessionAdmission>();
 	#selectionFenceGenerationContext = new AsyncLocalStorage<number>();
 	#selectionFenceTail: Promise<void> = Promise.resolve();
+	#configurationReloadControllers = new Set<AbortController>();
 	#pendingSelectionFences = 0;
 	#selectionAwaitingMutationTransaction: symbol | undefined;
 	#authorizedClosedSelectionTransaction: symbol | undefined;
@@ -4058,10 +4155,7 @@ export class AgentSession {
 	// A scheduled continuation owns this terminal boundary until it either starts
 	// the successor or proves it cannot. Holds prevent a false idle event while
 	// preserving the predecessor for cancellation and preflight failures.
-	#pendingAgentEndContinuationHolds = new Map<
-		symbol,
-		{ event: AgentSessionEvent | undefined; resourceRunId?: string; predecessorScope?: AttemptScope }
-	>();
+	#pendingAgentEndContinuationHolds = new Map<symbol, AgentSessionEvent>();
 	#deferredAgentEndLeases = new WeakMap<AgentSessionEvent, RunResourceProducerLease>();
 	#sessionSettlementPromise: Promise<void> | undefined;
 	#sessionSettlementResolve: (() => void) | undefined;
@@ -4222,6 +4316,10 @@ export class AgentSession {
 	 * exposes an unowned history rewrite.
 	 */
 	#sessionTransitionKind: string | undefined;
+	// Detects transitions that begin and finish while an async preflight is staging.
+	#sessionTransitionGeneration = 0;
+	#sessionTransitionCompletion: Promise<void> = Promise.resolve();
+	#resolveSessionTransitionCompletion: (() => void) | undefined;
 	#queuedDeliveryPendingWhileTransition = false;
 	#deferredAutoContinueDuringTransition: (() => void) | undefined;
 	#coordinatorPersistGeneration = 0;
@@ -4299,9 +4397,22 @@ export class AgentSession {
 				{ code: "busy" },
 			);
 		}
+		if (["new-session", "switch-session", "clear-context", "fork", "branch", "navigate-tree"].includes(kind)) {
+			for (const controller of this.#configurationReloadControllers) controller.abort();
+		}
+		this.#sessionTransitionGeneration += 1;
 		this.#sessionTransitionKind = kind;
+		const completion = Promise.withResolvers<void>();
+		this.#sessionTransitionCompletion = completion.promise;
+		this.#resolveSessionTransitionCompletion = completion.resolve;
 		this.#coordinatorPersistGeneration += 1;
 		this.#wakeFollowUpReservationTransitionWaiters();
+	}
+
+	async #waitForSessionTransitionEnd(signal: AbortSignal): Promise<void> {
+		while (this.#sessionTransitionKind !== undefined) {
+			await awaitPromptInvocationPreflight(this.#sessionTransitionCompletion, signal);
+		}
 	}
 
 	async #settleActivePromptForHistoryTransition(): Promise<void> {
@@ -4324,6 +4435,10 @@ export class AgentSession {
 
 	#endSessionTransition(): void {
 		this.#sessionTransitionKind = undefined;
+		const resolveCompletion = this.#resolveSessionTransitionCompletion;
+		this.#resolveSessionTransitionCompletion = undefined;
+		this.#sessionTransitionCompletion = Promise.resolve();
+		resolveCompletion?.();
 		const deferredAutoContinue = this.#deferredAutoContinueDuringTransition;
 		this.#deferredAutoContinueDuringTransition = undefined;
 		if (!this.#isDisposed && !this.#sessionAdmissionClosing) deferredAutoContinue?.();
@@ -4463,6 +4578,7 @@ export class AgentSession {
 			allowPromptContinuationReentry?: boolean;
 			idleDelivery?: boolean;
 			startupPromptWaiterRelease?: () => void;
+			skipModelRegistryLease?: boolean;
 		},
 	): Promise<T> {
 		const owner = this.#sessionAdmissionContext.getStore();
@@ -4576,11 +4692,13 @@ export class AgentSession {
 					{ code: "busy" },
 				);
 			}
-
 			const release = () => {
 				releaseEntry();
 			};
-			return await this.#sessionAdmissionContext.run(entry, () => body({ release }));
+			const admittedBody = () => this.#sessionAdmissionContext.run(entry, () => body({ release }));
+			return await (options?.skipModelRegistryLease
+				? admittedBody()
+				: this.#modelRegistry.withConsumerLease(admittedBody, signal));
 		} finally {
 			releaseEntry();
 		}
@@ -4738,22 +4856,7 @@ export class AgentSession {
 		}
 	}
 
-	#bindDeferredAgentEndToUpcomingContinuations(event: AgentSessionEvent): void {
-		const scope = (event as AgentSessionEvent & { scope?: AttemptScope }).scope;
-		const resourceRunId =
-			this.#runResourceLeaseContext.getStore()?.resourceRunId ?? getAgentTerminalOwnerContext(event)?.resourceRunId;
-		for (const reservation of this.#pendingAgentEndContinuationHolds.values()) {
-			if (reservation.event !== undefined) continue;
-			if (reservation.predecessorScope !== undefined && reservation.predecessorScope !== scope) continue;
-			if (reservation.resourceRunId !== undefined && reservation.resourceRunId !== resourceRunId) continue;
-			reservation.event = event;
-		}
-	}
-
-	#reserveDeferredAgentEndForContinuation(
-		predecessorScope?: AttemptScope,
-		reserveUpcoming = false,
-	): symbol | undefined {
+	#reserveDeferredAgentEndForContinuation(predecessorScope?: AttemptScope): symbol | undefined {
 		const resourceRunId = this.#runResourceLeaseContext.getStore()?.resourceRunId;
 		const pending = predecessorScope
 			? [...this.#pendingSdkAgentEnds].find(
@@ -4768,13 +4871,9 @@ export class AgentSession {
 					getAgentTerminalOwnerContext(this.#pendingAgentEndEmit)?.resourceRunId === resourceRunId
 						? this.#pendingAgentEndEmit
 						: undefined));
-		if (!pending && !reserveUpcoming) return undefined;
+		if (!pending) return undefined;
 		const hold = Symbol("deferred-agent-end-continuation");
-		this.#pendingAgentEndContinuationHolds.set(hold, {
-			event: pending,
-			...(resourceRunId === undefined ? {} : { resourceRunId }),
-			...(predecessorScope === undefined ? {} : { predecessorScope }),
-		});
+		this.#pendingAgentEndContinuationHolds.set(hold, pending);
 		this.#deferredAgentEndWorkLeases.set(hold, this.#sessionWorkLease.acquire());
 		return hold;
 	}
@@ -4788,22 +4887,22 @@ export class AgentSession {
 		const scope = (pending as AgentSessionEvent & { scope?: AttemptScope }).scope;
 		if (scope && this.#sdkRunTokensByAttemptScope.has(scope)) this.#pendingSdkAgentEnds.add(pending);
 		const hold = Symbol("deferred-agent-end-continuation");
-		this.#pendingAgentEndContinuationHolds.set(hold, { event: pending });
+		this.#pendingAgentEndContinuationHolds.set(hold, pending);
 		this.#deferredAgentEndWorkLeases.set(hold, this.#sessionWorkLease.acquire());
 		return hold;
 	}
 
 	#claimDeferredAgentEndForContinuation(hold: symbol | undefined): AgentSessionEvent | undefined {
 		if (!hold) return undefined;
-		const pending = this.#pendingAgentEndContinuationHolds.get(hold)?.event;
+		const pending = this.#pendingAgentEndContinuationHolds.get(hold);
 		this.#pendingAgentEndContinuationHolds.delete(hold);
 		if (pending) this.#pendingSdkAgentEnds.delete(pending);
 		this.#deferredAgentEndWorkLeases.get(hold)?.release();
 		this.#deferredAgentEndWorkLeases.delete(hold);
 		if (pending && this.#pendingAgentEndEmit === pending) {
 			this.#pendingAgentEndEmit = undefined;
-			for (const [candidate, candidateReservation] of this.#pendingAgentEndContinuationHolds) {
-				if (candidateReservation.event === pending) {
+			for (const [candidate, candidatePending] of this.#pendingAgentEndContinuationHolds) {
+				if (candidatePending === pending) {
 					this.#pendingAgentEndContinuationHolds.delete(candidate);
 					this.#deferredAgentEndWorkLeases.get(candidate)?.release();
 					this.#deferredAgentEndWorkLeases.delete(candidate);
@@ -4831,13 +4930,12 @@ export class AgentSession {
 		this.#pendingAgentEndEmit = pending;
 		const scope = (pending as AgentSessionEvent & { scope?: AttemptScope }).scope;
 		if (scope && this.#sdkRunTokensByAttemptScope.has(scope)) this.#pendingSdkAgentEnds.add(pending);
-		const reservation = this.#pendingAgentEndContinuationHolds.get(hold);
-		if (reservation) reservation.event = pending;
+		this.#pendingAgentEndContinuationHolds.set(hold, pending);
 	}
 
 	#releaseDeferredAgentEndContinuation(hold: symbol | undefined): void {
 		if (!hold) return;
-		const pending = this.#pendingAgentEndContinuationHolds.get(hold)?.event;
+		const pending = this.#pendingAgentEndContinuationHolds.get(hold);
 		this.#pendingAgentEndContinuationHolds.delete(hold);
 		this.#deferredAgentEndWorkLeases.get(hold)?.release();
 		this.#deferredAgentEndWorkLeases.delete(hold);
@@ -4847,10 +4945,8 @@ export class AgentSession {
 	#releaseDeferredAgentEndContinuations(): void {
 		let pending: AgentSessionEvent | undefined;
 		for (const candidate of this.#pendingAgentEndContinuationHolds.values()) {
-			if (candidate.event !== undefined) {
-				pending = candidate.event;
-				break;
-			}
+			pending = candidate;
+			break;
 		}
 		this.#pendingAgentEndContinuationHolds.clear();
 		for (const lease of this.#deferredAgentEndWorkLeases.values()) lease.release();
@@ -5184,17 +5280,26 @@ export class AgentSession {
 	}
 
 	#flushPendingAgentEnd(): void {
+		// Collect SDK agent_ends to publish before modifying the set to avoid iterator issues (PR #6388).
+		// Publish only SDK agent_ends that have been decided by their handler.
+		const sdkPendingsToPublish: Array<[AgentSessionEvent, RunResourceProducerLease | undefined]> = [];
 		for (const sdkPending of this.#pendingSdkAgentEnds) {
+			// Skip if the handler hasn't decided yet (decision is recorded by handler finally block).
 			if (!this.#agentEndContinuationDecisions.has(sdkPending)) continue;
-			if ([...this.#pendingAgentEndContinuationHolds.values()].some(reservation => reservation.event === sdkPending))
-				continue;
+			// Also skip if it's being held for a continuation
+			if ([...this.#pendingAgentEndContinuationHolds.values()].includes(sdkPending)) continue;
+			const sdkLease = this.#deferredAgentEndLeases.get(sdkPending);
+			sdkPendingsToPublish.push([sdkPending, sdkLease]);
+		}
+		// Now publish collected items.
+		for (const [sdkPending, sdkLease] of sdkPendingsToPublish) {
 			this.#pendingSdkAgentEnds.delete(sdkPending);
 			if (this.#pendingAgentEndEmit === sdkPending) this.#pendingAgentEndEmit = undefined;
-			const sdkLease = this.#deferredAgentEndLeases.get(sdkPending);
 			this.#deferredAgentEndLeases.delete(sdkPending);
 			this.#startAgentEndPublication(sdkPending, sdkLease);
 		}
 		const pending = this.#pendingAgentEndEmit;
+		// Skip fallback publish if there are still SDK agent_ends pending (they will be handled by the loop above once decided).
 		if (pending && this.#pendingSdkAgentEnds.has(pending)) return;
 		if (
 			this.#livePromptsInFlight() > 0 ||
@@ -6247,7 +6352,7 @@ export class AgentSession {
 		for (const name of previous) this.#toolRegistry.delete(name);
 		const getCustomToolContext = () => this.#getCustomToolContext();
 		const added: string[] = [];
-		for (const customTool of nextTools) {
+		for (const customTool of omitPluginMcpNameShadows(nextTools)) {
 			const wrapped = CustomToolAdapter.wrap(customTool, getCustomToolContext) as AgentTool;
 			const finalTool = (
 				this.#extensionRunner ? new ExtensionToolWrapper(wrapped, this.#extensionRunner) : wrapped
@@ -6255,11 +6360,15 @@ export class AgentSession {
 			this.#toolRegistry.set(finalTool.name, finalTool);
 			added.push(finalTool.name);
 		}
-		if (options?.mandatoryMCPToolNames) {
-			this.#mandatoryMCPToolNames = new Set(
-				options.mandatoryMCPToolNames.map(name => name.toLowerCase()).filter(name => this.#toolRegistry.has(name)),
-			);
-		}
+		const requestedMandatory = options?.mandatoryMCPToolNames ?? [...this.#mandatoryMCPToolNames];
+		const retainedMandatory = retainPluginMcpMandatoryNames(nextTools, requestedMandatory).map(name =>
+			name.toLowerCase(),
+		);
+		this.#mandatoryMCPToolNames = new Set(
+			options?.mandatoryMCPToolNames !== undefined
+				? retainedMandatory.filter(name => this.#toolRegistry.has(name))
+				: retainedMandatory,
+		);
 		this.#setDiscoverableMCPTools(this.#collectDiscoverableMCPToolsFromRegistry());
 		await this.#applyActiveToolsByName(
 			[
@@ -6962,11 +7071,9 @@ export class AgentSession {
 	/** Emit an event to all listeners without letting one subscriber poison lifecycle settlement. */
 	#emit(event: AgentSessionEvent): void {
 		for (const listener of this.#eventListenerSnapshot) {
-			try {
-				listener(event);
-			} catch (error) {
+			deliverSessionEvent(listener, event, error => {
 				logger.warn("Agent session event subscriber failed", { event: event.type, error: String(error) });
-			}
+			});
 		}
 	}
 
@@ -7436,7 +7543,6 @@ export class AgentSession {
 			isContinuingMidRunMaintenanceOutcome(event.maintenanceOutcome)
 		)
 			return;
-		if (event.type === "agent_end") this.#bindDeferredAgentEndToUpcomingContinuations(event);
 
 		// Hold agent_end until the prompt's finally and all earlier async event work
 		// have unwound. Subscribers treat this event as the ready signal; flushing it
@@ -7507,7 +7613,14 @@ export class AgentSession {
 			const artifactId = await this.sessionManager.saveArtifact(fullText, "tool-result");
 			if (!artifactId) return;
 			const digest = crypto.createHash("sha256").update(fullText).digest("hex");
-			const preview = createPreAdmissionArtifactSpillPreview(fullText, artifactId, digest);
+			// Cut the preview from redacted text. The artifact stores fullText.
+			const obfuscator = this.#obfuscator;
+			const preview = createPreAdmissionArtifactSpillPreview(
+				fullText,
+				artifactId,
+				digest,
+				obfuscator?.hasSecrets() ? text => obfuscator.obfuscate(text) : undefined,
+			);
 			const spillMeta = outputMeta()
 				.truncationFromText(preview, {
 					direction: "middle",
@@ -8632,7 +8745,7 @@ export class AgentSession {
 			const deferredPredecessorAgentEnd =
 				options?.deferredPredecessorAgentEnd ??
 				(options?.suppressPredecessorAgentEnd
-					? this.#claimDeferredAgentEndForContinuation(this.#reserveDeferredAgentEndForContinuation(undefined, true))
+					? this.#claimDeferredAgentEndForContinuation(this.#reserveDeferredAgentEndForContinuation())
 					: undefined);
 			const precedingSelectionFence = this.#selectionFenceTail;
 			const deferredPromptGeneration = options?.generation ?? this.#promptGeneration;
@@ -8660,7 +8773,7 @@ export class AgentSession {
 			(options?.deferredPredecessorAgentEnd
 				? this.#restoreAndReserveDeferredAgentEndForContinuation(options.deferredPredecessorAgentEnd)
 				: options?.suppressPredecessorAgentEnd
-					? this.#reserveDeferredAgentEndForContinuation(undefined, true)
+					? this.#reserveDeferredAgentEndForContinuation()
 					: undefined);
 		let terminalized = false;
 		const skip = (
@@ -9056,7 +9169,7 @@ export class AgentSession {
 		if (this.#pendingSelectionFences > 0 && selectionFenceGeneration === this.#selectionFenceGeneration) {
 			const predecessorAgentEnd =
 				deferredPredecessorAgentEnd ??
-				this.#claimDeferredAgentEndForContinuation(this.#reserveDeferredAgentEndForContinuation(undefined, true));
+				this.#claimDeferredAgentEndForContinuation(this.#reserveDeferredAgentEndForContinuation());
 			const precedingSelectionFence = this.#selectionFenceTail;
 			const deferredScheduling = precedingSelectionFence.then(() => {
 				try {
@@ -10470,6 +10583,8 @@ export class AgentSession {
 			const publicationFailure = Object.assign(new Error("Session disposed before SDK terminal publication."), {
 				code: "cancelled",
 			});
+			// Reject every SDK caller even if internal terminal or extension delivery is
+			// already in flight; the publication task can still drain independently.
 			for (const publication of this.#sdkTerminalPublications.values()) publication.reject(publicationFailure);
 			this.#sdkTerminalPublications.clear();
 			// Invalidate every coordinator event admitted before disposal. Handlers may
@@ -10841,6 +10956,11 @@ export class AgentSession {
 	 * at `timeoutMs` so a wedged subprocess can't stall process exit.
 	 */
 	async disposeChildSubprocesses(timeoutMs = SIGNAL_TEARDOWN_TIMEOUT_MS): Promise<void> {
+		this.#evalExecutionDisposing = true;
+		this.abortEval();
+		const evalExecutionsSettled = this.#waitForEvalExecutionsToSettle(timeoutMs).then(settled => {
+			if (!settled) logger.warn("signal teardown: active eval executions remain unsettled");
+		});
 		const sessionId = this.sessionManager.getSessionId();
 		const kernelOwnerId = this.#evalKernelOwnerId;
 		this.#unregisterResourceGc?.();
@@ -10850,6 +10970,7 @@ export class AgentSession {
 		this.#unregisterDelegationHintSettings?.();
 		this.#unregisterDelegationHintSettings = undefined;
 		const work = Promise.allSettled([
+			evalExecutionsSettled,
 			// kill:true so a forced exit also reaps spawned-app Chrome we own (headless
 			// always closes; connected/attached browsers only disconnect — never killed).
 			releaseTabsForOwner(sessionId, { kill: true }).catch((error: unknown) =>
@@ -10878,7 +10999,8 @@ export class AgentSession {
 				logger.warn("signal teardown: tool session transition cleanups failed", { error }),
 			),
 		]);
-		await Promise.race([work, Bun.sleep(timeoutMs)]);
+		const completed = await Promise.race([work.then(() => true), Bun.sleep(timeoutMs).then(() => false)]);
+		if (!completed) logger.warn("signal teardown: cleanup exceeded its bounded caller deadline");
 	}
 
 	#rebindProviderSessionState(providerSessionState: Map<string, ProviderSessionState>): void {
@@ -11840,7 +11962,9 @@ export class AgentSession {
 							: undefined;
 					const commandContent = command
 						? [{ type: "content" as const, content: { type: "text" as const, text: `$ ${command}` } }]
-						: undefined;
+						: target.name === "github"
+							? [{ type: "content" as const, content: { type: "text" as const, text: permissionIntent.title } }]
+							: undefined;
 					if (this.#sdkPermissionMode === "allow") {
 						return await target.execute(toolCallId, args as never, signal, onUpdate, ctx);
 					}
@@ -11953,7 +12077,7 @@ export class AgentSession {
 	/**
 	/** Wrap a tool with the workflow mutation guard before permissions or execution. */
 	#wrapToolForWorkflowMutationGuard<T extends AgentTool>(tool: T): T {
-		if (!["edit", "write", "ast_edit", "bash"].includes(tool.name)) return tool;
+		if (!isWorkflowMutationTool(tool.name)) return tool;
 		return new Proxy(tool, {
 			get: (target, prop) => {
 				if (prop !== "execute") return Reflect.get(target, prop, target);
@@ -12341,7 +12465,7 @@ export class AgentSession {
 			},
 		});
 
-		for (const customTool of mcpTools) {
+		for (const customTool of omitPluginMcpNameShadows(mcpTools)) {
 			const wrapped = CustomToolAdapter.wrap(customTool, getCustomToolContext) as AgentTool;
 			const finalTool = (
 				this.#extensionRunner ? new ExtensionToolWrapper(wrapped, this.#extensionRunner) : wrapped
@@ -12350,11 +12474,15 @@ export class AgentSession {
 		}
 
 		this.#setDiscoverableMCPTools(this.#collectDiscoverableMCPToolsFromRegistry());
-		if (options.mandatoryMCPToolNames !== undefined) {
-			this.#mandatoryMCPToolNames = new Set(
-				options.mandatoryMCPToolNames.map(name => name.toLowerCase()).filter(name => this.#toolRegistry.has(name)),
-			);
-		}
+		const requestedMandatory = options.mandatoryMCPToolNames ?? [...this.#mandatoryMCPToolNames];
+		const retainedMandatory = retainPluginMcpMandatoryNames(mcpTools, requestedMandatory).map(name =>
+			name.toLowerCase(),
+		);
+		this.#mandatoryMCPToolNames = new Set(
+			options.mandatoryMCPToolNames !== undefined
+				? retainedMandatory.filter(name => this.#toolRegistry.has(name))
+				: retainedMandatory,
+		);
 		this.#pruneSelectedMCPToolNames();
 		const hasPersistedMCPToolSelection = this.buildDisplaySessionContext().hasPersistedMCPToolSelection;
 		if (options.selectedMCPToolNames) {
@@ -17953,7 +18081,7 @@ export class AgentSession {
 		if (this.#activeModelProfile && this.#activeModelProfile !== configuredDefaultProfileIdentity) {
 			this.settings.clearOverride("modelRoles");
 			this.settings.clearOverride("task.agentModelOverrides");
-			this.#activeModelProfile = undefined;
+			this.setActiveModelProfile(undefined);
 		}
 		const inheritedThinkingLevel = resolveThinkingLevelForModel(this.model, this.#getInheritedThinkingLevel());
 		this.#thinkingLevelMutationRevision++;
@@ -18249,6 +18377,7 @@ export class AgentSession {
 			role,
 			this.#formatRoleModelValue(role, model, options?.selector, options?.thinkingLevel),
 		);
+		if (cause === "user-selection") this.markProfileRoleOverrideManual("modelRoles", role);
 		// Only an explicit user selection starts a new fallback epoch. Internal
 		// fallback switches must preserve the exhausted-model set while advancing.
 		if (role === "default" && cause === "user-selection") {
@@ -18287,10 +18416,20 @@ export class AgentSession {
 	}
 
 	setActiveModelProfile(name: string | undefined): void {
+		if (name !== this.#activeModelProfile) {
+			this.#activeProfileManualModelRoles.clear();
+			this.#activeProfileManualAgentModelOverrides.clear();
+		}
 		this.#activeModelProfile = name;
 		if (name !== undefined) {
 			this.#unavailableModelProfile = undefined;
 		}
+	}
+
+	markProfileRoleOverrideManual(path: "modelRoles" | "task.agentModelOverrides", role: string): void {
+		if (this.#activeModelProfile === undefined) return;
+		if (path === "modelRoles") this.#activeProfileManualModelRoles.add(role);
+		else this.#activeProfileManualAgentModelOverrides.add(role);
 	}
 
 	getActiveModelProfile(): string | undefined {
@@ -18321,6 +18460,592 @@ export class AgentSession {
 	/** Fence deferred startup profile recovery before an explicit control-surface selection. */
 	markUserModelSelection(): void {
 		this.#userModelSelectionRevision++;
+	}
+
+	getConfigurationPaths(): ConfigHotReloadPaths | undefined {
+		const configPath = this.settings.getGlobalConfigPath();
+		const modelsPath = this.#modelRegistry.getModelsConfigPath();
+		if (!configPath || !modelsPath) return undefined;
+		return {
+			configPath: path.resolve(configPath),
+			modelsPath: path.resolve(modelsPath),
+		};
+	}
+
+	#assertConfigurationReloadAvailable(candidate: ConfigHotReloadCandidate): void {
+		if (this.#sessionAdmissionClosing || this.#sessionAdmissionClosed || this.#isDisposed) {
+			throw new ConfigurationReloadError("SESSION_UNAVAILABLE");
+		}
+		const paths = this.getConfigurationPaths();
+		if (
+			!paths ||
+			path.resolve(candidate.config.path) !== paths.configPath ||
+			path.resolve(candidate.models.path) !== paths.modelsPath
+		) {
+			throw new ConfigurationReloadError(paths ? "PATH_CHANGED" : "SESSION_UNAVAILABLE");
+		}
+	}
+
+	#readOnlyModelsCandidate(candidate: ModelsConfigReloadCandidate): ModelRegistry {
+		const liveRegistry = this.#modelRegistry;
+		return new Proxy(candidate.registry, {
+			get(target, property) {
+				if (property === "getSessionCanonicalVariant") {
+					return liveRegistry.getSessionCanonicalVariant.bind(liveRegistry);
+				}
+				if (
+					property === "clearCanonicalVariant" ||
+					property === "restoreSessionCanonicalVariant" ||
+					property === "seedCanonicalVariant"
+				) {
+					return () => undefined;
+				}
+				const value = Reflect.get(target, property, target);
+				return typeof value === "function" ? value.bind(target) : value;
+			},
+		}) as ModelRegistry;
+	}
+
+	#settingsCandidateView(candidate: SettingsGlobalConfigCandidate) {
+		return {
+			get: <P extends SettingPath>(settingPath: P) => candidate.get(settingPath),
+			getGlobal: <P extends SettingPath>(settingPath: P) => candidate.getGlobal(settingPath),
+			getOverride: <P extends SettingPath>(settingPath: P) => this.settings.getOverride(settingPath),
+			getStorage: () => this.settings.getStorage(),
+		};
+	}
+
+	async #preflightActiveProfile(
+		settingsCandidate: SettingsGlobalConfigCandidate,
+		modelsCandidate: ModelsConfigReloadCandidate,
+		options?: {
+			prepareSessionModelSelection?: boolean;
+			settingsForApply?: Settings;
+			signal?: AbortSignal;
+		},
+	): Promise<PreparedModelProfileActivation | undefined> {
+		const activeProfile = this.getActiveModelProfile();
+		if (!activeProfile) return undefined;
+		try {
+			return await prepareModelProfileActivation({
+				session: this,
+				modelRegistry: this.#readOnlyModelsCandidate(modelsCandidate),
+				settings: this.#settingsCandidateView(settingsCandidate),
+				...(options?.settingsForApply ? { settingsForApply: options.settingsForApply } : {}),
+				...(options?.prepareSessionModelSelection ? { prepareSessionModelSelection: true } : {}),
+				preserveManualOverrides: true,
+				preserveCanonicalVariant: true,
+				...(options?.signal ? { signal: options.signal } : {}),
+				profileName: activeProfile,
+			});
+		} catch (error) {
+			throw new ConfigurationReloadError("ACTIVE_PROFILE_INVALID", error);
+		}
+	}
+
+	async validateConfiguration(candidate: ConfigHotReloadCandidate): Promise<void> {
+		while (true) {
+			if (this.#sessionTransitionKind !== undefined) {
+				await this.#waitForSessionTransitionEnd(this.#disposeAbortController.signal);
+			}
+			this.#assertConfigurationReloadAvailable(candidate);
+			const transitionGeneration = this.#sessionTransitionGeneration;
+			let modelsCandidate: ModelsConfigReloadCandidate | undefined;
+			let validationError: ConfigurationReloadError | undefined;
+			try {
+				let settingsCandidate: SettingsGlobalConfigCandidate;
+				try {
+					settingsCandidate = await this.settings.stageGlobalConfigReload(candidate.config);
+				} catch (error) {
+					throw new ConfigurationReloadError("SETTINGS_INVALID", error);
+				}
+				if (!settingsCandidate.diagnostics.valid) throw new ConfigurationReloadError("SETTINGS_INVALID");
+				try {
+					modelsCandidate = await this.#modelRegistry.stageModelsConfigReload(
+						candidate.models,
+						settingsCandidate,
+					);
+				} catch (error) {
+					throw new ConfigurationReloadError("MODELS_INVALID", error);
+				}
+				if (!modelsCandidate.valid || !modelsCandidate.diagnostics.valid) {
+					throw new ConfigurationReloadError("MODELS_INVALID");
+				}
+				const prepared = await this.#preflightActiveProfile(settingsCandidate, modelsCandidate);
+				const chain = this.getConfiguredModelChainState("default");
+				if (!prepared || chain?.origin !== "profile-activation" || chain.identity !== this.getActiveModelProfile()) {
+					this.#updatedCurrentModel(modelsCandidate.registry);
+				}
+			} catch (error) {
+				validationError =
+					error instanceof ConfigurationReloadError
+						? error
+						: new ConfigurationReloadError("ACTIVE_PROFILE_INVALID", error);
+			} finally {
+				if (modelsCandidate) {
+					try {
+						modelsCandidate.rollback();
+					} catch (error) {
+						validationError ??= new ConfigurationReloadError("VALIDATION_CLEANUP_FAILED", error);
+					}
+				}
+			}
+
+			// A transition may have completed while staging, so checking only the active kind is insufficient.
+			if (transitionGeneration !== this.#sessionTransitionGeneration) {
+				await this.#waitForSessionTransitionEnd(this.#disposeAbortController.signal);
+				this.#assertConfigurationReloadAvailable(candidate);
+				continue;
+			}
+
+			this.#assertConfigurationReloadAvailable(candidate);
+			if (validationError) throw validationError;
+			return;
+		}
+	}
+
+	reloadConfiguration(
+		candidate: ConfigHotReloadCandidate,
+		signal: AbortSignal,
+	): Promise<ConfigurationReloadResult> {
+		return this.#reloadConfiguration(
+			candidate,
+			signal,
+			this.getUserModelSelectionRevision(),
+			this.model,
+		);
+	}
+
+	async #reloadConfiguration(
+		candidate: ConfigHotReloadCandidate,
+		signal: AbortSignal,
+		userModelSelectionRevision: number,
+		userModelSelectionModel: Model | undefined,
+	): Promise<ConfigurationReloadResult> {
+		const owner = this.#sessionAdmissionContext.getStore();
+		if (owner && !owner.released) throw new ConfigurationReloadError("SESSION_UNAVAILABLE");
+		if (this.#sessionTransitionKind !== undefined) {
+			await this.#waitForSessionTransitionEnd(AbortSignal.any([signal, this.#disposeAbortController.signal]));
+		}
+		this.#assertConfigurationReloadAvailable(candidate);
+
+		const transitionAbortController = new AbortController();
+		this.#configurationReloadControllers.add(transitionAbortController);
+		const reloadSignal = AbortSignal.any([
+			signal,
+			this.#disposeAbortController.signal,
+			transitionAbortController.signal,
+		]);
+		const expectedSessionId = this.sessionId;
+		const selectionTransaction = Symbol("configuration-reload");
+		const priorSelectionFence = this.#selectionFenceTail;
+		const selectionFence = Promise.withResolvers<void>();
+		this.#selectionFenceGeneration += 1;
+		this.#pendingSelectionFences += 1;
+		const selectionFenceGeneration = this.#selectionFenceGeneration;
+		if (this.#oldestPendingSelectionFenceGeneration === 0) {
+			this.#oldestPendingSelectionFenceGeneration = selectionFenceGeneration;
+		}
+		this.#selectionFenceTail = priorSelectionFence.then(() => selectionFence.promise);
+		void this.#selectionFenceTail.catch(() => {});
+		let publicationFenceRelease: (() => void) | undefined;
+		let stagedModels: ModelsConfigReloadCandidate | undefined;
+		let modelRollbackAttempted = false;
+		let modelCommitSucceeded = false;
+		let retryAfterSessionTransition = false;
+		try {
+			reloadSignal.throwIfAborted();
+			await awaitPromptInvocationPreflight(priorSelectionFence, reloadSignal);
+			await this.#withSessionAdmission("selection", async () => {}, reloadSignal, undefined, {
+				selectionTransaction,
+				skipModelRegistryLease: true,
+			});
+			if (this.sessionId !== expectedSessionId) throw new Error("Session changed during configuration reload");
+			this.#selectionAwaitingMutationTransaction = selectionTransaction;
+			await awaitPromptInvocationPreflight(this.waitForIdle(selectionFenceGeneration), reloadSignal);
+
+			return await this.#withSessionAdmission(
+				"selection",
+				async () => {
+					reloadSignal.throwIfAborted();
+					if (this.sessionId !== expectedSessionId) {
+						throw new ConfigurationReloadError("SESSION_UNAVAILABLE");
+					}
+					this.#assertConfigurationReloadAvailable(candidate);
+					let stagedSettings: SettingsGlobalConfigCandidate;
+					try {
+						// Stage after admission and idle drain so settings written by the prior turn are rebased.
+						stagedSettings = await this.settings.stageGlobalConfigReload(candidate.config);
+					} catch (error) {
+						throw new ConfigurationReloadError("SETTINGS_INVALID", error);
+					}
+					if (!stagedSettings.diagnostics.valid) throw new ConfigurationReloadError("SETTINGS_INVALID");
+					try {
+						stagedModels = await this.#modelRegistry.stageModelsConfigReload(
+							candidate.models,
+							stagedSettings,
+						);
+					} catch (error) {
+						throw new ConfigurationReloadError("MODELS_INVALID", error);
+					}
+					if (!stagedModels.valid || !stagedModels.diagnostics.valid) {
+						throw new ConfigurationReloadError("MODELS_INVALID");
+					}
+					reloadSignal.throwIfAborted();
+
+					const changedSettings = (Object.keys(SETTINGS_SCHEMA) as SettingPath[]).filter(
+						settingPath =>
+							!util.isDeepStrictEqual(this.settings.get(settingPath), stagedSettings.get(settingPath)) ||
+							!util.isDeepStrictEqual(
+								this.settings.getGlobal(settingPath),
+								stagedSettings.getGlobal(settingPath),
+							),
+					);
+					let prepared: PreparedModelProfileActivation | undefined;
+					let preparedLiveModelSelection: PreparedProfileModelSelection | undefined;
+					let preparedLiveModelSelectionRevision = userModelSelectionRevision;
+					let preserveDefaultModelSelection = true;
+					const prepareCandidateSelections = async (modelsCandidate: ModelsConfigReloadCandidate): Promise<void> => {
+						prepared = undefined;
+						preparedLiveModelSelection = undefined;
+						preparedLiveModelSelectionRevision = userModelSelectionRevision;
+						preserveDefaultModelSelection = true;
+						const activeProfile = this.getActiveModelProfile();
+						if (activeProfile) {
+							prepared = await this.#preflightActiveProfile(stagedSettings, modelsCandidate, {
+								prepareSessionModelSelection: true,
+								signal: reloadSignal,
+								settingsForApply: this.settings,
+							});
+							const previousChain = prepared!.previousDefaultChainState;
+							const profileOwnsDefaultChain =
+								previousChain?.origin === "profile-activation" && previousChain.identity === activeProfile;
+							const chainIsUnchanged =
+								prepared!.defaultChain.length === (previousChain?.entries.length ?? 0) &&
+								prepared!.defaultChain.every((selector, index) => selector === previousChain?.entries[index]);
+							preserveDefaultModelSelection =
+								prepared!.defaultChain.length === 0 || !profileOwnsDefaultChain || chainIsUnchanged;
+						}
+						if (
+							preserveDefaultModelSelection &&
+							this.#currentModelConfigurationChanged(modelsCandidate.registry)
+						) {
+							const updatedModel = this.#updatedCurrentModel(modelsCandidate.registry);
+							if (updatedModel) {
+								const previousModel = this.model;
+								const previousThinkingLevel = this.thinkingLevel;
+								const selectionRevision = this.getUserModelSelectionRevision();
+								const preparedSelection = await this.prepareModelSelectionForProfileActivation(
+									updatedModel,
+									previousThinkingLevel,
+									reloadSignal,
+								);
+								if (
+									this.getUserModelSelectionRevision() === selectionRevision &&
+									this.model === previousModel &&
+									this.thinkingLevel === previousThinkingLevel
+								) {
+									preparedLiveModelSelectionRevision = selectionRevision;
+									preparedLiveModelSelection = preparedSelection;
+								}
+							}
+						}
+					};
+					await prepareCandidateSelections(stagedModels);
+					reloadSignal.throwIfAborted();
+					publicationFenceRelease = await this.#modelRegistry.acquirePublicationFence(reloadSignal);
+					reloadSignal.throwIfAborted();
+					let preserveLiveModelSelection = false;
+					const prepareLiveModelSelection = async (modelsCandidate: ModelsConfigReloadCandidate): Promise<void> => {
+						preserveLiveModelSelection =
+							this.getUserModelSelectionRevision() !== userModelSelectionRevision ||
+							this.model !== userModelSelectionModel;
+						if (
+							preparedLiveModelSelection &&
+							(this.getUserModelSelectionRevision() !== preparedLiveModelSelectionRevision ||
+								this.model !== preparedLiveModelSelection.previousModel ||
+								this.thinkingLevel !== preparedLiveModelSelection.previousThinkingLevel)
+						) {
+							preparedLiveModelSelection = undefined;
+						}
+						if (preserveLiveModelSelection && this.model) {
+							const currentModel = this.model;
+							const currentThinkingLevel = this.thinkingLevel;
+							const updatedModel = this.#updatedCurrentModel(modelsCandidate.registry);
+							if (!updatedModel) {
+								throw new ConfigurationReloadError(
+									"MODEL_UNAVAILABLE",
+									new Error("The current model is unavailable in the staged registry"),
+								);
+							}
+							if (!util.isDeepStrictEqual(currentModel, updatedModel)) {
+								const selectionRevision = this.getUserModelSelectionRevision();
+								preparedLiveModelSelection = await this.prepareModelSelectionForProfileActivation(
+									updatedModel,
+									currentThinkingLevel,
+									reloadSignal,
+								);
+								preparedLiveModelSelectionRevision = selectionRevision;
+								reloadSignal.throwIfAborted();
+								if (
+									this.getUserModelSelectionRevision() !== selectionRevision ||
+									this.model !== currentModel ||
+									this.thinkingLevel !== currentThinkingLevel
+								) {
+									throw new ConfigurationReloadError(
+										"PUBLICATION_FAILED",
+										new Error("The live model selection changed while preparing the reload model"),
+									);
+								}
+							}
+						}
+					};
+					let catalogRestages = 0;
+					for (;;) {
+						const modelsCandidate = stagedModels;
+						if (!modelsCandidate) throw new ConfigurationReloadError("MODELS_INVALID");
+						if (!modelsCandidate.isCurrent()) {
+							if (catalogRestages >= 2) {
+								throw new ConfigurationReloadError(
+									"PUBLICATION_FAILED",
+									new Error("The model catalog kept changing during configuration reload preflight"),
+									{ retryable: true },
+								);
+							}
+							catalogRestages++;
+							modelsCandidate.rollback();
+							stagedModels = undefined;
+							let restagedModels: ModelsConfigReloadCandidate;
+							try {
+								restagedModels = await this.#modelRegistry.stageModelsConfigReload(
+									candidate.models,
+									stagedSettings,
+								);
+							} catch (error) {
+								throw new ConfigurationReloadError("MODELS_INVALID", error);
+							}
+							stagedModels = restagedModels;
+							if (!restagedModels.valid || !restagedModels.diagnostics.valid) {
+								throw new ConfigurationReloadError("MODELS_INVALID");
+							}
+							await prepareCandidateSelections(restagedModels);
+							reloadSignal.throwIfAborted();
+							continue;
+						}
+						await prepareLiveModelSelection(modelsCandidate);
+						reloadSignal.throwIfAborted();
+						if (modelsCandidate.isCurrent()) break;
+					}
+					const modelsChanged = stagedModels.changed;
+					const settingsChanged = changedSettings.length > 0;
+					if (!settingsChanged && !modelsChanged) {
+						stagedModels!.rollback();
+						modelRollbackAttempted = true;
+						return { applied: false, settingsChanged: false, modelsChanged: false, changedSettings: [] };
+					}
+
+					let publication: SettingsConfigReloadPublication | undefined;
+					let modelCommitStarted = false;
+					let activationPublicationStarted = false;
+					let liveModelSelectionCommitted = false;
+					let liveModelSelectionCommitFinished = false;
+					let committedThinkingLevelLiveMutationRevision: number | undefined;
+					try {
+						publication = this.settings.publishGlobalConfigReload(stagedSettings, () => {
+							modelCommitStarted = true;
+							stagedModels!.commit();
+							if (prepared) {
+								activationPublicationStarted = true;
+								publishPreparedModelProfileActivation(prepared, {
+									preserveDefaultModelSelection,
+									preserveLiveModelSelection,
+								});
+							}
+							if (preparedLiveModelSelection) {
+								this.#assertPreparedProfileModelSelectionCurrent(preparedLiveModelSelection);
+								liveModelSelectionCommitted = true;
+								this.commitPreparedProfileModelSelection(
+									preparedLiveModelSelection,
+									mutationRevision => {
+										committedThinkingLevelLiveMutationRevision = mutationRevision;
+									},
+								);
+								liveModelSelectionCommitFinished = true;
+							}
+						});
+						stagedModels.finalize();
+						publication.finalize();
+						modelCommitSucceeded = true;
+					} catch (error) {
+						const rollbackErrors: unknown[] = [];
+						if (liveModelSelectionCommitted && committedThinkingLevelLiveMutationRevision === undefined) {
+							committedThinkingLevelLiveMutationRevision = this.#thinkingLevelLiveMutationRevision;
+						}
+						try {
+							publication?.rollback();
+						} catch (rollbackError) {
+							rollbackErrors.push(rollbackError);
+						}
+						if (prepared && activationPublicationStarted) {
+							try {
+								await rollbackPreparedModelProfileActivation(prepared, {
+									preserveDefaultModelSelection,
+									preserveLiveModelSelection,
+									isCurrent: () => this.getUserModelSelectionRevision() === userModelSelectionRevision,
+								});
+							} catch (rollbackError) {
+								rollbackErrors.push(rollbackError);
+							}
+						}
+						const thinkingLevelMutationSuperseded =
+							committedThinkingLevelLiveMutationRevision !== undefined &&
+							this.#thinkingLevelLiveMutationRevision !== committedThinkingLevelLiveMutationRevision;
+						if (
+							liveModelSelectionCommitted &&
+							preparedLiveModelSelection &&
+							this.getUserModelSelectionRevision() === preparedLiveModelSelectionRevision &&
+							this.model === preparedLiveModelSelection.model &&
+							(!liveModelSelectionCommitFinished ||
+								thinkingLevelMutationSuperseded ||
+								this.thinkingLevel === preparedLiveModelSelection.committedThinkingLevel)
+						) {
+							try {
+								await this.restoreModelSelectionForRollback(
+									preparedLiveModelSelection.previousModel,
+									thinkingLevelMutationSuperseded
+										? this.thinkingLevel
+										: preparedLiveModelSelection.previousThinkingLevel,
+								);
+							} catch (rollbackError) {
+								rollbackErrors.push(rollbackError);
+							}
+						}
+						if (modelCommitStarted) {
+							const selectedModelBeforeRollback = this.model;
+							const selectedThinkingLevelBeforeRollback = this.thinkingLevel;
+							const selectionRevisionBeforeRollback = this.getUserModelSelectionRevision();
+							try {
+								stagedModels!.rollback();
+								modelRollbackAttempted = true;
+								if (
+									selectedModelBeforeRollback &&
+									this.model === selectedModelBeforeRollback &&
+									this.getUserModelSelectionRevision() === selectionRevisionBeforeRollback
+								) {
+									const restoredModel = this.#modelRegistry
+										.getAvailable()
+										.find(
+											model =>
+												model.provider === selectedModelBeforeRollback.provider &&
+												model.id === selectedModelBeforeRollback.id,
+										);
+									if (restoredModel && !util.isDeepStrictEqual(selectedModelBeforeRollback, restoredModel)) {
+										await this.restoreModelSelectionForRollback(
+											restoredModel,
+											selectedThinkingLevelBeforeRollback,
+										);
+									}
+								}
+							} catch (rollbackError) {
+								rollbackErrors.push(rollbackError);
+								modelRollbackAttempted = true;
+							}
+						}
+						if (rollbackErrors.length > 0) {
+							throw new ConfigurationReloadError(
+								"PUBLICATION_FAILED",
+								new AggregateError([error, ...rollbackErrors]),
+							);
+						}
+						throw new ConfigurationReloadError("PUBLICATION_FAILED", error);
+					} finally {
+						publicationFenceRelease?.();
+						publicationFenceRelease = undefined;
+					}
+					const preparedActivation = prepared;
+					if (preparedActivation) {
+						await this.#modelRegistry.withConsumerLease(async () => {
+							await finishPreparedModelProfileActivation(preparedActivation);
+						});
+					}
+					if (preparedLiveModelSelection) {
+						try {
+							await this.finishPreparedProfileModelSelection(preparedLiveModelSelection);
+						} catch (error) {
+							logger.warn("Failed to refresh session tools after model catalog reload", {
+								error: error instanceof Error ? error.message : String(error),
+							});
+						}
+					}
+					return {
+						applied: true,
+						settingsChanged,
+						modelsChanged,
+						changedSettings,
+					};
+				},
+				reloadSignal,
+				undefined,
+				{ selectionTransaction, skipModelRegistryLease: true },
+			);
+		} catch (error) {
+			if (stagedModels && !modelRollbackAttempted && !modelCommitSucceeded) {
+				try {
+					stagedModels.rollback();
+				} catch (rollbackError) {
+					throw new ConfigurationReloadError("PUBLICATION_FAILED", new AggregateError([error, rollbackError]));
+				}
+			}
+			if (
+				transitionAbortController.signal.aborted &&
+				!signal.aborted &&
+				!this.#disposeAbortController.signal.aborted
+			) {
+				retryAfterSessionTransition = true;
+			} else if (error instanceof ConfigurationReloadError) {
+				throw error;
+			} else {
+				throw new ConfigurationReloadError("PUBLICATION_FAILED", error);
+			}
+		} finally {
+			publicationFenceRelease?.();
+			if (this.#selectionAwaitingMutationTransaction === selectionTransaction) {
+				this.#selectionAwaitingMutationTransaction = undefined;
+			}
+			selectionFence.resolve();
+			this.#pendingSelectionFences -= 1;
+			if (this.#oldestPendingSelectionFenceGeneration === selectionFenceGeneration) {
+				this.#oldestPendingSelectionFenceGeneration = 0;
+			}
+			this.#configurationReloadControllers.delete(transitionAbortController);
+			this.#resolveSessionSettlement();
+		}
+		if (retryAfterSessionTransition) {
+			await this.#waitForSessionTransitionEnd(AbortSignal.any([signal, this.#disposeAbortController.signal]));
+			return await this.#reloadConfiguration(
+				candidate,
+				signal,
+				userModelSelectionRevision,
+				userModelSelectionModel,
+			);
+		}
+		throw new Error("Configuration reload exited without a result or a session-transition retry.");
+	}
+
+	#updatedCurrentModel(registry: ModelRegistry): Model | undefined {
+		const current = this.model;
+		if (!current) return undefined;
+		const updated = registry
+			.getAvailable()
+			.find(model => model.provider === current.provider && model.id === current.id);
+		if (!updated) throw new ConfigurationReloadError("MODEL_UNAVAILABLE");
+		return updated;
+	}
+
+	#currentModelConfigurationChanged(registry: ModelRegistry): boolean {
+		const current = this.model;
+		const updated = this.#updatedCurrentModel(registry);
+		return current !== undefined && updated !== undefined && !util.isDeepStrictEqual(current, updated);
 	}
 
 	/**
@@ -18416,10 +19141,28 @@ export class AgentSession {
 			const modelRoles = { ...this.settings.get("modelRoles") };
 			const agentOverrides = { ...this.settings.get("task.agentModelOverrides") };
 			for (const [role, baseline] of this.#activeProfileInstalledRoles) {
+				const installed = this.#activeProfileInstalledRoleValues.get(role);
+				if (
+					installed !== undefined &&
+					!util.isDeepStrictEqual(
+						normalizeModelSelectorValue(modelRoles[role]),
+						normalizeModelSelectorValue(installed),
+					)
+				)
+					continue;
 				if (role === "default" || baseline === undefined) delete modelRoles[role];
 				else modelRoles[role] = baseline;
 			}
 			for (const [role, baseline] of this.#activeProfileInstalledAgentOverrides) {
+				const installed = this.#activeProfileInstalledAgentOverrideValues.get(role);
+				if (
+					installed !== undefined &&
+					!util.isDeepStrictEqual(
+						normalizeModelSelectorValue(agentOverrides[role]),
+						normalizeModelSelectorValue(installed),
+					)
+				)
+					continue;
 				if (baseline === undefined) delete agentOverrides[role];
 				else agentOverrides[role] = baseline;
 			}
@@ -18427,6 +19170,8 @@ export class AgentSession {
 			this.settings.override("task.agentModelOverrides", agentOverrides);
 			this.#activeProfileInstalledRoles.clear();
 			this.#activeProfileInstalledAgentOverrides.clear();
+			this.#activeProfileInstalledRoleValues.clear();
+			this.#activeProfileInstalledAgentOverrideValues.clear();
 		}
 		if (hadInstalledKeys || this.getActiveModelProfile() !== undefined) {
 			this.#modelRegistry.reapplyConfiguredModelBindings(this.settings);
@@ -18444,31 +19189,97 @@ export class AgentSession {
 		modelRoles: readonly string[],
 		agentModelOverrides: readonly string[],
 		preProfileModel: Model | undefined,
+		baseline?: {
+			modelRoles: Readonly<Record<string, ModelSelectorValue>>;
+			agentModelOverrides: Readonly<Record<string, ModelSelectorValue>>;
+		},
+		installed?: {
+			modelRoles: Readonly<Record<string, ModelSelectorValue>>;
+			agentModelOverrides: Readonly<Record<string, ModelSelectorValue>>;
+		},
+		manual?: { modelRoles: readonly string[]; agentModelOverrides: readonly string[] },
 	): void {
 		const bindings = this.#modelRegistry.getConfiguredModelBindings?.();
 		if (this.#preProfileModel === undefined) this.#preProfileModel = preProfileModel;
+		const modelRoleSet = new Set(modelRoles);
+		const agentOverrideSet = new Set(agentModelOverrides);
+		for (const role of this.#activeProfileInstalledRoles.keys()) {
+			if (!modelRoleSet.has(role)) {
+				this.#activeProfileInstalledRoles.delete(role);
+				this.#activeProfileInstalledRoleValues.delete(role);
+			}
+		}
+		for (const role of this.#activeProfileInstalledAgentOverrides.keys()) {
+			if (!agentOverrideSet.has(role)) {
+				this.#activeProfileInstalledAgentOverrides.delete(role);
+				this.#activeProfileInstalledAgentOverrideValues.delete(role);
+			}
+		}
 		for (const role of modelRoles) {
-			if (this.#activeProfileInstalledRoles.has(role)) continue;
-			const bindingValue = bindings?.modelRoles?.[role];
-			this.#activeProfileInstalledRoles.set(
-				role,
-				bindingValue ?? this.settings.getGlobal("modelRoles")?.[role as never],
-			);
+			if (!this.#activeProfileInstalledRoles.has(role)) {
+				const bindingValue = bindings?.modelRoles?.[role];
+				this.#activeProfileInstalledRoles.set(
+					role,
+					baseline
+						? Object.hasOwn(baseline.modelRoles, role)
+							? baseline.modelRoles[role]
+							: undefined
+						: (bindingValue ?? this.settings.getGlobal("modelRoles")?.[role as never]),
+				);
+			}
+			const installedValue = installed?.modelRoles[role] ?? this.settings.get("modelRoles")[role];
+			if (installedValue !== undefined) this.#activeProfileInstalledRoleValues.set(role, installedValue);
 		}
 		for (const role of agentModelOverrides) {
-			if (this.#activeProfileInstalledAgentOverrides.has(role)) continue;
-			const bindingValue = bindings?.agentModelOverrides?.[role];
-			this.#activeProfileInstalledAgentOverrides.set(
-				role,
-				bindingValue ?? this.settings.getGlobal("task.agentModelOverrides")?.[role as never],
-			);
+			if (!this.#activeProfileInstalledAgentOverrides.has(role)) {
+				const bindingValue = bindings?.agentModelOverrides?.[role];
+				this.#activeProfileInstalledAgentOverrides.set(
+					role,
+					baseline
+						? Object.hasOwn(baseline.agentModelOverrides, role)
+							? baseline.agentModelOverrides[role]
+							: undefined
+						: (bindingValue ?? this.settings.getGlobal("task.agentModelOverrides")?.[role as never]),
+				);
+			}
+			const installedValue =
+				installed?.agentModelOverrides[role] ?? this.settings.get("task.agentModelOverrides")[role];
+			if (installedValue !== undefined) this.#activeProfileInstalledAgentOverrideValues.set(role, installedValue);
 		}
+		this.#activeProfileManualModelRoles = new Set(manual?.modelRoles ?? []);
+		this.#activeProfileManualAgentModelOverrides = new Set(manual?.agentModelOverrides ?? []);
+	}
+
+	getProfileInstalledOverrideState(): AgentSessionProfileInstalledOverrideState {
+		return {
+			modelRoles: new Map(this.#activeProfileInstalledRoles),
+			agentModelOverrides: new Map(this.#activeProfileInstalledAgentOverrides),
+			installedModelRoles: new Map(this.#activeProfileInstalledRoleValues),
+			installedAgentModelOverrides: new Map(this.#activeProfileInstalledAgentOverrideValues),
+			manualModelRoles: new Set(this.#activeProfileManualModelRoles),
+			manualAgentModelOverrides: new Set(this.#activeProfileManualAgentModelOverrides),
+			preProfileModel: this.#preProfileModel,
+		};
+	}
+
+	restoreProfileInstalledOverrideState(state: AgentSessionProfileInstalledOverrideState): void {
+		this.#activeProfileInstalledRoles = new Map(state.modelRoles);
+		this.#activeProfileInstalledAgentOverrides = new Map(state.agentModelOverrides);
+		this.#activeProfileInstalledRoleValues = new Map(state.installedModelRoles);
+		this.#activeProfileInstalledAgentOverrideValues = new Map(state.installedAgentModelOverrides);
+		this.#activeProfileManualModelRoles = new Set(state.manualModelRoles);
+		this.#activeProfileManualAgentModelOverrides = new Set(state.manualAgentModelOverrides);
+		this.#preProfileModel = state.preProfileModel;
 	}
 
 	/** Drop the recorded profile-installed override keys after materialization. */
 	clearProfileInstalledOverrides(): void {
 		this.#activeProfileInstalledRoles.clear();
 		this.#activeProfileInstalledAgentOverrides.clear();
+		this.#activeProfileInstalledRoleValues.clear();
+		this.#activeProfileInstalledAgentOverrideValues.clear();
+		this.#activeProfileManualModelRoles.clear();
+		this.#activeProfileManualAgentModelOverrides.clear();
 	}
 
 	/** Current profile-installed override keys, for deriving the activation base. */
@@ -18901,6 +19712,60 @@ export class AgentSession {
 		return scope;
 	}
 
+	async prepareModelSelectionForProfileActivation(
+		model: Model,
+		thinkingLevel: ThinkingLevel | undefined,
+		signal?: AbortSignal,
+	): Promise<PreparedProfileModelSelection> {
+		signal?.throwIfAborted();
+		const sessionId = this.sessionId;
+		const previousModel = this.model;
+		const previousThinkingLevel = this.thinkingLevel;
+		const previousEditMode = this.#resolveActiveEditMode();
+		const committedThinkingLevel = resolveThinkingLevelForModel(
+			model,
+			thinkingLevel ?? model.thinking?.defaultLevel ?? previousThinkingLevel,
+		);
+		if (this.sessionId !== sessionId) throw new Error("Session changed while preparing profile model selection");
+		return {
+			sessionId,
+			model,
+			thinkingLevel,
+			committedThinkingLevel,
+			previousModel,
+			previousThinkingLevel,
+			previousEditMode,
+			signal,
+		};
+	}
+
+	commitPreparedProfileModelSelection(
+		prepared: PreparedProfileModelSelection,
+		onThinkingLevelApplied?: (mutationRevision: number) => void,
+	): void {
+		this.#assertPreparedProfileModelSelectionCurrent(prepared);
+		this.#setModelAuthoritatively(prepared.model, "profile-activation");
+		this.#syncAppendOnlyContext(prepared.model);
+		this.sessionManager.appendModelChange(`${prepared.model.provider}/${prepared.model.id}`, "temporary");
+		this.settings.getStorage()?.recordModelUsage(`${prepared.model.provider}/${prepared.model.id}`);
+		this.#applyThinkingLevel(prepared.committedThinkingLevel, false, false, onThinkingLevelApplied);
+	}
+
+	#assertPreparedProfileModelSelectionCurrent(prepared: PreparedProfileModelSelection): void {
+		prepared.signal?.throwIfAborted();
+		if (
+			this.sessionId !== prepared.sessionId ||
+			this.model !== prepared.previousModel ||
+			this.thinkingLevel !== prepared.previousThinkingLevel
+		) {
+			throw new Error("Session model changed while preparing profile activation");
+		}
+	}
+
+	finishPreparedProfileModelSelection(prepared: PreparedProfileModelSelection): Promise<void> {
+		return this.#syncEditToolModeAfterModelChange(prepared.previousEditMode);
+	}
+
 	/** Restore the exact live-model state captured before a failed selector transaction. */
 	async restoreModelSelectionForRollback(
 		model: Model | undefined,
@@ -19010,14 +19875,12 @@ export class AgentSession {
 		if (thinkingLevelChanged) {
 			const event: AgentSessionEvent = { type: "thinking_level_changed", thinkingLevel };
 			for (const listener of this.#eventListenerSnapshot) {
-				try {
-					listener(event);
-				} catch {
+				deliverSessionEvent(listener, event, () => {
 					logger.warn("Default model selection event listener failed", {
 						code: "default_model_selection_listener_failed",
 						disposition: "continue",
 					});
-				}
+				});
 			}
 		}
 		this.#applyPreparedDefaultModelSelectionPrompt(systemPrompt);
@@ -19455,7 +20318,12 @@ export class AgentSession {
 	 * effort (issue #4695): only control surfaces may pass true, so model-default
 	 * appends never mint `session` scope in {@link getThinkingScopeForControl}.
 	 */
-	#applyThinkingLevel(level: ThinkingLevel | undefined, persist: boolean, operatorIntent: boolean): void {
+	#applyThinkingLevel(
+		level: ThinkingLevel | undefined,
+		persist: boolean,
+		operatorIntent: boolean,
+		onApplied?: (mutationRevision: number) => void,
+	): void {
 		if (persist) this.#assertDurableSettingsWritable();
 		this.#thinkingLevelMutationRevision++;
 		this.#thinkingLevelLiveMutationRevision++;
@@ -19465,6 +20333,7 @@ export class AgentSession {
 		const isChanging = effectiveLevel !== this.#thinkingLevel;
 
 		this.#thinkingLevel = effectiveLevel;
+		onApplied?.(this.#thinkingLevelLiveMutationRevision);
 		this.agent.setThinkingLevel(toReasoningEffort(effectiveLevel));
 		if (isChanging) this.#defaultModelSelectionMutationRevision++;
 
@@ -20480,7 +21349,7 @@ export class AgentSession {
 								promptOverride: compactionPrep.hookPrompt,
 								extraContext: compactionPrep.hookContext,
 								remoteInstructions: this.#baseSystemPrompt.join("\n\n"),
-								convertToLlm,
+								convertToLlm: (messages) => this.#summaryConvertToLlm(messages),
 							},
 						);
 						summary = result.summary;
@@ -20731,7 +21600,7 @@ export class AgentSession {
 					tools: this.agent.state.tools,
 					customInstructions,
 					promptExtension: this.settings.get("compaction.handoffPromptExtension") || undefined,
-					convertToLlm,
+					convertToLlm: (messages) => this.#summaryConvertToLlm(messages),
 					initiatorOverride: "agent",
 					metadata: this.agent.metadataForProvider(model.provider),
 					telemetry: resolveTelemetry(this.agent.telemetry, this.sessionId),
@@ -21008,7 +21877,28 @@ export class AgentSession {
 		const compactionEntry = getLatestCompactionEntry(this.sessionManager.getBranch());
 		const errorIsFromBeforeCompaction =
 			compactionEntry !== null && assistantMessage.timestamp < new Date(compactionEntry.timestamp).getTime();
+		// A successful empty stop with nonzero usage is not overflow evidence by usage
+		// alone. Zero-usage empty stops stay on the legacy proxy-overflow path, and typed
+		// overflow classification is preserved; only the empty-stop heuristic is disabled.
+		const hasOverflowEvidenceBeyondEmptyStopHeuristic =
+			assistantMessage.stopReason === "stop" &&
+			assistantMessage.content.length === 0 &&
+			classifyContextOverflow(
+				{ ...assistantMessage, content: [{ type: "text", text: "" }] },
+				assistantMessage.transportFailure,
+				contextWindow,
+			);
+		const emptyStopPromptTokens =
+			assistantMessage.usage.input + assistantMessage.usage.cacheRead + assistantMessage.usage.cacheWrite;
+		const successfulEmptyStop =
+			assistantMessage.stopReason === "stop" &&
+			assistantMessage.content.length === 0 &&
+			(emptyStopPromptTokens + assistantMessage.usage.output > 0 ||
+				assistantMessage.usage.totalTokens > 0) &&
+			emptyStopPromptTokens <= contextWindow &&
+			!hasOverflowEvidenceBeyondEmptyStopHeuristic;
 		if (
+			!successfulEmptyStop &&
 			sameModel &&
 			!errorIsFromBeforeCompaction &&
 			classifyContextOverflow(assistantMessage, assistantMessage.transportFailure, contextWindow)
@@ -22470,6 +23360,18 @@ export class AgentSession {
 		};
 	}
 
+	/**
+	 * Manual compact, auto compact, handoff, and branch summary keep the
+	 * existing conversion and obfuscate with the session registry prompt turns
+	 * already use.
+	 */
+	#summaryConvertToLlm(messages: AgentMessage[]): Message[] {
+		const converted = convertToLlm(messages);
+		const obfuscator = this.#obfuscator;
+		if (!obfuscator?.hasSecrets()) return converted;
+		return obfuscateMessages(obfuscator, converted);
+	}
+
 	async #compactWithFallbackModel(
 		preparation: CompactionPreparation,
 		customInstructions: string | undefined,
@@ -22498,7 +23400,7 @@ export class AgentSession {
 					...options,
 					...this.#maintenanceProviderTransport(),
 					metadata: this.agent.metadataForProvider(candidate.provider),
-					convertToLlm,
+					convertToLlm: (messages) => this.#summaryConvertToLlm(messages),
 					telemetry,
 					authCredentialType: this.#modelRegistry.getSessionCredentialType(
 						candidate.provider,
@@ -23023,7 +23925,7 @@ export class AgentSession {
 								remoteInstructions: this.#baseSystemPrompt.join("\n\n"),
 								metadata: this.agent.metadataForProvider(candidate.provider),
 								initiatorOverride: "agent",
-								convertToLlm,
+								convertToLlm: (messages) => this.#summaryConvertToLlm(messages),
 								telemetry,
 								authCredentialType: this.#modelRegistry.getSessionCredentialType(
 									candidate.provider,
@@ -23702,6 +24604,7 @@ export class AgentSession {
 
 	#managedFallbackPromptOptions(): {
 		fallbackManaged?: boolean;
+		contextOverflowManaged?: boolean;
 		nextFallbackAttempt?: (model: Model) => FallbackAttemptToken;
 		onManagedAttemptAccepted?: () => void;
 		onManagedAttemptOutcome?: (
@@ -23709,9 +24612,10 @@ export class AgentSession {
 		) => ManagedAttemptDecision | Promise<ManagedAttemptDecision>;
 	} {
 		const controller = this.#defaultFallbackChain();
-		if (controller.chain.entries.length < 2) return {};
+		if (controller.chain.entries.length < 2) return { contextOverflowManaged: true };
 		return {
 			fallbackManaged: true,
+			contextOverflowManaged: true,
 			nextFallbackAttempt: model => {
 				controller.onAttemptStarted();
 				this.#managedFallbackProviderAttemptCount++;
@@ -25624,10 +26528,6 @@ export class AgentSession {
 	// Bash Execution
 	// =========================================================================
 
-	async #saveBashOriginalArtifact(originalText: string): Promise<BashArtifactSaveResult> {
-		return saveAgentBashOriginalArtifact(this.sessionManager, originalText);
-	}
-
 	/**
 	 * Execute a bash command.
 	 * Adds result to agent context and session.
@@ -25642,6 +26542,7 @@ export class AgentSession {
 		onChunk?: (chunk: string) => void,
 		options?: { excludeFromContext?: boolean; onPersisted?: () => void },
 	): Promise<BashResult> {
+		const publishArtifact = this.sessionManager.captureArtifactPublication();
 		const excludeFromContext = options?.excludeFromContext === true;
 		this.#markRetryReplayUnsafe();
 
@@ -25679,7 +26580,7 @@ export class AgentSession {
 					sessionId: this.sessionId,
 					cwd,
 				}),
-				onMinimizedSave: originalText => this.#saveBashOriginalArtifact(originalText),
+				onMinimizedSave: originalText => saveAgentBashOriginalArtifact(publishArtifact, originalText),
 			});
 
 			this.recordBashResult(command, result, options);
@@ -25783,9 +26684,18 @@ export class AgentSession {
 		this.#markRetryReplayUnsafe();
 		const cwd = this.sessionManager.getCwd();
 		this.assertEvalExecutionAllowed();
+		const sessionFile = this.sessionManager.getSessionFile();
+		const sessionId = sessionFile ? `session:${sessionFile}:cwd:${cwd}` : `cwd:${cwd}`;
+		const kernelOwnerId = this.#evalKernelOwnerId;
+		const kernelMode = this.settings.get("python.kernelMode");
+		const settings = this.settings;
 
 		const abortController = new AbortController();
-		const execution = (async (): Promise<PythonResult> => {
+		const execution = Promise.resolve().then(async (): Promise<PythonResult> => {
+			if (abortController.signal.aborted) {
+				throw abortController.signal.reason ?? new DOMException("Aborted", "AbortError");
+			}
+			this.assertEvalExecutionAllowed();
 			if (this.#extensionRunner?.hasHandlers("user_python")) {
 				const hookResult = await this.#extensionRunner.emitUserPython({
 					type: "user_python",
@@ -25793,6 +26703,9 @@ export class AgentSession {
 					excludeFromContext,
 					cwd,
 				});
+				if (abortController.signal.aborted) {
+					throw abortController.signal.reason ?? new DOMException("Aborted", "AbortError");
+				}
 				this.assertEvalExecutionAllowed();
 				if (hookResult?.result) {
 					this.recordPythonResult(code, hookResult.result, options);
@@ -25800,15 +26713,12 @@ export class AgentSession {
 				}
 			}
 
-			// Use the same session ID as eval's Python backend for kernel sharing
-			const sessionFile = this.sessionManager.getSessionFile();
-			const sessionId = sessionFile ? `session:${sessionFile}:cwd:${cwd}` : `cwd:${cwd}`;
 			const result = await executePythonCommand(code, {
 				cwd,
 				sessionId,
-				kernelOwnerId: this.#evalKernelOwnerId,
-				kernelMode: this.settings.get("python.kernelMode"),
-				settings: this.settings,
+				kernelOwnerId,
+				kernelMode,
+				settings,
 				onChunk,
 				signal: abortController.signal,
 			});
@@ -25817,7 +26727,7 @@ export class AgentSession {
 			// must not reopen a closing session to append history.
 			if (!this.#evalExecutionDisposing) this.recordPythonResult(code, result, options);
 			return result;
-		})();
+		});
 		return await this.trackEvalExecution(execution, abortController);
 	}
 
@@ -26764,6 +27674,12 @@ export class AgentSession {
 			);
 			const previousActiveProfileInstalledRoles = new Map(this.#activeProfileInstalledRoles);
 			const previousActiveProfileInstalledAgentOverrides = new Map(this.#activeProfileInstalledAgentOverrides);
+			const previousActiveProfileInstalledRoleValues = new Map(this.#activeProfileInstalledRoleValues);
+			const previousActiveProfileInstalledAgentOverrideValues = new Map(
+				this.#activeProfileInstalledAgentOverrideValues,
+			);
+			const previousActiveProfileManualModelRoles = new Set(this.#activeProfileManualModelRoles);
+			const previousActiveProfileManualAgentModelOverrides = new Set(this.#activeProfileManualAgentModelOverrides);
 			const previousPreProfileModel = this.#preProfileModel;
 			const previousServiceTier = this.agent.serviceTier;
 			const previousSelectedMCPToolNames = new Set(this.#selectedMCPToolNames);
@@ -26895,7 +27811,7 @@ export class AgentSession {
 						? settingsDefaultEntries
 						: (configuredDefaultChain?.entries ??
 							(sessionContext.models.default ? [sessionContext.models.default] : []));
-				this.#activeModelProfile = targetActiveModelProfile;
+				this.setActiveModelProfile(targetActiveModelProfile);
 				this.#defaultFallbackController = undefined;
 				if (defaultEntries.length > 0) {
 					const resolution = await resolveModelChainWithAuth(
@@ -26991,7 +27907,7 @@ export class AgentSession {
 				// a cross-file transition must not advertise that profile after its
 				// runtime role layer was removed. Otherwise delegation prompt state and
 				// actual role routing diverge.
-				if (!targetProfileRuntimeInstalled) this.#activeModelProfile = undefined;
+				if (!targetProfileRuntimeInstalled) this.setActiveModelProfile(undefined);
 
 				const hasThinkingEntry = this.sessionManager
 					.getBranch()
@@ -27194,6 +28110,12 @@ export class AgentSession {
 				else this.settings.override("task.agentModelOverrides", previousAgentModelOverridesOverride);
 				this.#activeProfileInstalledRoles = new Map(previousActiveProfileInstalledRoles);
 				this.#activeProfileInstalledAgentOverrides = new Map(previousActiveProfileInstalledAgentOverrides);
+				this.#activeProfileInstalledRoleValues = new Map(previousActiveProfileInstalledRoleValues);
+				this.#activeProfileInstalledAgentOverrideValues = new Map(
+					previousActiveProfileInstalledAgentOverrideValues,
+				);
+				this.#activeProfileManualModelRoles = new Set(previousActiveProfileManualModelRoles);
+				this.#activeProfileManualAgentModelOverrides = new Set(previousActiveProfileManualAgentModelOverrides);
 				this.#preProfileModel = previousPreProfileModel;
 				this.#activeModelProfile = previousActiveModelProfile;
 				this.#restoreWorkflowGateEmitter(suspendedWorkflowGateEmitter);
@@ -27503,7 +28425,7 @@ export class AgentSession {
 					customInstructions: options.customInstructions,
 					reserveTokens: branchSummarySettings.reserveTokens,
 					metadata: this.agent.metadataForProvider(model.provider),
-					convertToLlm,
+					convertToLlm: (messages) => this.#summaryConvertToLlm(messages),
 					telemetry: resolveTelemetry(this.agent.telemetry, this.sessionId),
 				});
 				this.#branchSummaryAbortController = undefined;
