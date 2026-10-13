@@ -949,7 +949,7 @@ export class AskTool implements AgentTool<AskParametersSchema, AskToolDetails> {
 		_onUpdate?: AgentToolUpdateCallback<AskToolDetails>,
 		context?: AgentToolContext,
 	): Promise<AgentToolResult<AskToolDetails>> {
-		await assertUltragoalAskAllowed(
+		const verifiedRalplanApprovalPresentation = await assertUltragoalAskAllowed(
 			this.session.cwd,
 			{ sessionId: this.session.getSessionId?.() ?? null },
 			this.session.getSessionAgentDir?.() ?? this.session.settings.getAgentDir(),
@@ -1290,6 +1290,31 @@ export class AskTool implements AgentTool<AskParametersSchema, AskToolDetails> {
 		const timeoutSeconds = this.session.settings.get("ask.timeout");
 		const settingsTimeout = timeoutSeconds === 0 ? null : timeoutSeconds * 1000;
 		const timeout = planModeEnabled ? null : settingsTimeout;
+		const captureQuestionExecutionPresentation = async (
+			question: AskParams["questions"][number],
+		): Promise<ExecutionApprovalPresentation> => {
+			const sessionId = this.session.getSessionId?.();
+			if (!sessionId) throw new ToolAbortError("Execution approval requires a session");
+			try {
+				if (
+					question.workflowGate?.stage === "ralplan" &&
+					question.workflowGate.kind === "approval" &&
+					verifiedRalplanApprovalPresentation
+				)
+					return verifiedRalplanApprovalPresentation;
+				return await captureExecutionApprovalPresentation(
+					this.session.cwd,
+					sessionId,
+					question.workflowGate?.stage === "ralplan" ? "ralplan" : "deep-interview",
+				);
+			} catch (error) {
+				throw new ToolAbortError(
+					error instanceof Error
+						? `Execution approval publication could not be authenticated: ${error.message}`
+						: "Execution approval publication could not be authenticated",
+				);
+			}
+		};
 
 		// Send notification if waiting and not suppressed
 		this.#sendAskNotification();
@@ -1335,23 +1360,7 @@ export class AskTool implements AgentTool<AskParametersSchema, AskToolDetails> {
 					? `interactive-${randomUUID()}`
 					: undefined;
 				let executionPresentation: ExecutionApprovalPresentation | undefined;
-				if (isExecutionApprovalQuestion) {
-					const sessionId = this.session.getSessionId?.();
-					if (!sessionId) throw new ToolAbortError("Execution approval requires a session");
-					try {
-						executionPresentation = await captureExecutionApprovalPresentation(
-							this.session.cwd,
-							sessionId,
-							q.workflowGate?.stage === "ralplan" ? "ralplan" : "deep-interview",
-						);
-					} catch (error) {
-						throw new ToolAbortError(
-							error instanceof Error
-								? `Execution approval publication could not be authenticated: ${error.message}`
-								: "Execution approval publication could not be authenticated",
-						);
-					}
-				}
+				if (isExecutionApprovalQuestion) executionPresentation = await captureQuestionExecutionPresentation(q);
 				const stopGateObservation = gateEmitter.onGateEmitted?.(gate => {
 					const stageState = gate.context?.stage_state;
 					if (
@@ -1384,23 +1393,7 @@ export class AskTool implements AgentTool<AskParametersSchema, AskToolDetails> {
 			}
 			try {
 				let executionPresentation: ExecutionApprovalPresentation | undefined;
-				if (isExecutionApprovalQuestion) {
-					const sessionId = this.session.getSessionId?.();
-					if (!sessionId) throw new ToolAbortError("Execution approval requires a session");
-					try {
-						executionPresentation = await captureExecutionApprovalPresentation(
-							this.session.cwd,
-							sessionId,
-							q.workflowGate?.stage === "ralplan" ? "ralplan" : "deep-interview",
-						);
-					} catch (error) {
-						throw new ToolAbortError(
-							error instanceof Error
-								? `Execution approval publication could not be authenticated: ${error.message}`
-								: "Execution approval publication could not be authenticated",
-						);
-					}
-				}
+				if (isExecutionApprovalQuestion) executionPresentation = await captureQuestionExecutionPresentation(q);
 				const executionGateId: string | undefined = isExecutionApprovalQuestion
 					? `interactive-${randomUUID()}`
 					: undefined;

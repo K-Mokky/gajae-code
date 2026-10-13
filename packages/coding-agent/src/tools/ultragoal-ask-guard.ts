@@ -1,5 +1,5 @@
 import type { AgentTool } from "@gajae-code/agent-core";
-import { captureExecutionApprovalPresentation } from "../gjc-runtime/state-runtime";
+import { captureExecutionApprovalPresentation, type ExecutionApprovalPresentation } from "../gjc-runtime/state-runtime";
 import {
 	consumeUltragoalAskNudge,
 	isUltragoalAskBlocked,
@@ -12,20 +12,29 @@ const RALPLAN_ULTRAGOAL_APPROVAL_OPTIONS = ["Refine further", "Approve execution
 
 type GuardedTool = AgentTool & { [ULTRAGOAL_ASK_GUARD]?: true };
 
+export function formatRalplanUltragoalApprovalQuestion(
+	presentation: ExecutionApprovalPresentation,
+): string | undefined {
+	if (!presentation.run_id || !/^[a-f0-9]{64}$/.test(presentation.artifact_sha256)) return undefined;
+	return `Approve execution via ultragoal for the current Ralplan final at ${JSON.stringify(presentation.artifact_path)} (run_id=${JSON.stringify(presentation.run_id)}, sha256=${presentation.artifact_sha256})?`;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function isSingleRalplanUltragoalApproval(params: unknown): boolean {
+function isSingleRalplanUltragoalApproval(params: unknown, expectedQuestion?: string): boolean {
 	if (!isRecord(params) || !Array.isArray(params.questions) || params.questions.length !== 1) return false;
 	const question = params.questions[0];
 	if (
 		!isRecord(question) ||
+		typeof question.question !== "string" ||
 		question.multi !== false ||
 		question.recommended !== 1 ||
 		!isRecord(question.workflowGate)
 	)
 		return false;
+	if (expectedQuestion !== undefined && question.question !== expectedQuestion) return false;
 	if (question.workflowGate.stage !== "ralplan" || question.workflowGate.kind !== "approval") return false;
 	if (!Array.isArray(question.options) || question.options.length !== RALPLAN_ULTRAGOAL_APPROVAL_OPTIONS.length)
 		return false;
@@ -39,21 +48,24 @@ async function isVerifiedRalplanUltragoalApproval(
 	sessionId: string,
 	diagnostic: UltragoalAskBlockDiagnostic,
 	params: unknown,
-): Promise<boolean> {
+): Promise<ExecutionApprovalPresentation | undefined> {
 	if (
 		diagnostic.source !== "goals_json" ||
 		(!diagnostic.reason.includes("recorded review blockers") &&
 			!diagnostic.reason.includes("incomplete required goals")) ||
 		!isSingleRalplanUltragoalApproval(params)
 	)
-		return false;
+		return undefined;
 	try {
 		// The public workflowGate fields are routing hints only. The narrowly exempt
-		// ask also needs a runtime-verified current final publication for this caller.
-		await captureExecutionApprovalPresentation(cwd, sessionId, "ralplan");
-		return true;
+		// ask must identify the runtime-verified current final publication visibly.
+		const presentation = await captureExecutionApprovalPresentation(cwd, sessionId, "ralplan");
+		const expectedQuestion = formatRalplanUltragoalApprovalQuestion(presentation);
+		return expectedQuestion !== undefined && isSingleRalplanUltragoalApproval(params, expectedQuestion)
+			? presentation
+			: undefined;
 	} catch {
-		return false;
+		return undefined;
 	}
 }
 
@@ -81,17 +93,18 @@ export async function assertUltragoalAskAllowed(
 	context: UltragoalAskGuardContext = {},
 	agentDir?: string,
 	params?: unknown,
-): Promise<void> {
+): Promise<ExecutionApprovalPresentation | undefined> {
 	// Durable Ultragoal state is session-scoped, so only the caller's own run may
 	// block `ask`. An anonymous caller has no run attributable to it, so the guard
 	// fails open instead of falling back to GJC_SESSION_ID or an auto-detected
 	// session: either can name another (possibly dead) session's abandoned run and
 	// would make `ask` unusable for every session in the repository.
 	const sessionId = context.sessionId?.trim();
-	if (!sessionId) return;
+	if (!sessionId) return undefined;
 	const diagnostic = await isUltragoalAskBlocked(cwd, { sessionId });
-	if (!diagnostic.active) return;
-	if (await isVerifiedRalplanUltragoalApproval(cwd, sessionId, diagnostic, params)) return;
+	if (!diagnostic.active) return undefined;
+	const presentation = await isVerifiedRalplanUltragoalApproval(cwd, sessionId, diagnostic, params);
+	if (presentation) return presentation;
 	const nudge = await consumeUltragoalAskNudge(cwd, sessionId, agentDir);
 	if (nudge.nudged) throw new ToolError(nudge.message);
 	throw new ToolError(formatUltragoalAskBlockMessage(diagnostic));

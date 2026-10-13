@@ -29,7 +29,10 @@ import { createUltragoalPlan, getUltragoalPaths } from "@gajae-code/coding-agent
 import { initTheme } from "@gajae-code/coding-agent/modes/theme/theme";
 import { SessionManager } from "@gajae-code/coding-agent/session/session-manager";
 import { AskTool } from "@gajae-code/coding-agent/tools/ask";
-import { guardToolForUltragoalAsk } from "@gajae-code/coding-agent/tools/ultragoal-ask-guard";
+import {
+	formatRalplanUltragoalApprovalQuestion,
+	guardToolForUltragoalAsk,
+} from "@gajae-code/coding-agent/tools/ultragoal-ask-guard";
 
 let askInvocationCounter = 0;
 
@@ -173,6 +176,16 @@ async function ask(
 ) {
 	const label = "Approve execution via ultragoal";
 	const toolCallId = `provider-${id}-${++askInvocationCounter}`;
+	let question = "Approve this published artifact for execution?";
+	if (stage === "ralplan") {
+		try {
+			const presentation = await captureExecutionApprovalPresentation(cwd, manager.getSessionId(), "ralplan");
+			const formattedQuestion = formatRalplanUltragoalApprovalQuestion(presentation);
+			if (formattedQuestion) question = formattedQuestion;
+		} catch {
+			// Forged and tampered approval cases must reach the guard to prove it fails closed.
+		}
+	}
 	const workflowGate =
 		stage === "deep-interview"
 			? { stage: "deep-interview" as const, kind: "execution" as const }
@@ -181,7 +194,7 @@ async function ask(
 		questions: [
 			{
 				id,
-				question: "Approve this published artifact for execution?",
+				question,
 				options: [{ label: "Refine further" }, { label }, { label: "Stop here" }],
 				recommended: 1,
 				multi: false,
@@ -399,6 +412,59 @@ describe("non-Crystal user-gated execution approval", () => {
 									{ label: "Postgres" },
 									{ label: "SQLite" },
 									{ label: "Approve execution via ultragoal" },
+								],
+								recommended: 1,
+								multi: false,
+								workflowGate: { stage: "ralplan", kind: "approval" },
+							},
+						],
+					},
+					undefined,
+					undefined,
+					context,
+				),
+			).rejects.toThrow(/Ultragoal try-harder nudge/);
+			expect(select).not.toHaveBeenCalled();
+			expect(await Bun.file(nonCrystalExecutionApprovalRecordPath(cwd, sessionId, "ralplan")).exists()).toBe(false);
+		});
+	});
+
+	it("blocks an unrelated prompt even with canonical approval options", async () => {
+		await withSession(async (cwd, _manager, sessionId) => {
+			await createUltragoalPlan({ cwd, brief: "Implement the approved repair" });
+			await publishReviewedRalplanFinal(cwd, sessionId);
+			const select = vi.fn(async () => "Postgres");
+			const tool = new AskTool({
+				cwd,
+				hasUI: true,
+				settings: Settings.isolated(),
+				getSessionId: () => sessionId,
+				getSessionFile: () => null,
+				getSessionSpawns: () => "*",
+			});
+			const guarded = guardToolForUltragoalAsk(
+				tool as AgentTool,
+				() => cwd,
+				() => ({ sessionId }),
+			) as AskTool;
+			const context = {
+				hasUI: true,
+				ui: { select, editor: async () => undefined },
+				abort: () => {},
+			} as unknown as AgentToolContext;
+
+			await expect(
+				guarded.execute(
+					"unrelated-approval-prompt",
+					{
+						questions: [
+							{
+								id: "database-choice",
+								question: "Which database should we use?",
+								options: [
+									{ label: "Refine further" },
+									{ label: "Approve execution via ultragoal" },
+									{ label: "Stop here" },
 								],
 								recommended: 1,
 								multi: false,
