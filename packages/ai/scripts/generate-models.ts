@@ -37,7 +37,7 @@ import {
 import { getGitLabDuoModels } from "../src/providers/gitlab-duo";
 import { kiroApiStaticModels } from "../src/providers/kiro-api-key";
 import { JWT_CLAIM_PATH } from "../src/providers/openai-codex/constants";
-import type { Model } from "../src/types";
+import type { Model, OpenAICompat } from "../src/types";
 import { fetchAntigravityDiscoveryModels } from "../src/utils/discovery/antigravity";
 import { fetchCodexModels } from "../src/utils/discovery/codex";
 import type { OAuthProvider } from "../src/utils/oauth/types";
@@ -127,15 +127,16 @@ const ULTRAFAST_TIER_MODEL_KEYS = new Set([
 	"opencode-zen/gpt-6.1-sol",
 ]);
 
-const ULTRAFAST_COMPATIBLE_PROVIDERS = new Set(["github-copilot", "opencode-zen"]);
+const ULTRAFAST_ONLY_PROVIDERS = new Set(["github-copilot", "opencode-zen"]);
 
 /** Preserve reviewed GPT-6 tier capabilities across dynamic catalog regeneration. */
 export function applyUltrafastTierModelPolicies(models: Model[]): void {
 	for (const model of models) {
 		if (!ULTRAFAST_TIER_MODEL_KEYS.has(`${model.provider}/${model.id}`)) continue;
+		const compat: OpenAICompat = { ...(model.compat as OpenAICompat | undefined) };
+		if (ULTRAFAST_ONLY_PROVIDERS.has(model.provider)) delete compat.supportsServiceTier;
 		model.compat = {
-			...model.compat,
-			...(ULTRAFAST_COMPATIBLE_PROVIDERS.has(model.provider) ? { supportsServiceTier: true } : {}),
+			...compat,
 			supportsUltrafastTier: true,
 		};
 	}

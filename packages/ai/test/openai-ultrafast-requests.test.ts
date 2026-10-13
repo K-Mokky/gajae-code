@@ -95,7 +95,8 @@ afterEach(() => {
 describe("ultrafast request serialization for bundled models", () => {
 	it("sends ultrafast for an opted-in GitHub Copilot Completions model", async () => {
 		const model = getBundledModel("github-copilot", "gpt-6-astra") as Model<"openai-completions">;
-		expect(model.compat).toMatchObject({ supportsServiceTier: true, supportsUltrafastTier: true });
+		expect(model.compat).toMatchObject({ supportsUltrafastTier: true });
+		expect(model.compat?.supportsServiceTier).toBeUndefined();
 		const bodies = captureRequests([
 			{
 				id: "chatcmpl_1",
@@ -116,13 +117,67 @@ describe("ultrafast request serialization for bundled models", () => {
 		expect(bodies[0]?.service_tier).toBe("ultrafast");
 	});
 
+	it("keeps GitHub Copilot fail-closed for existing service tiers", async () => {
+		const model = getBundledModel("github-copilot", "gpt-6-astra") as Model<"openai-completions">;
+		for (const serviceTier of ["priority", "flex", "scale"] as const) {
+			const bodies = captureRequests(completionsResponseEvents());
+			const result = await streamOpenAICompletions(model, testContext, {
+				apiKey: "ghu_test_copilot_token",
+				serviceTier,
+			}).result();
+
+			expect(result.stopReason).toBe("stop");
+			expect(bodies[0]?.service_tier).toBeUndefined();
+		}
+	});
+
 	it("sends ultrafast for an opted-in OpenCode Zen Responses model", async () => {
 		const model = getBundledModel("opencode-zen", "gpt-6.1-sol") as Model<"openai-responses">;
-		expect(model.compat).toMatchObject({ supportsServiceTier: true, supportsUltrafastTier: true });
+		expect(model.compat).toMatchObject({ supportsUltrafastTier: true });
+		expect(model.compat?.supportsServiceTier).toBeUndefined();
 		const bodies = captureRequests(completedResponseEvents());
 
 		const result = await streamOpenAIResponses(model, testContext, {
 			apiKey: "test-key",
+			serviceTier: "ultrafast",
+		}).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(bodies[0]?.service_tier).toBe("ultrafast");
+	});
+
+	it("sends ultrafast through the shared Responses mapper for OpenAI API-key models", async () => {
+		const model = getBundledModel("openai", "gpt-6-astra") as Model<"openai-responses">;
+		expect(model.compat).toMatchObject({ supportsUltrafastTier: true });
+		const bodies = captureRequests(completedResponseEvents());
+
+		const result = await streamOpenAIResponses(model, testContext, {
+			apiKey: "test-openai-api-key",
+			serviceTier: "ultrafast",
+		}).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(bodies[0]?.service_tier).toBe("ultrafast");
+	});
+
+	it("sends ultrafast to an explicitly opted-in custom model without enabling other tiers", async () => {
+		const model: Model<"openai-completions"> = {
+			id: "custom-gpt-6-astra",
+			name: "Custom GPT-6 Astra",
+			api: "openai-completions",
+			provider: "custom-proxy",
+			baseUrl: "https://proxy.example.com/v1",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 8_192,
+			compat: { supportsUltrafastTier: true },
+		};
+		const bodies = captureRequests(completionsResponseEvents());
+
+		const result = await streamOpenAICompletions(model, testContext, {
+			apiKey: "proxy-key",
 			serviceTier: "ultrafast",
 		}).result();
 
@@ -151,7 +206,7 @@ describe("ultrafast request serialization for bundled models", () => {
 			}).result();
 
 			expect(result.stopReason).toBe("stop");
-			expect(bodies[0]?.service_tier).toBe(scenario.requestedTier);
+			expect(bodies[0]?.service_tier).toBe(scenario.requestedTier === "ultrafast" ? "ultrafast" : undefined);
 			expect(result.serviceTier).toBe(scenario.effectiveTier);
 			expect(result.usage.cost.total).toBeCloseTo(scenario.expectedCost, 12);
 			expect(result.usage.cost.total).toBe(
@@ -184,7 +239,7 @@ describe("ultrafast request serialization for bundled models", () => {
 			}).result();
 
 			expect(result.stopReason).toBe("stop");
-			expect(bodies[0]?.service_tier).toBe(scenario.requestedTier);
+			expect(bodies[0]?.service_tier).toBe(scenario.requestedTier === "ultrafast" ? "ultrafast" : undefined);
 			expect(result.serviceTier).toBe(scenario.effectiveTier);
 			expect(result.usage.cost.total).toBeCloseTo(scenario.expectedCost, 12);
 			expect(result.usage.cost.total).toBe(

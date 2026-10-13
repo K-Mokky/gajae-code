@@ -14,8 +14,14 @@ describe("ultrafast service tier", () => {
 		expect(shouldSendServiceTier("ultrafast", "openai-codex")).toBe(true);
 	});
 
-	test("shouldSendServiceTier sends ultrafast when provider supports it", () => {
-		expect(shouldSendServiceTier("ultrafast", "custom-provider", true)).toBe(true);
+	test("broad service-tier support does not imply custom-provider ultrafast support", () => {
+		expect(shouldSendServiceTier("ultrafast", "custom-provider", true)).toBe(false);
+	});
+
+	test("model-specific ultrafast support does not enable other service tiers", () => {
+		expect(shouldSendServiceTier("ultrafast", "github-copilot", false, true)).toBe(true);
+		expect(shouldSendServiceTier("priority", "github-copilot", false, true)).toBe(false);
+		expect(shouldSendServiceTier("flex", "github-copilot", false, true)).toBe(false);
 	});
 
 	test("shouldSendServiceTier does not send ultrafast to providers that do not support it", () => {

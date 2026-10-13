@@ -829,7 +829,12 @@ function buildChatRequestAttributes(stepNumber: number, request: ChatRequestSnap
 	}
 	if (
 		request.serviceTier &&
-		shouldSendServiceTier(request.serviceTier, model.provider, modelSupportsServiceTier(model)) &&
+		shouldSendServiceTier(
+			request.serviceTier,
+			model.provider,
+			modelSupportsServiceTier(model),
+			modelSupportsUltrafastTier(model),
+		) &&
 		(request.serviceTier !== "ultrafast" || modelSupportsUltrafastTier(model))
 	) {
 		attrs[OpenAIAttr.RequestServiceTier] = request.serviceTier;

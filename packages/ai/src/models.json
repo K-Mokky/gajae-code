@@ -16628,7 +16628,6 @@
         "supportsDeveloperRole": false,
         "supportsReasoningEffort": false,
         "supportsStore": false,
-        "supportsServiceTier": true,
         "supportsUltrafastTier": true
       },
       "contextWindow": 1050000,
@@ -16714,7 +16713,6 @@
         "supportsDeveloperRole": false,
         "supportsReasoningEffort": false,
         "supportsStore": false,
-        "supportsServiceTier": true,
         "supportsUltrafastTier": true
       },
       "contextWindow": 1050000,
@@ -72166,7 +72164,6 @@
         "mode": "effort"
       },
       "compat": {
-        "supportsServiceTier": true,
         "supportsUltrafastTier": true
       }
     },
@@ -72245,7 +72242,6 @@
         "mode": "effort"
       },
       "compat": {
-        "supportsServiceTier": true,
         "supportsUltrafastTier": true
       }
     },

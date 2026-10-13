@@ -311,7 +311,8 @@ export function resolveServiceTier(
 /**
  * True when the (possibly scoped) tier should be sent as an OpenAI-compatible
  * `service_tier` request field. Custom providers must explicitly opt in through
- * `compat.supportsServiceTier`; unknown providers remain fail-closed.
+ * `compat.supportsServiceTier` for the existing tiers or a model-specific
+ * `supportsUltrafastTier` capability for ultrafast; unknown providers remain fail-closed.
  *
  * Note: ultrafast has an additional gating requirement via `modelSupportsUltrafastTier`
  * to ensure it is only sent to models that explicitly support it.
@@ -320,11 +321,15 @@ export function shouldSendServiceTier(
 	serviceTier: ServiceTier | null | undefined,
 	provider: Provider | undefined,
 	supportsServiceTier = false,
+	supportsUltrafastTier = false,
 ): boolean {
 	const resolved = resolveServiceTier(serviceTier, provider);
 	if (provider === "deepinfra") return resolved === "priority";
+	if (resolved === "ultrafast") {
+		return provider === "openai" || provider === "openai-codex" || supportsUltrafastTier;
+	}
 	if (provider !== "openai" && provider !== "openai-codex" && !supportsServiceTier) return false;
-	return resolved === "flex" || resolved === "scale" || resolved === "priority" || resolved === "ultrafast";
+	return resolved === "flex" || resolved === "scale" || resolved === "priority";
 }
 
 /**

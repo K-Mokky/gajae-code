@@ -118,7 +118,7 @@ describe("applyUltrafastTierModelPolicies", () => {
 			compat: { supportsReasoningEffort: true },
 		}) as Model;
 
-	it("preserves explicit support for eligible GPT-6 models and compatible endpoints", () => {
+	it("preserves model-specific ultrafast support without enabling other tiers", () => {
 		const models = [
 			model("openai", "gpt-6-astra"),
 			model("openai-codex", "gpt-6.1-sol"),
@@ -126,21 +126,15 @@ describe("applyUltrafastTierModelPolicies", () => {
 			model("opencode-zen", "gpt-6.1-sol"),
 			model("openai-codex", "gpt-6-sol"),
 		];
+		models[2]!.compat = { ...models[2]!.compat, supportsServiceTier: true };
+		models[3]!.compat = { ...models[3]!.compat, supportsServiceTier: true };
 
 		applyUltrafastTierModelPolicies(models);
 
 		expect(models[0]?.compat).toEqual({ supportsReasoningEffort: true, supportsUltrafastTier: true });
 		expect(models[1]?.compat).toEqual({ supportsReasoningEffort: true, supportsUltrafastTier: true });
-		expect(models[2]?.compat).toEqual({
-			supportsReasoningEffort: true,
-			supportsServiceTier: true,
-			supportsUltrafastTier: true,
-		});
-		expect(models[3]?.compat).toEqual({
-			supportsReasoningEffort: true,
-			supportsServiceTier: true,
-			supportsUltrafastTier: true,
-		});
+		expect(models[2]?.compat).toEqual({ supportsReasoningEffort: true, supportsUltrafastTier: true });
+		expect(models[3]?.compat).toEqual({ supportsReasoningEffort: true, supportsUltrafastTier: true });
 		expect(models[4]?.compat).toEqual({ supportsReasoningEffort: true });
 	});
 

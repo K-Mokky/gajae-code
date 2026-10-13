@@ -1803,7 +1803,14 @@ function buildParams(
 	if (options?.frequencyPenalty !== undefined) {
 		params.frequency_penalty = options.frequencyPenalty;
 	}
-	if (shouldSendServiceTier(options?.serviceTier, model.provider, compat.supportsServiceTier === true)) {
+	if (
+		shouldSendServiceTier(
+			options?.serviceTier,
+			model.provider,
+			compat.supportsServiceTier === true,
+			modelSupportsUltrafastTier(model),
+		)
+	) {
 		const resolved = resolveServiceTier(options?.serviceTier, model.provider);
 		if (resolved === "flex" || resolved === "scale" || resolved === "priority") {
 			params.service_tier = resolved;
