@@ -280,6 +280,7 @@ describe("unscoped gajae-code package publication", () => {
 			"native/diagnostic-loader.d.ts",
 			"native/diagnostic-loader.js",
 			"native/diagnostic-artifact.json",
+			"native/diagnostic-artifact-embedded.json",
 			"native/embedded-addon.js",
 			"README.md",
 		]);
