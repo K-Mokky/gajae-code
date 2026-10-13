@@ -3503,6 +3503,54 @@ describe("ModelRegistry", () => {
 			expect(model?.baseUrl).toBe("http://127.0.0.1:8080");
 		});
 
+		test("does not persist model override idle timeouts in discovery cache", async () => {
+			const provider = "timeout-cache-proxy";
+			const baseUrl = "http://127.0.0.1:8080";
+			const writeConfig = (providerTimeout: number, modelOverride?: number) => {
+				writeRawModelsJson({
+					[provider]: {
+						baseUrl,
+						apiKey: "TEST_KEY",
+						api: "openai-responses",
+						streamIdleTimeoutMs: providerTimeout,
+						discovery: { type: "llama.cpp" },
+						...(modelOverride === undefined
+							? {}
+							: { modelOverrides: { "cached-model": { streamIdleTimeoutMs: modelOverride } } }),
+					},
+				});
+			};
+
+			writeConfig(180_000, 300_000);
+			const settings = Settings.isolated();
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, settings, { automaticRefresh: false });
+			let requests = 0;
+			using _hook = hookFetch(input => {
+				const url = input instanceof Request ? input.url : String(input);
+				if (url !== `${baseUrl}/models`) throw new Error(`Unexpected discovery URL: ${url}`);
+				requests++;
+				return Response.json({ data: [{ id: "cached-model" }] });
+			});
+
+			try {
+				await registry.refreshProvider(provider, "online");
+				expect(registry.find(provider, "cached-model")).toMatchObject({ streamIdleTimeoutMs: 300_000 });
+				expect(
+					readModelCache(provider, 86_400_000, Date.now, cacheDbPath)?.models.find(
+						model => model.id === "cached-model",
+					)?.streamIdleTimeoutMs,
+				).toBeUndefined();
+
+				writeConfig(450_000);
+				await registry.refresh("offline");
+
+				expect(registry.find(provider, "cached-model")).toMatchObject({ streamIdleTimeoutMs: 450_000 });
+				expect(requests).toBe(1);
+			} finally {
+				registry.dispose();
+			}
+		});
+
 		test.each([
 			["opencode-go", "https://opencode.ai/zen/go"],
 			["opencode-zen", "https://opencode.ai/zen"],

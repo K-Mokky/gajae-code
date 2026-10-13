@@ -3684,10 +3684,12 @@ export class ModelRegistry {
 		});
 	}
 	#sanitizeDiscoverableModelsForCache(_providerConfig: DiscoveryProviderConfig, models: Model<Api>[]): Model<Api>[] {
-		return this.#stripModelBaseUrlQueries(models).map(model => ({
-			...model,
-			headers: undefined,
-		}));
+		return this.#stripModelBaseUrlQueries(models).map(model => {
+			const cachedModel = { ...model, headers: undefined };
+			// Model idle timeouts come from local config and must be re-derived on cache load.
+			delete cachedModel.streamIdleTimeoutMs;
+			return cachedModel;
+		});
 	}
 	#stripModelBaseUrlQueries(models: readonly Model<Api>[]): Model<Api>[] {
 		return models.map(model => createTrustedStrippedModelClone(model));
