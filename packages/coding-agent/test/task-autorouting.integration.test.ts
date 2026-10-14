@@ -407,6 +407,7 @@ describe("TaskTool autorouting integration surfaces", () => {
 		});
 		const unavailableCredentials = new Set<string>();
 		const failedCredentialLookups = new Set<string>();
+		const resumeCredentialModels: never[] = [];
 		const executions: Array<{
 			options: Parameters<typeof runSubprocess>[0];
 			result?: SingleResult;
@@ -469,7 +470,7 @@ describe("TaskTool autorouting integration surfaces", () => {
 				{
 					settings,
 					modelRegistry: {
-						getAvailable: () => registryModels,
+						getAvailable: () => [...registryModels, ...resumeCredentialModels],
 						getApiKey: async (model: { provider: string; id: string }) => {
 							const selector = `${model.provider}/${model.id}`;
 							if (failedCredentialLookups.has(selector)) throw new Error("keychain access denied");
@@ -502,7 +503,12 @@ describe("TaskTool autorouting integration surfaces", () => {
 			skips: [{ selector: "anthropic/claude-haiku-4-5", code: "credential_unavailable" }],
 		});
 
-		unavailableCredentials.add("anthropic/claude-opus-5");
+		const exhaustedSelectors = Array.from({ length: 7 }, (_, index) => `resume-test/model-${index}`);
+		for (let index = 0; index < exhaustedSelectors.length; index++) {
+			resumeCredentialModels.push(model("resume-test", `model-${index}`));
+			unavailableCredentials.add(exhaustedSelectors[index]!);
+		}
+		settings.override("task.autorouting.tiers", { fast: exhaustedSelectors });
 		const executedCountBeforeCredentialExhaustion = executions.length;
 		expect(AsyncJobManager.instance()!.resumeSubagent(record.subagentId).ok).toBe(true);
 		await AsyncJobManager.instance()!.waitForAll();
@@ -522,12 +528,17 @@ describe("TaskTool autorouting integration surfaces", () => {
 			freshOnResume: true,
 			notExecuted: true,
 			terminal: "all_candidates_skipped",
-			attempts: [
-				{ selector: "anthropic/claude-haiku-4-5", phase: "probe", code: "credential_unavailable" },
-				{ selector: "anthropic/claude-opus-5", phase: "probe", code: "credential_unavailable" },
-			],
+			attempts: exhaustedSelectors.slice(0, 6).map(selector => ({
+				selector,
+				phase: "probe",
+				code: "credential_unavailable",
+			})),
+			skips: exhaustedSelectors.map(selector => ({ selector, code: "credential_unavailable" })),
 		});
 
+		settings.override("task.autorouting.tiers", {
+			fast: ["anthropic/claude-haiku-4-5", "anthropic/claude-opus-5"],
+		});
 		failedCredentialLookups.add("anthropic/claude-haiku-4-5");
 		expect(AsyncJobManager.instance()!.resumeSubagent(record.subagentId).ok).toBe(true);
 		await AsyncJobManager.instance()!.waitForAll();
