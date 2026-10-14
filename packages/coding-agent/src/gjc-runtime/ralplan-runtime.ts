@@ -2651,6 +2651,31 @@ async function handleArtifactWrite(
 	const resolved = await resolveArtifactArgs(args, persistCwd, cwd, {
 		confineArtifactRoot: target.explicit ? cwd : undefined,
 	});
+	const persistedRoleState = parsePersistedRoleStateArgs(args, resolved.stage);
+	const laneVerdict = parseLaneVerdictArgs(args, resolved.stage, resolved.stageN);
+	// Validate repository ownership and reviewer authority before lock acquisition:
+	// creating a stage-lock path must not mutate an unseeded linked worktree.
+	const repositoryBinding = await enforceRalplanRepositoryBinding(persistCwd, resolved.sessionId, {
+		exactWorktreeRoot: target.explicit,
+	});
+	// Artifact file paths (when --artifact points at a file) must stay under the bound
+	// worktree in cwd-based mode. Explicit-target mode confines the file to the
+	// invoking cwd (including realpath/symlink escape) before the content is read.
+	const rawArtifact = flagValue(args, "--artifact");
+	if (rawArtifact && !isRestrictedRoleAgentBash()) {
+		const candidate = path.isAbsolute(rawArtifact) ? rawArtifact : path.resolve(cwd, rawArtifact);
+		try {
+			const stat = await fs.stat(candidate);
+			if (stat.isFile() && !target.explicit) {
+				assertPathUnderRepositoryBinding(repositoryBinding, candidate);
+			}
+		} catch (error) {
+			if (error instanceof RepositoryBindingError) {
+				throw new RalplanCommandError(2, `ralplan repository binding rejected: ${error.message}`);
+			}
+			// Non-file / missing path is inline content; resolveArtifactContent already handled it.
+		}
+	}
 	if (!stageWriteLockHeld) {
 		// Duplicate lookup, deterministic stage-file publication, and index append
 		// are one cross-process transaction for this exact stage identity.
@@ -2681,31 +2706,6 @@ async function handleArtifactWrite(
 			},
 		);
 	}
-	const persistedRoleState = parsePersistedRoleStateArgs(args, resolved.stage);
-	const laneVerdict = parseLaneVerdictArgs(args, resolved.stage, resolved.stageN);
-	// Fail closed before stage persistence / path writes when cwd drifted to a sibling repo.
-	const repositoryBinding = await enforceRalplanRepositoryBinding(persistCwd, resolved.sessionId, {
-		exactWorktreeRoot: target.explicit,
-	});
-	// Artifact file paths (when --artifact points at a file) must stay under the bound
-	// worktree in cwd-based mode. Explicit-target mode confines the file to the
-	// invoking cwd (including realpath/symlink escape) before the content is read.
-	const rawArtifact = flagValue(args, "--artifact");
-	if (rawArtifact && !isRestrictedRoleAgentBash()) {
-		const candidate = path.isAbsolute(rawArtifact) ? rawArtifact : path.resolve(cwd, rawArtifact);
-		try {
-			const stat = await fs.stat(candidate);
-			if (stat.isFile() && !target.explicit) {
-				assertPathUnderRepositoryBinding(repositoryBinding, candidate);
-			}
-		} catch (error) {
-			if (error instanceof RepositoryBindingError) {
-				throw new RalplanCommandError(2, `ralplan repository binding rejected: ${error.message}`);
-			}
-			// Non-file / missing path is inline content; resolveArtifactContent already handled it.
-		}
-	}
-
 	// Read the ledger once before persistence. The dedupe guard, both gates, and
 	// disposition provenance consume this same snapshot so no additional ledger
 	// read can slip between gate evaluation and persistence.

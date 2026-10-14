@@ -4051,6 +4051,7 @@ async function verifiedRalplanFinalEvidence(
 		return undefined;
 	}
 	let finalRow: Record<string, unknown> | undefined;
+	let planningReopenedAfterFinal = false;
 	let planningStuck = false;
 	for (const line of indexText.split(/\r?\n/)) {
 		if (!line.trim()) continue;
@@ -4061,10 +4062,15 @@ async function verifiedRalplanFinalEvidence(
 			return undefined;
 		}
 		if (!isPlainObject(parsed)) return undefined;
-		if (parsed.stage === "final") finalRow = parsed;
+		if (parsed.stage === "planner" || parsed.stage === "revision") {
+			if (finalRow) planningReopenedAfterFinal = true;
+		} else if (parsed.stage === "final") {
+			finalRow = parsed;
+			planningReopenedAfterFinal = false;
+		}
 		if (parsed.planning_stuck === true || parsed.event === "planning_stuck") planningStuck = true;
 	}
-	if (planningStuck || isPlainObject(state.planning_stuck)) return undefined;
+	if (planningStuck || planningReopenedAfterFinal || isPlainObject(state.planning_stuck)) return undefined;
 	const indexedAdmission = isPlainObject(finalRow?.auto_handoff) ? finalRow.auto_handoff : undefined;
 	if (
 		!finalRow ||
