@@ -77621,7 +77621,7 @@
         "text",
         "image"
       ],
-      "maxTokens": 943718,
+      "maxTokens": 65536,
       "name": "Google: Gemini 4 Argon (batch)",
       "provider": "openrouter",
       "reasoning": true,
@@ -94205,7 +94205,7 @@
         "text",
         "image"
       ],
-      "maxTokens": 1000000,
+      "maxTokens": 65536,
       "name": "Gemini 4 Argon",
       "provider": "vercel-ai-gateway",
       "reasoning": true,

@@ -750,10 +750,16 @@ function applyGeneratedModelPolicy(model: ApiModel<Api>): void {
 	) {
 		model.contextWindow = 1_000_000;
 	}
-	// Google Gemini 4 Argon supports up to 65,536 output tokens.
+	// Google Gemini 4 Argon supports up to 65,536 output tokens across provider
+	// aliases. Strip catalog provider prefixes and OpenRouter's batch suffix.
 	// https://ai.google.dev/gemini-api/docs/models/gemini-4-argon
-	if (model.provider === "google" && model.id === "gemini-4-argon") {
-		model.maxTokens = 65_536;
+	const canonicalId = model.id
+		.toLowerCase()
+		.split("/")
+		.at(-1)
+		?.replace(/:batch$/, "");
+	if (canonicalId === "gemini-4-argon") {
+		model.maxTokens = Math.min(model.maxTokens, 65_536);
 	}
 }
 
