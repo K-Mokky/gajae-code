@@ -305,6 +305,38 @@ test("distinct sessions share one process-wide decode slot and recover it after 
 	}
 });
 
+test("deterministic finish failures retire immutable uploads", async () => {
+	const bytes = tinyPng();
+	const invalidStore = new PromptImageUploadStore(alwaysConnected);
+	const validStore = new PromptImageUploadStore(alwaysConnected);
+	try {
+		const wrongDigest = invalidStore.begin("sender", {
+			...descriptor(bytes),
+			sha256: "0".repeat(64),
+		});
+		invalidStore.append("sender", { id: wrongDigest.id, sequence: 0, data: bytes.toString("base64") });
+		const valid = upload(validStore, "sender", bytes);
+
+		await expect(invalidStore.finish("sender", { id: wrongDigest.id })).rejects.toMatchObject({
+			code: "invalid_input",
+		});
+		await expect(invalidStore.finish("sender", { id: wrongDigest.id })).rejects.toMatchObject({
+			code: "resource_gone",
+		});
+		await expect(validStore.finish("sender", { id: valid })).resolves.toMatchObject({ id: valid });
+
+		const accepted = validStore.redeem("sender", [{ id: valid }]);
+		try {
+			expect(Buffer.from(accepted.images[0]!.data, "base64").equals(bytes)).toBe(true);
+		} finally {
+			accepted.release();
+		}
+	} finally {
+		invalidStore.close();
+		validStore.close();
+	}
+});
+
 test("discard during decoding retains the shared slot until its in-flight finish settles", async () => {
 	const bytes = originalLargePng();
 	const firstStore = new PromptImageUploadStore(alwaysConnected);
@@ -367,7 +399,7 @@ test("upload chunks reject out-of-order, duplicate, noncanonical, cross-connecti
 			});
 		await expect(store.finish("sender", { id: wrong.id })).rejects.toMatchObject({ code: "invalid_input" });
 		expect(() => store.redeem("sender", [{ id: wrong.id }])).toThrow(
-			expect.objectContaining({ code: "invalid_input" }),
+			expect.objectContaining({ code: "resource_gone" }),
 		);
 	} finally {
 		store.close();
@@ -913,12 +945,12 @@ test("invalid, incomplete, repeated and busy traffic cannot extend upload leases
 		await expect(store.finish("finished-owner", { id: finished })).rejects.toMatchObject({
 			code: "invalid_input",
 		});
-		await expect(store.finish("digest-owner", { id: wrongDigest.id })).rejects.toMatchObject({
-			code: "invalid_input",
-		});
 		expect(() => store.begin("busy-owner", { ...descriptor(bytes), batchId: "busy" })).toThrow(
 			expect.objectContaining({ code: "busy" }),
 		);
+		await expect(store.finish("digest-owner", { id: wrongDigest.id })).rejects.toMatchObject({
+			code: "invalid_input",
+		});
 		vi.advanceTimersByTime(2_000);
 
 		expect(() => store.append("incomplete-owner", { id: incomplete.id, sequence: 0, data: "AQ==" })).toThrow(

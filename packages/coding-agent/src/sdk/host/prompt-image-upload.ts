@@ -248,6 +248,17 @@ export class PromptImageUploadStore {
 			upload.finished = true;
 			this.#renewBatch(upload.owner, input.id as string, upload);
 			return { id: input.id as string, byteLength: upload.length, sha256: upload.sha256, mimeType: upload.mimeType };
+		} catch (error) {
+			// A complete upload with deterministic content errors cannot become valid by retrying.
+			// Remove it now; the finally block releases its retained source bytes after this
+			// in-flight finish relinquishes ownership. Transient busy failures remain retryable.
+			if (
+				error instanceof TypedControlError &&
+				error.code === "invalid_input" &&
+				this.#uploads.get(input.id as string) === upload
+			)
+				this.#remove(input.id as string);
+			throw error;
 		} finally {
 			// A discarded lease still owns its source chunks until this async decode settles.
 			if (this.#uploads.get(input.id as string) !== upload) {
