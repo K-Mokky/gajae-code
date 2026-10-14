@@ -788,6 +788,13 @@ export function setEnsureBrokerTimingForTest(timing: EnsureBrokerTiming | undefi
 	ensureBrokerTiming = timing ?? REAL_ENSURE_BROKER_TIMING;
 }
 
+async function waitForStartupLockRetry(deadlineAt: number): Promise<void> {
+	const remainingMs = deadlineAt - ensureBrokerTiming.now();
+	if (remainingMs <= 0) throw new Error(BROKER_DISCOVERY_TIMEOUT_MESSAGE);
+	await ensureBrokerTiming.sleep(Math.min(SPAWN_LOCK_RETRY_DELAY_MS, remainingMs));
+	if (ensureBrokerTiming.now() >= deadlineAt) throw new Error(BROKER_DISCOVERY_TIMEOUT_MESSAGE);
+}
+
 type SpawnLockOptions = Pick<FileLockOptions, "retries" | "retryDelayMs" | "signal">;
 
 async function readBrokerDiscoveryBeforeDeadline(
@@ -1821,7 +1828,7 @@ async function ensureBrokerOnce(
 		) {
 			await releaseSpawnLock();
 			spawnLockReleased = true;
-			await ensureBrokerTiming.sleep(SPAWN_LOCK_RETRY_DELAY_MS);
+			await waitForStartupLockRetry(deadline);
 			return ensureBrokerOnce(settings, initiator, true, deadline);
 		}
 		throw failure;
@@ -1938,6 +1945,7 @@ export function startFixtureBrokerCommandWithLeaseForTest(command: FixtureBroker
 
 /** Test hook: returns a stop handle for the detached broker this process spawned. */
 export const acquireSpawnLockForTest = acquireSpawnLock;
+export const waitForStartupLockRetryForTest = waitForStartupLockRetry;
 /** Test hook: proves discovery reads honor their enclosing absolute deadline. */
 export const readBrokerDiscoveryBeforeDeadlineForTest = readBrokerDiscoveryBeforeDeadline;
 

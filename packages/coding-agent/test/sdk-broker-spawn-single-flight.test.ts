@@ -26,6 +26,7 @@ import {
 	readBrokerDiscoveryBeforeDeadlineForTest,
 	reconcileBrokerGenerationForStartup,
 	setEnsureBrokerTimingForTest,
+	waitForStartupLockRetryForTest,
 	withBrokerStartupLock,
 } from "../src/sdk/broker/ensure";
 import { brokerLockHostIdentity } from "../src/sdk/broker/lock-host-identity";
@@ -566,6 +567,28 @@ it("spends the parent discovery budget one composition leg at a time", async () 
 		await fs.rm(dir, { recursive: true, force: true });
 	}
 }, 15_000);
+
+it("clips the startup-lock retry delay to the remaining discovery budget", async () => {
+	const clock = virtualBudgetClock();
+	setEnsureBrokerTimingForTest(clock.timing);
+	try {
+		const deadlineAt = clock.timing.now() + 25;
+		await expect(waitForStartupLockRetryForTest(deadlineAt)).rejects.toThrow(
+			"Timed out waiting for detached SDK broker discovery.",
+		);
+		expect(clock.elapsedMs()).toBe(25);
+
+		await expect(waitForStartupLockRetryForTest(clock.timing.now())).rejects.toThrow(
+			"Timed out waiting for detached SDK broker discovery.",
+		);
+		expect(clock.elapsedMs()).toBe(25);
+
+		await waitForStartupLockRetryForTest(clock.timing.now() + 100);
+		expect(clock.elapsedMs()).toBe(75);
+	} finally {
+		setEnsureBrokerTimingForTest(undefined);
+	}
+});
 
 it("bounds same-process retirement reads without heartbeat expiry and preserves both errors", async () => {
 	const dir = await temp();
