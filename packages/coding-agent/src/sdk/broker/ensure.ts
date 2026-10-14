@@ -823,13 +823,23 @@ async function readBrokerDiscoveryBeforeDeadline(
  * complete owner metadata is published atomically, stale removal is bound to
  * the exact directory generation, and ownership includes the OS incarnation.
  */
-async function acquireSpawnLock(agentDir: string, options: SpawnLockOptions = {}): Promise<() => Promise<void>> {
+async function acquireSpawnLock(
+	agentDir: string,
+	options: SpawnLockOptions = {},
+	deadlineAt?: number,
+): Promise<() => Promise<void>> {
 	const hostIdentity = await brokerLockHostIdentity(agentDir);
+	const retryDelayMs = options.retryDelayMs ?? SPAWN_LOCK_RETRY_DELAY_MS;
+	const retries = options.retries ?? Math.ceil(SPAWN_LOCK_WAIT_MS / retryDelayMs);
+	const boundedRetries =
+		deadlineAt === undefined
+			? retries
+			: Math.max(1, Math.min(retries, Math.ceil((deadlineAt - ensureBrokerTiming.now()) / retryDelayMs)));
 	return acquireFileLock(path.join(agentDir, "sdk", SPAWN_LOCK_TARGET_NAME), {
-		retries: Math.ceil(SPAWN_LOCK_WAIT_MS / SPAWN_LOCK_RETRY_DELAY_MS),
-		retryDelayMs: SPAWN_LOCK_RETRY_DELAY_MS,
 		...hostIdentity,
 		...options,
+		retries: boundedRetries,
+		retryDelayMs,
 	});
 }
 
@@ -1461,8 +1471,11 @@ async function ensureBrokerOnce(
 	settings: EnsureBrokerSettings,
 	initiator: EnsureInitiator,
 	retriedStartupLockUnavailable = false,
+	// The one startup-lock retry shares the original discovery budget.
+	retryDeadlineAt?: number,
 ): Promise<EnsureOutcome> {
 	const initialDiscoveryDeadline =
+		retryDeadlineAt ??
 		ensureBrokerTiming.now() + (initiator === "fixture-lease" ? FIXTURE_DISCOVERY_TIMEOUT_MS : DISCOVERY_TIMEOUT_MS);
 	const priorOwner = owners.get(settings.agentDir);
 	const existing = await readBrokerDiscoveryBeforeDeadline(
@@ -1501,12 +1514,14 @@ async function ensureBrokerOnce(
 	// waits for the exact lock generation to release, then rechecks discovery.
 	// Fixture leases always spawn their own.
 	let spawnLog: BrokerSpawnLog | undefined;
-	const releaseSpawnLock = initiator === "fixture-lease" ? async () => {} : await acquireSpawnLock(settings.agentDir);
+	const releaseSpawnLock =
+		initiator === "fixture-lease" ? async () => {} : await acquireSpawnLock(settings.agentDir, {}, retryDeadlineAt);
 	let spawnLockReleased = false;
 	try {
 		const deadline =
+			retryDeadlineAt ??
 			ensureBrokerTiming.now() +
-			(initiator === "fixture-lease" ? FIXTURE_DISCOVERY_TIMEOUT_MS : DISCOVERY_TIMEOUT_MS);
+				(initiator === "fixture-lease" ? FIXTURE_DISCOVERY_TIMEOUT_MS : DISCOVERY_TIMEOUT_MS);
 		const lockedIntent = await readBrokerRestartIntent(settings.agentDir);
 		if (
 			lockedIntent &&
@@ -1789,7 +1804,7 @@ async function ensureBrokerOnce(
 			await releaseSpawnLock();
 			spawnLockReleased = true;
 			await ensureBrokerTiming.sleep(SPAWN_LOCK_RETRY_DELAY_MS);
-			return ensureBrokerOnce(settings, initiator, true);
+			return ensureBrokerOnce(settings, initiator, true, deadline);
 		}
 		throw failure;
 	} finally {

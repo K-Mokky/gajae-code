@@ -1330,6 +1330,40 @@ describe("file lock cleanup failure handling (#2478)", () => {
 	});
 
 	test.skipIf(process.platform === "win32")(
+		"preserves a retained transition diagnosis when acquisition is aborted",
+		async () => {
+			const lockedFile = path.join(await makeTemp(), "aborted-transition.json");
+			const detachedPath = `${lockedFile}.lock.removing`;
+			const infoPath = path.join(detachedPath, "info");
+			await fs.mkdir(detachedPath);
+			await Bun.write(infoPath, "");
+			const old = new Date(Date.now() - 120_000);
+			await fs.utimes(infoPath, old, old);
+			const controller = new AbortController();
+			const abortReason = new Error("acquisition deadline elapsed");
+			const realSleep = Bun.sleep;
+			vi.spyOn(Bun, "sleep").mockImplementation((async (ms?: number) => {
+				if (ms === 100) controller.abort(abortReason);
+				return await realSleep(0);
+			}) as typeof Bun.sleep);
+
+			const failure = await withFileLock(lockedFile, async () => undefined, {
+				retries: 100,
+				retryDelayMs: 100,
+				signal: controller.signal,
+			}).catch(error => error);
+			expect(failure).toBeInstanceOf(FileLockAcquireError);
+			expect(failure).toMatchObject({
+				code: "orphan_transition",
+				reason: "orphan_transition",
+				orphanPath: detachedPath,
+			});
+			expect(controller.signal.aborted).toBe(true);
+			expect(await fs.exists(detachedPath)).toBe(true);
+		},
+	);
+
+	test.skipIf(process.platform === "win32")(
 		"recovers a dead removal transition owner and acquires (#6101)",
 		async () => {
 			const lockedFile = path.join(await makeTemp(), "dead-transition.json");
