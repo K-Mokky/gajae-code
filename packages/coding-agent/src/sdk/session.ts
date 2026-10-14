@@ -783,6 +783,7 @@ export async function discoverAuthStorage(
 	const resolvedStartupAuth = startupAuth ?? (await resolveStartupAuthConfig(agentDir));
 	const brokerConfig = resolvedStartupAuth.broker;
 	const credentialRankingMode = resolvedStartupAuth.credentialRankingMode;
+	const credentialPreferences = resolvedStartupAuth.credentialPreferences;
 	if (brokerConfig) {
 		const client = new AuthBrokerClient({ url: brokerConfig.url, token: brokerConfig.token });
 		const initialResult = await client.fetchSnapshot();
@@ -794,6 +795,7 @@ export async function discoverAuthStorage(
 			configValueResolver: resolveConfigValue,
 			sourceLabel: `broker ${brokerConfig.url}`,
 			credentialRankingMode,
+			credentialPreferences,
 		});
 		return await reloadDiscoveredAuthStorage(storage);
 	}
@@ -802,6 +804,7 @@ export async function discoverAuthStorage(
 		configValueResolver: resolveConfigValue,
 		sourceLabel: `local ${dbPath}`,
 		credentialRankingMode,
+		credentialPreferences,
 	});
 	return await reloadDiscoveredAuthStorage(storage);
 }
