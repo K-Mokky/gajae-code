@@ -1376,6 +1376,36 @@ describe("file lock cleanup failure handling (#2478)", () => {
 		expect(await fs.exists(`${filePath}.lock`)).toBe(false);
 	});
 
+	test("does not start stale cleanup when cancellation races with an unsuccessful acquisition", async () => {
+		const filePath = path.join(await makeTemp(), "cancelled-during-contention.json");
+		const lockDir = `${filePath}.lock`;
+		await writeInfo(lockDir, { pid: DEAD_PID, timestamp: Date.now() - 60_000 });
+		const controller = new AbortController();
+		const abortReason = new Error("acquisition deadline elapsed");
+		let staleCleanupStarted = false;
+		FileLockTestHooks.nativePublicationBindings = () => ({
+			renameNoReplacePathAsync: async (source, destination) => {
+				const result = await renameNoReplacePathAsync(source, destination);
+				if (!result.ok && result.reason === "destination_exists") controller.abort(abortReason);
+				return result;
+			},
+			renameDirectoryNoReplacePathAsync,
+		});
+		FileLockTestHooks.nativeQuarantineBindings = () => {
+			staleCleanupStarted = true;
+			return {
+				snapshotDirectoryTree,
+				exactRemoveDirectoryTree: () => ({ ok: false, code: "sharing_violation" }),
+			};
+		};
+
+		await expect(acquireFileLock(filePath, { signal: controller.signal, retries: 2, retryDelayMs: 1 })).rejects.toBe(
+			abortReason,
+		);
+		expect(staleCleanupStarted).toBe(false);
+		expect(await fs.readFile(path.join(lockDir, "info"), "utf8")).toContain(String(DEAD_PID));
+	});
+
 	test.skipIf(process.platform === "win32")(
 		"recovers a dead removal transition owner and acquires (#6101)",
 		async () => {

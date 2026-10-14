@@ -2668,6 +2668,7 @@ export async function acquireFileLock(filePath: string, options: FileLockOptions
 			contentionObserved = true;
 			opts.onContended?.();
 		}
+		if (opts.signal?.aborted) await abortAcquisition(attempt + 1);
 		const pendingKey = await pendingLocalReleaseKey(lockPath, localKey);
 		const localState = localLockStates.get(pendingKey ?? localKey);
 		if (pendingKey !== undefined && localState?.status !== "held" && localState?.owner.owner_token !== undefined) {
@@ -2679,6 +2680,7 @@ export async function acquireFileLock(filePath: string, options: FileLockOptions
 				// lock; the owner generation remains fenced until release succeeds.
 			}
 		}
+		if (opts.signal?.aborted) await abortAcquisition(attempt + 1);
 		const stale = await staleLockSnapshot(
 			lockPath,
 			opts.staleMs,
