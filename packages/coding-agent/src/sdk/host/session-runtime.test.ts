@@ -9742,6 +9742,103 @@ describe("accepted-control zero-execution bound (#4668)", () => {
 		}
 	});
 
+	test("a real agent_end settles while expiry is reconciling without an exact run observation", async () => {
+		const cwd = await mkdtemp(path.join(os.tmpdir(), "gjc-deadline-uncaptured-real-end-"));
+		const claimEntered = Promise.withResolvers<void>();
+		const releaseClaim = Promise.withResolvers<void>();
+		const durableAttempts: Array<{
+			type: string | undefined;
+			commandId?: string;
+			turnId?: string;
+			outcome: "rejected" | "committed";
+		}> = [];
+		let harness: InvocationHarness | undefined;
+		let handleReads = 0;
+		let epochReads = 0;
+		let claimWasEntered = false;
+		const observationAttempted = Promise.withResolvers<void>();
+		try {
+			harness = await invocationHarness("deadline-uncaptured-real-end", cwd, {
+				settings: zeroProgressSettings,
+				sendUserMessage: async (_content, options) => {
+					await options?.onPreflightAcceptCommit?.();
+					await neverSettlingPromise();
+				},
+				persistInterceptor: () => {},
+				agentFailedWriteFailures: 0,
+				onDurableAttempt: attempt => durableAttempts.push(attempt),
+				persistHolds: [
+					{
+						type: "deadline_claim",
+						onEntered: () => {
+							claimWasEntered = true;
+							claimEntered.resolve();
+						},
+						release: releaseClaim.promise,
+					},
+				],
+				terminalAbortSeams: {
+					getActivePromptHandle: () => {
+						handleReads += 1;
+						observationAttempted.resolve();
+						return undefined;
+					},
+					getTerminalTurnEpoch: () => {
+						epochReads += 1;
+						return undefined;
+					},
+				},
+			});
+			const accepted = await harness.control("turn.prompt", { text: "complete during uncaptured expiry" });
+			expect(accepted.ok).toBe(true);
+			const correlation = { commandId: accepted.result?.commandId, turnId: accepted.result?.turnId };
+			await claimEntered.promise;
+			expect(claimWasEntered).toBe(true);
+			await harness.emit("agent_start");
+			await observationAttempted.promise;
+			expect(handleReads).toBeGreaterThan(0);
+			expect(epochReads).toBeGreaterThan(0);
+
+			const ending = harness.emit("agent_end", {
+				messages: [{ role: "assistant", stopReason: "stop", content: "actual real completion" }],
+			});
+			let endingSettled = false;
+			void ending.then(
+				() => (endingSettled = true),
+				() => (endingSettled = true),
+			);
+			await Bun.sleep(0);
+			expect(endingSettled).toBe(false);
+			expect((await harness.query("turn.prompt_status", correlation)).result?.status).toBe("in_flight");
+			expect(correlatedFrames(harness, correlation).filter(frame => frame.kind === "agent_end")).toEqual([]);
+			releaseClaim.resolve();
+			await ending;
+
+			const terminal = await settledStatus(harness, "turn.prompt_status", correlation);
+			expect(terminal).toMatchObject({
+				status: "terminal_ok",
+				content: { text: "actual real completion" },
+				outcome: { kind: "stopped" },
+			});
+			expect(terminal.error).toBeUndefined();
+			expect(
+				durableAttempts.filter(
+					attempt =>
+						attempt.type === "agent_end" &&
+						attempt.commandId === correlation.commandId &&
+						attempt.turnId === correlation.turnId &&
+						attempt.outcome === "committed",
+				),
+			).toHaveLength(1);
+			expect(correlatedFrames(harness, correlation).filter(frame => frame.kind === "agent_end")).toHaveLength(1);
+			expect(correlatedFrames(harness, correlation).filter(frame => frame.kind === "agent_failed")).toEqual([]);
+		} finally {
+			releaseClaim.resolve();
+			await harness?.stop();
+			await rm(cwd, { recursive: true, force: true });
+		}
+	});
+
 	test("agent_start during a pending deadline claim preserves the expiring correlation", async () => {
 		const cwd = await mkdtemp(path.join(os.tmpdir(), "gjc-deadline-start-race-"));
 		const claimEntered = Promise.withResolvers<void>();

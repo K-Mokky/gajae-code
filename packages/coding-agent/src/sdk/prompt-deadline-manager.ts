@@ -953,14 +953,10 @@ export class PromptDeadlineManager {
 		this.#captureDeadlineStart(key, correlation, lease.acceptedAt + lease.maxMs);
 	}
 
-	/** Whether a deadline has captured exact active-run terminal evidence for this prompt. */
+	/** Whether exact deadline evidence or a previously deferred terminal intent protects this prompt. */
 	shouldDeferTerminalTransition(correlation: InvocationCorrelation): boolean {
 		const key = leaseKey(correlation);
-		return (
-			this.#deadlineDeferredTerminalTransitions.has(key) ||
-			this.#uncertaintyRecoveryPending.has(key) ||
-			this.#expiring.has(key)
-		);
+		return this.#deadlineDeferredTerminalTransitions.has(key) || this.#deadlineStartCleanup.has(key);
 	}
 
 	/** Whether bounded uncertainty writes exhausted with recovery ownership retained. */
