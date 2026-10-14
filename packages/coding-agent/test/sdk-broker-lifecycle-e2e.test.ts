@@ -9246,6 +9246,19 @@ test("broker isolates per-session env in bash and restores it after resume", asy
 				"session-environment-invalid-create",
 			),
 		).toMatchObject({ ok: false, error: { code: "invalid_input" } });
+		expect(
+			await broker.handleRequest(
+				"session.create",
+				{ cwd: root, env: { PAYLOAD: "\n".repeat(32_768) } },
+				"session-environment-oversized-create",
+			),
+		).toMatchObject({
+			ok: false,
+			error: {
+				code: "invalid_input",
+				message: "Session lifecycle launch request exceeds the supported environment size.",
+			},
+		});
 
 		const isolatedCreated = await broker.handleRequest(
 			"session.create",

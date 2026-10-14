@@ -42,6 +42,35 @@ test("session launch environment rejects invalid, conflicting, and host-control 
 	expect(isValidSessionLaunchEnvironment({ FOO: "bad\0value" }, undefined)).toBe(false);
 });
 
+test("session launch environment matches Windows keys case-insensitively and POSIX keys exactly", () => {
+	const windowsEnvironment: Record<string, string | undefined> = {
+		Path: "/inherited/bin",
+		Api_Token: "inherited-secret",
+		KEEP: "inherited",
+	};
+	const overlay: SessionLaunchEnvironment = {
+		env: { PATH: "/session/bin" },
+		unsetEnv: ["API_TOKEN"],
+	};
+
+	expect(isValidSessionLaunchEnvironment(overlay.env, overlay.unsetEnv, "win32")).toBe(true);
+	applySessionLaunchEnvironment(windowsEnvironment, overlay, "win32");
+	expect(windowsEnvironment).toEqual({ PATH: "/session/bin", KEEP: "inherited" });
+
+	const posixEnvironment: Record<string, string | undefined> = {
+		Path: "/inherited/bin",
+		Api_Token: "inherited-secret",
+	};
+	applySessionLaunchEnvironment(posixEnvironment, overlay, "linux");
+	expect(posixEnvironment).toEqual({
+		Path: "/inherited/bin",
+		Api_Token: "inherited-secret",
+		PATH: "/session/bin",
+	});
+	expect(isValidSessionLaunchEnvironment({ PATH: "upper", path: "lower" }, undefined, "linux")).toBe(true);
+	expect(isValidSessionLaunchEnvironment({ PATH: "upper", path: "lower" }, undefined, "win32")).toBe(false);
+});
+
 test("session launch environment survives session-index rotation and is absent from public rows", async () => {
 	const agentDir = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-session-environment-index-"));
 	const cwd = path.join(agentDir, "workspace");

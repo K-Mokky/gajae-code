@@ -878,11 +878,23 @@ function isSessionLifecycleMcpServers(value: unknown): value is SessionLifecycle
 	);
 }
 
+// Bound the complete env entry, well below Linux's 128 KiB per-argument limit.
+const MAX_LIFECYCLE_REQUEST_ENV_ENTRY_BYTES = 64 * 1024;
+const LIFECYCLE_REQUEST_ENV_NAME = "GJC_SDK_LIFECYCLE_REQUEST";
+
+function lifecycleRequestEnvironmentValueFits(value: string): boolean {
+	return (
+		Buffer.byteLength(LIFECYCLE_REQUEST_ENV_NAME, "utf8") + 1 + Buffer.byteLength(value, "utf8") + 1 <=
+		MAX_LIFECYCLE_REQUEST_ENV_ENTRY_BYTES
+	);
+}
+
 export function readSessionLifecycleLaunchRequest(
 	value: string | undefined,
 	now = Date.now(),
 ): SessionLifecycleLaunchRequest {
 	if (!value) throw new Error("GJC_SDK_LIFECYCLE_REQUEST is required.");
+	if (!lifecycleRequestEnvironmentValueFits(value)) throw new Error("GJC_SDK_LIFECYCLE_REQUEST is invalid.");
 	const request = JSON.parse(value) as Partial<SessionLifecycleLaunchRequest>;
 	if (
 		(request.operation !== "session.create" &&
@@ -971,6 +983,64 @@ type SessionLaunch = {
 	readiness?: SessionLifecycleReadiness;
 	worktreePlan?: GjcLaunchWorktreePlan;
 };
+
+function createSessionLifecycleLaunchRequest(
+	launch: SessionLaunch,
+	operation: "session.create" | "session.fork" | "session.resume",
+	effectMarker: string,
+	deadlines: LifecycleDeadlines,
+): SessionLifecycleLaunchRequest {
+	const coordinatorSidecarTarget =
+		typeof launch.coordinatorStateDir === "string" && typeof launch.coordinatorSidecarKeyId === "string"
+			? {
+					coordinatorStateDir: launch.coordinatorStateDir,
+					coordinatorSidecarKeyId: launch.coordinatorSidecarKeyId,
+				}
+			: {};
+	return {
+		operation,
+		sessionId: launch.id,
+		cwd: launch.cwd,
+		stateRoot: launch.root,
+		effectMarker,
+		receivedAt: deadlines.receivedAt,
+		requestedReadinessTimeoutMs: deadlines.requestedReadinessTimeoutMs,
+		semanticReadyDeadlineAt: deadlines.semanticReadyDeadlineAt,
+		terminationStartDeadlineAt: deadlines.terminationStartDeadlineAt,
+		lifecycleCleanupDeadlineAt: deadlines.lifecycleCleanupDeadlineAt,
+		...(launch.sourceSessionId ? { sourceSessionId: launch.sourceSessionId } : {}),
+		...(launch.sourceSessionPath ? { sourceSessionPath: launch.sourceSessionPath } : {}),
+		...(launch.sourceSessionIdentity ? { sourceSessionIdentity: launch.sourceSessionIdentity } : {}),
+		...(launch.sourceCwd ? { sourceCwd: launch.sourceCwd } : {}),
+		...(launch.sessionPath ? { sessionPath: launch.sessionPath } : {}),
+		...(launch.sessionIdentity ? { sessionIdentity: launch.sessionIdentity } : {}),
+		...(launch.modelPreset ? { modelPreset: launch.modelPreset } : {}),
+		...(launch.modelId ? { modelId: launch.modelId } : {}),
+		...(launch.sessionEnvironment?.env === undefined ? {} : { env: launch.sessionEnvironment.env }),
+		...(launch.sessionEnvironment?.unsetEnv === undefined ? {} : { unsetEnv: launch.sessionEnvironment.unsetEnv }),
+		...(launch.mcpServers ? { mcpServers: launch.mcpServers } : {}),
+		...(launch.worktree ? { worktree: launch.worktree } : {}),
+		...(launch.readiness ? { readiness: launch.readiness } : {}),
+		...coordinatorSidecarTarget,
+		...(launch.coordinatorSessionId ? { coordinatorSessionId: launch.coordinatorSessionId } : {}),
+		...(launch.coordinatorSessionBranch ? { coordinatorSessionBranch: launch.coordinatorSessionBranch } : {}),
+	};
+}
+
+function sessionLifecycleLaunchRequestFitsEnvironment(
+	launch: SessionLaunch,
+	operation: SessionLifecycleLaunchRequest["operation"],
+): boolean {
+	const maxSafeInteger = Number.MAX_SAFE_INTEGER;
+	const request = createSessionLifecycleLaunchRequest(launch, operation, "00000000-0000-4000-8000-000000000000", {
+		receivedAt: maxSafeInteger,
+		requestedReadinessTimeoutMs: maxSafeInteger,
+		semanticReadyDeadlineAt: maxSafeInteger,
+		terminationStartDeadlineAt: maxSafeInteger,
+		lifecycleCleanupDeadlineAt: maxSafeInteger,
+	});
+	return lifecycleRequestEnvironmentValueFits(JSON.stringify(request));
+}
 
 const CREDENTIAL_NAME_PATTERN = /(?:token|secret|password|credential|api[_-]?key|auth|cookie)/iu;
 
@@ -1604,6 +1674,9 @@ export function prepareSpawnChildHostLaunch(
 		...(input.modelId === undefined ? {} : { modelId: input.modelId }),
 		...(input.modelPreset === undefined ? {} : { modelPreset: input.modelPreset }),
 	};
+	const serializedRequest = JSON.stringify(request);
+	if (!lifecycleRequestEnvironmentValueFits(serializedRequest))
+		throw new Error("Session lifecycle launch request exceeds the supported environment size.");
 	const cmd = command(broker);
 	const inherited = "kind" in cmd ? cmd.env : process.env;
 	const inheritedEnv = Object.fromEntries(
@@ -1623,7 +1696,7 @@ export function prepareSpawnChildHostLaunch(
 			GJC_SESSION_ID: childId,
 			GJC_STATE_ROOT: stateRoot,
 			GJC_LIFECYCLE_REQUEST_ID: effectMarker,
-			GJC_SDK_LIFECYCLE_REQUEST: JSON.stringify(request),
+			GJC_SDK_LIFECYCLE_REQUEST: serializedRequest,
 		},
 		effectMarker,
 	};
@@ -6890,6 +6963,8 @@ async function executeLifecycleResponse(
 					"Lifecycle worktree launches cannot carry a caller-supplied child deadline tuple.",
 				);
 			}
+			if (!sessionLifecycleLaunchRequestFitsEnvironment(launch, operation))
+				return fail("invalid_input", "Session lifecycle launch request exceeds the supported environment size.");
 			const admitted = await broker.runStartup(queueWaitMs, timing, async admittedAt => {
 				const callerSuppliedDeadlines = suppliedDeadlineFields.some(value => value !== undefined);
 				let admittedInput: Input;
@@ -7136,41 +7211,7 @@ async function executeLifecycleResponse(
 			);
 		const deadlines = childDeadlines as LifecycleDeadlines;
 
-		const coordinatorSidecarTarget =
-			typeof launch.coordinatorStateDir === "string" && typeof launch.coordinatorSidecarKeyId === "string"
-				? {
-						coordinatorStateDir: launch.coordinatorStateDir,
-						coordinatorSidecarKeyId: launch.coordinatorSidecarKeyId,
-					}
-				: {};
-		const request: SessionLifecycleLaunchRequest = {
-			operation,
-			sessionId: launch.id,
-			cwd: launch.cwd,
-			stateRoot: launch.root,
-			effectMarker,
-			receivedAt: deadlines.receivedAt,
-			requestedReadinessTimeoutMs: deadlines.requestedReadinessTimeoutMs,
-			semanticReadyDeadlineAt: deadlines.semanticReadyDeadlineAt,
-			terminationStartDeadlineAt: deadlines.terminationStartDeadlineAt,
-			lifecycleCleanupDeadlineAt: deadlines.lifecycleCleanupDeadlineAt,
-			...(launch.sourceSessionId ? { sourceSessionId: launch.sourceSessionId } : {}),
-			...(launch.sourceSessionPath ? { sourceSessionPath: launch.sourceSessionPath } : {}),
-			...(launch.sourceSessionIdentity ? { sourceSessionIdentity: launch.sourceSessionIdentity } : {}),
-			...(launch.sourceCwd ? { sourceCwd: launch.sourceCwd } : {}),
-			...(launch.sessionPath ? { sessionPath: launch.sessionPath } : {}),
-			...(launch.sessionIdentity ? { sessionIdentity: launch.sessionIdentity } : {}),
-			...(launch.modelPreset ? { modelPreset: launch.modelPreset } : {}),
-			...(launch.modelId ? { modelId: launch.modelId } : {}),
-			...(launch.sessionEnvironment?.env === undefined ? {} : { env: launch.sessionEnvironment.env }),
-			...(launch.sessionEnvironment?.unsetEnv === undefined ? {} : { unsetEnv: launch.sessionEnvironment.unsetEnv }),
-			...(launch.mcpServers ? { mcpServers: launch.mcpServers } : {}),
-			...(launch.worktree ? { worktree: launch.worktree } : {}),
-			...(launch.readiness ? { readiness: launch.readiness } : {}),
-			...coordinatorSidecarTarget,
-			...(launch.coordinatorSessionId ? { coordinatorSessionId: launch.coordinatorSessionId } : {}),
-			...(launch.coordinatorSessionBranch ? { coordinatorSessionBranch: launch.coordinatorSessionBranch } : {}),
-		};
+		const request = createSessionLifecycleLaunchRequest(launch, operation, effectMarker, deadlines);
 		let child: ChildProcess | undefined;
 		let childStderr: ChildStderrCapture | undefined;
 		let spawnedAuthority: EffectMarker | undefined;

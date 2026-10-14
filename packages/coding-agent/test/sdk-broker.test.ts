@@ -511,6 +511,26 @@ it("SDK lifecycle model presets reach the session host parser", async () => {
 	}
 });
 
+it("SDK lifecycle launch request size includes JSON escaping and all serialized fields", () => {
+	const baseRequest = {
+		operation: "session.create" as const,
+		sessionId: "session-1",
+		cwd: "/tmp/session-env-size",
+		stateRoot: "/tmp/session-env-size/.gjc/state",
+		...deriveLifecycleDeadlines(Date.now(), 10_000),
+	};
+	const escapedEnvironmentRequest = JSON.stringify({ ...baseRequest, env: { PAYLOAD: "\n".repeat(32_768) } });
+	expect(Buffer.byteLength(escapedEnvironmentRequest, "utf8")).toBeGreaterThan(64 * 1024);
+	expect(() => readSessionLifecycleLaunchRequest(escapedEnvironmentRequest)).toThrow(
+		"GJC_SDK_LIFECYCLE_REQUEST is invalid.",
+	);
+
+	const oversizedOtherFieldRequest = JSON.stringify({ ...baseRequest, modelId: "m".repeat(64 * 1024) });
+	expect(() => readSessionLifecycleLaunchRequest(oversizedOtherFieldRequest)).toThrow(
+		"GJC_SDK_LIFECYCLE_REQUEST is invalid.",
+	);
+});
+
 it("SDK lifecycle explicit model pins reach the session host parser and validate shape", async () => {
 	const agentDir = await temp();
 	const cwd = path.join(agentDir, "repo");

@@ -25,7 +25,11 @@ function isValidEnvironmentName(name: string): boolean {
 }
 
 /** Validates caller-controlled session subprocess environment fields at the broker boundary. */
-export function isValidSessionLaunchEnvironment(env: unknown, unsetEnv: unknown): boolean {
+export function isValidSessionLaunchEnvironment(
+	env: unknown,
+	unsetEnv: unknown,
+	platform: NodeJS.Platform = process.platform,
+): boolean {
 	if (env !== undefined && !isPlainRecord(env)) return false;
 	if (unsetEnv !== undefined && !Array.isArray(unsetEnv)) return false;
 
@@ -35,7 +39,7 @@ export function isValidSessionLaunchEnvironment(env: unknown, unsetEnv: unknown)
 		const entries = Object.entries(env);
 		if (entries.length > MAX_ENV_ENTRIES) return false;
 		for (const [name, value] of entries) {
-			const normalizedName = name.toUpperCase();
+			const normalizedName = platform === "win32" ? name.toUpperCase() : name;
 			if (
 				!isValidEnvironmentName(name) ||
 				setNames.has(normalizedName) ||
@@ -54,7 +58,7 @@ export function isValidSessionLaunchEnvironment(env: unknown, unsetEnv: unknown)
 		const unsetNames = new Set<string>();
 		for (const name of unsetEnv) {
 			if (typeof name !== "string" || !isValidEnvironmentName(name)) return false;
-			const normalizedName = name.toUpperCase();
+			const normalizedName = platform === "win32" ? name.toUpperCase() : name;
 			if (unsetNames.has(normalizedName) || setNames.has(normalizedName)) return false;
 			unsetNames.add(normalizedName);
 			totalBytes += Buffer.byteLength(name, "utf8");
@@ -77,11 +81,24 @@ export function sessionLaunchEnvironment(env: unknown, unsetEnv: unknown): Sessi
 export function applySessionLaunchEnvironment(
 	environment: Record<string, string | undefined>,
 	launchEnvironment: SessionLaunchEnvironment | undefined,
+	platform: NodeJS.Platform = process.platform,
 ): void {
 	if (!launchEnvironment) return;
-	for (const name of launchEnvironment.unsetEnv ?? []) delete environment[name];
-	for (const [name, value] of Object.entries(launchEnvironment.env ?? {}))
+	const deleteName = (name: string): void => {
+		if (platform === "win32") {
+			const normalizedName = name.toUpperCase();
+			for (const existingName of Object.keys(environment)) {
+				if (existingName.toUpperCase() === normalizedName) delete environment[existingName];
+			}
+		} else {
+			delete environment[name];
+		}
+	};
+	for (const name of launchEnvironment.unsetEnv ?? []) deleteName(name);
+	for (const [name, value] of Object.entries(launchEnvironment.env ?? {})) {
+		deleteName(name);
 		Object.defineProperty(environment, name, { configurable: true, enumerable: true, value, writable: true });
+	}
 }
 
 export function sessionEnvironmentNames(environment: SessionLaunchEnvironment): SessionEnvironmentNames {
