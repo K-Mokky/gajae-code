@@ -2327,8 +2327,10 @@ export class WorkerIntegrationRequestScheduler {
 		this.#ownedRequests.add(request);
 		void request.finally(() => this.#ownedRequests.delete(request)).catch(() => {});
 		let timeout: ReturnType<typeof setTimeout> | undefined;
+		let timedOut = false;
 		const deadline = new Promise<WorkerIntegrationOutcome>(resolve => {
 			timeout = setTimeout(() => {
+				timedOut = true;
 				controller.abort(new Error("Worker integration request timed out"));
 				resolve({ status: "timed_out" });
 			}, this.timeoutMs);
@@ -2341,7 +2343,12 @@ export class WorkerIntegrationRequestScheduler {
 			deadline,
 		]).finally(() => {
 			if (timeout) clearTimeout(timeout);
-			controller.abort();
+			// Only abort if the timeout actually fired. If the request settled before the
+			// timeout (timedOut=false), don't send the abort signal again: this ensures
+			// SDK/ACP settlement is not delayed by recovery requests that ignore their
+			// abort signal (#6508). The request may still be running, but that work
+			// should not block client-visible completion.
+			if (timedOut) controller.abort();
 			this.#inFlight = undefined;
 			if (this.#pending) this.#start();
 		});
