@@ -399,12 +399,13 @@ describe("TaskTool autorouting integration surfaces", () => {
 		expect(result.content[0]?.type).toBe("text");
 		expect(JSON.stringify(result)).not.toContain('"routing"');
 	});
-	it("registered resume runner recomputes current routing settings and marks freshOnResume", async () => {
+	it("registered resume runner refreshes tier, credential, and disabled-provider routing", async () => {
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents, projectAgentsDir: null });
 		const settings = Settings.isolated({
 			"task.autorouting.enabled": true,
 			"task.autorouting.tiers": { fast: ["anthropic/claude-haiku-4-5"] },
 		});
+		const unavailableCredentials = new Set<string>();
 		const captured: Array<{ runMode?: string; routing?: unknown; modelOverride?: string | string[] }> = [];
 		const stub = async (options: Parameters<typeof runSubprocess>[0]) => {
 			captured.push({ runMode: options.runMode, routing: options.routing, modelOverride: options.modelOverride });
@@ -432,6 +433,8 @@ describe("TaskTool autorouting integration surfaces", () => {
 					settings,
 					modelRegistry: {
 						getAvailable: () => registryModels,
+						getApiKey: async (model: { provider: string; id: string }) =>
+							unavailableCredentials.has(`${model.provider}/${model.id}`) ? undefined : "test-key",
 						withConsumerLease: async <T>(body: () => T | Promise<T>): Promise<T> => await body(),
 					} as never,
 				},
@@ -443,7 +446,10 @@ describe("TaskTool autorouting integration surfaces", () => {
 			tasks: [{ id: "Resume", description: "resume", assignment: "run", tier: "fast" }],
 		} as never);
 		await AsyncJobManager.instance()!.waitForAll();
-		settings.override("task.autorouting.tiers", { fast: ["anthropic/claude-opus-5"] });
+		unavailableCredentials.add("anthropic/claude-haiku-4-5");
+		settings.override("task.autorouting.tiers", {
+			fast: ["anthropic/claude-haiku-4-5", "anthropic/claude-opus-5"],
+		});
 		const record = AsyncJobManager.instance()!.getSubagentRecords()[0];
 		expect(record).toBeDefined();
 		if (!record) return;
@@ -453,6 +459,7 @@ describe("TaskTool autorouting integration surfaces", () => {
 		expect(captured.at(-1)?.routing).toMatchObject({
 			freshOnResume: true,
 			effectiveModel: "anthropic/claude-opus-5",
+			skips: [{ selector: "anthropic/claude-haiku-4-5", code: "credential_unavailable" }],
 		});
 
 		settings.override("disabledProviders", ["anthropic"]);
@@ -465,7 +472,10 @@ describe("TaskTool autorouting integration surfaces", () => {
 			requestedSelector: "manual-model-chain",
 			effectiveModel: "manual-model-chain",
 			manualFallbackReason: "tier_unmatched",
-			skips: [{ selector: "anthropic/claude-opus-5", code: "provider_disabled" }],
+			skips: [
+				{ selector: "anthropic/claude-haiku-4-5", code: "provider_disabled" },
+				{ selector: "anthropic/claude-opus-5", code: "provider_disabled" },
+			],
 		});
 	});
 

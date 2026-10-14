@@ -2180,6 +2180,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			}
 			const resolveAutoroutingCandidates = async (
 				index: number,
+				deferAuthLookupErrorsToPreflight = true,
 			): Promise<{
 				candidates: string[];
 				skips: Array<{ selector: string; code: AutoroutingReasonCode }>;
@@ -2204,14 +2205,40 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						if (key) authenticated.push(selector);
 						else skips.push({ selector, code: "credential_unavailable" });
 					} catch (error) {
-						// Preserve the candidate for executor preflight, which records the
-						// terminal lookup failure in the routing ledger.
-						preflightErrors.set(selector, error);
-						authenticated.push(selector);
+						if (deferAuthLookupErrorsToPreflight) {
+							// Preserve the candidate for executor preflight, which records the
+							// terminal lookup failure in the routing ledger.
+							preflightErrors.set(selector, error);
+							authenticated.push(selector);
+						} else {
+							skips.push({ selector, code: "credential_unavailable" });
+						}
 					}
 				}
 				return { candidates: authenticated, skips, preflightErrors };
 			};
+			if (isResumedRun) {
+				for (const [index, outcome] of routingByIndex) {
+					if (outcome.kind !== "routed") continue;
+					const { candidates, skips } = await resolveAutoroutingCandidates(index, false);
+					routingSkipsByIndex.set(index, skips);
+					const pinnedSelector = candidates[0];
+					if (pinnedSelector) {
+						routingByIndex.set(index, { ...outcome, pinnedSelector });
+						continue;
+					}
+					routingByIndex.set(index, {
+						kind: "manual-fallback",
+						tier: outcome.tier,
+						requestedTier: outcome.requestedTier,
+						...(outcome.defaultTierApplied ? { defaultTierApplied: true } : {}),
+						attemptedSelectorCount: effectiveAutorouting.active
+							? (effectiveAutorouting.map[outcome.tier] ?? []).length
+							: 0,
+						reason: "tier_unmatched",
+					});
+				}
+			}
 			const effectivePatterns = (index: number): string | string[] => {
 				const outcome = routingByIndex.get(index);
 				return outcome?.kind === "routed" ? [outcome.pinnedSelector] : modelOverride;
