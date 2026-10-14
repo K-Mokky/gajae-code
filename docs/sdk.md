@@ -473,7 +473,7 @@ SDK frame cap remains 256 KiB. Large inline images cross it through SDK-core-own
 credentials to the ACP client.
 
 Hosts advertise staging controls only when their transport provides authoritative
-connection liveness. Custom transports without it retain ordinary SDK controls,
+connection liveness and disconnect notifications. Custom transports without both retain ordinary SDK controls,
 but do not advertise image staging that they cannot safely serve.
 
 Staging is scoped to the authenticated live connection and session. Each upload
@@ -488,7 +488,10 @@ without successful staging progress still retires the batch, without changing qu
 Elapsed leases are rejected even when their reclamation timer has not run yet.
 Chunks are canonical base64 in sequence, with at most 96 KiB decoded per chunk.
 The host verifies exact length, digest, MIME/header agreement, dimensions, and
-image decoding before a reference is usable. A prompt accepts at most 16 images,
+image decoding before a reference is usable. Deterministic validation failures
+retire a complete upload; repeating finish returns `resource_gone`. Incomplete
+uploads can still receive their remaining chunks, and capacity-related `busy`
+failures remain retryable. A prompt accepts at most 16 images,
 each at most 20 MiB, with 64 MiB source limits for pending and accepted images and
 a shared 256 MiB process payload/copy budget. Appends coalesce into retained
 96 KiB slabs instead of retaining one Buffer per fragment; tiny uploads reserve
@@ -568,6 +571,10 @@ failure with a successful `cancelled` result. If exact run or tool settlement
 cannot be proven, Q26 remains `accepted` or `in_flight`, the pending outcome
 stays private, and no terminal frame is published until recovery proves
 settlement.
+
+Expiry or recovery uncertainty alone does not withhold a real `agent_end` when
+no exact run observation was captured. That event follows ordinary durable
+terminal reconciliation rather than waiting for unavailable deadline evidence.
 
 ## Read-only broker observation
 

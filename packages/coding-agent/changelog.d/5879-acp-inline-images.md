@@ -8,7 +8,10 @@
 - Bound retained upload allocations for tiny image fragments as well as payload bytes.
 - Renew upload inactivity leases only within an authenticated request batch, preserving earlier completed images during slow multi-image staging while abandoned uploads still expire.
 - Validate staged images and their SDK envelope before publishing any user echo; renew the local watchdog only for this request's validated staging progress.
-- Advertise image staging only when the host transport supplies authoritative connection liveness; keep other SDK controls available to custom transports.
+- Advertise image staging only when the host transport supplies authoritative connection liveness and disconnect notifications; keep other SDK controls available to custom transports.
 - Enforce the existing two-minute image inactivity lease even when expiry callbacks are delayed.
 - Interrupt existing first-turn readiness retry waits on cancellation or teardown without changing retry eligibility, budgets, or provider policies.
 - Anchor SDK snapshot storage and cleanup to the accepted absolute root, including relative session paths.
+- Reconcile real terminal events without withholding them on deadline uncertainty when no exact run observation was captured.
+- Include the Router-owned connection identity when deciding whether CLI-primary image prompts require staging.
+- Retire complete uploads after deterministic digest, metadata, or decode failures while keeping capacity-related `busy` failures retryable.
