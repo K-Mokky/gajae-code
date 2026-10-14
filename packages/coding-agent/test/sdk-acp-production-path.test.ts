@@ -331,8 +331,11 @@ test("production ACP preserves lifecycle, turn, replay, and connection ownership
 	const imageFrameBytes: number[] = [];
 	const redeemedImages: Buffer[] = [];
 	const connections = new WeakMap<object, string>();
+	let currentSessionConnectionId: string | undefined;
+	let lastImagePromptConnectionId: string | undefined;
 	let imageEchoPresentAtDispatch = false;
 	let imageEchoStartIndex = 0;
+	let expectedEchoImageBase64 = "";
 	let originalImageBase64 = "";
 	let corruptNextImageBeginAck = false;
 	let malformedBeginId: string | undefined;
@@ -383,6 +386,7 @@ test("production ACP preserves lifecycle, turn, replay, and connection ownership
 		websocket: {
 			open(socket) {
 				const connectionId = reconnectingSessionTransport ? "acp-contract-reconnected" : "acp-contract";
+				currentSessionConnectionId = connectionId;
 				connections.set(socket, connectionId);
 				reconnectingSessionTransport = false;
 				socket.send(JSON.stringify({ type: "hello", connectionId }));
@@ -714,6 +718,8 @@ test("production ACP preserves lifecycle, turn, replay, and connection ownership
 						const stagedImages = (frame.input as { stagedImages?: Array<{ id: string }> }).stagedImages;
 						if (stagedImages) {
 							imageFrameBytes.push(Buffer.byteLength(String(raw)));
+							lastImagePromptConnectionId =
+								typeof frame.connectionId === "string" ? frame.connectionId : undefined;
 							imageEchoPresentAtDispatch = updates
 								.slice(imageEchoStartIndex)
 								.some(
@@ -721,7 +727,8 @@ test("production ACP preserves lifecycle, turn, replay, and connection ownership
 										update.update.sessionUpdate === "user_message_chunk" &&
 										(update.update as { content?: { type?: string; data?: string } }).content?.type ===
 											"image" &&
-										(update.update as { content?: { data?: string } }).content?.data === originalImageBase64,
+										(update.update as { content?: { data?: string } }).content?.data ===
+											expectedEchoImageBase64,
 								);
 							try {
 								const accepted = imageUploads.redeem(connections.get(socket), stagedImages);
@@ -1717,6 +1724,7 @@ test("production ACP preserves lifecycle, turn, replay, and connection ownership
 	const original = originalImagePng();
 	expect(original.length).toBeGreaterThan(256 * 1024);
 	originalImageBase64 = original.toString("base64");
+	expectedEchoImageBase64 = originalImageBase64;
 	const publicControlCount = controlOperations.length;
 	for (const operation of ["turn.image.begin", "turn.image.append", "turn.image.finish", "turn.image.discard"]) {
 		const denied = await agent.extMethod("_gjc/sdk/control", {
@@ -1934,6 +1942,94 @@ test("production ACP preserves lifecycle, turn, replay, and connection ownership
 		}),
 	);
 	expect(await bounded(imagePrompt, "image-only ACP prompt completion")).toEqual({ stopReason: "end_turn" });
+
+	const cliImageAbort = new AbortController();
+	primaryControlSurface = "cli";
+	// CLI-primary skips provider activation, but Router still stamps the actual connection ID.
+	const cliImageAgent = new AcpAgent(
+		{
+			sessionUpdate: async (update: SessionNotification) => updates.push(update),
+			signal: cliImageAbort.signal,
+			closed: Promise.withResolvers<void>().promise,
+		} as unknown as AgentSideConnection,
+		{ agentDir },
+	);
+	const cliImageRegistrations = providerRegistrations.length;
+	const cliImagePermissionModes = controlOperations.filter(operation => operation === "permission_mode.set").length;
+	await bounded(
+		cliImageAgent.loadSession({ sessionId: created.sessionId, cwd, mcpServers: [] }),
+		"CLI-primary image attachment",
+	);
+	expect(providerRegistrations).toHaveLength(cliImageRegistrations);
+	expect(controlOperations.filter(operation => operation === "permission_mode.set")).toHaveLength(
+		cliImagePermissionModes,
+	);
+	const routedConnectionId = currentSessionConnectionId;
+	expect(routedConnectionId).toEqual(expect.any(String));
+	const cliImageBase64 = smallImageBase64;
+	const cliImageData = Buffer.from(cliImageBase64, "base64");
+	expectedEchoImageBase64 = cliImageBase64;
+	const envelopeId = "00000000-0000-4000-8000-000000000000";
+	const directEnvelope = {
+		type: "control_request",
+		operation: "turn.prompt",
+		id: envelopeId,
+		input: {
+			text: "",
+			images: [{ mimeType: "image/png", data: cliImageBase64 }],
+			clientRef: envelopeId,
+		},
+	};
+	const directBoundaryText = "x".repeat(256 * 1024 - Buffer.byteLength(JSON.stringify(directEnvelope)));
+	const unstampedDirectEnvelope = {
+		...directEnvelope,
+		input: { ...directEnvelope.input, text: directBoundaryText },
+	};
+	const stampedDirectEnvelope = { ...unstampedDirectEnvelope, connectionId: routedConnectionId };
+	expect(Buffer.byteLength(JSON.stringify(unstampedDirectEnvelope))).toBe(256 * 1024);
+	expect(Buffer.byteLength(JSON.stringify(stampedDirectEnvelope))).toBeGreaterThan(256 * 1024);
+	const cliStagedEnvelope = {
+		type: "control_request",
+		operation: "turn.prompt",
+		id: envelopeId,
+		input: {
+			text: directBoundaryText,
+			stagedImages: [{ id: envelopeId }],
+			clientRef: envelopeId,
+		},
+		connectionId: routedConnectionId,
+	};
+	expect(Buffer.byteLength(JSON.stringify(cliStagedEnvelope))).toBeLessThanOrEqual(256 * 1024);
+	imageEchoStartIndex = updates.length;
+	imageEchoPresentAtDispatch = false;
+	const cliImagePromptCount = promptInputs.length;
+	const cliImagePrompt = cliImageAgent.prompt({
+		sessionId: created.sessionId,
+		prompt: [{ type: "text", text: directBoundaryText }, imageBlock(cliImageBase64)],
+	});
+	await waitFor(() => promptInputs.length === cliImagePromptCount + 1, "CLI-primary routed boundary image prompt");
+	expect(promptInputs.at(-1)).toMatchObject({
+		text: directBoundaryText,
+		stagedImages: [{ id: expect.any(String) }],
+	});
+	expect(promptInputs.at(-1)).not.toHaveProperty("images");
+	expect(lastImagePromptConnectionId).toBe(routedConnectionId);
+	expect(imageFrameBytes.at(-1)).toBeLessThanOrEqual(256 * 1024);
+	expect(imageEchoPresentAtDispatch).toBe(true);
+	expect(redeemedImages.at(-1)?.equals(cliImageData)).toBe(true);
+	promptSocket!.send(
+		JSON.stringify({
+			type: "agent_end",
+			sessionId: created.sessionId,
+			...currentPromptCorrelation(),
+			outcome: { kind: "stopped", reason: "end_turn", provenance: "agent" },
+		}),
+	);
+	expect(await bounded(cliImagePrompt, "CLI-primary routed boundary image prompt completion")).toEqual({
+		stopReason: "end_turn",
+	});
+	cliImageAbort.abort();
+	primaryControlSurface = "sdk";
 	imageUploads.close();
 	controller.abort();
 }, 30_000);

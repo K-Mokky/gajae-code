@@ -2626,6 +2626,7 @@ export class AcpAgent implements Agent {
 		if (isAcpProgressCommand(params.prompt)) return await this.#runProgressCommand(params.sessionId, record);
 		// Measure the entire SDK frame, including its UUID envelope. Large image prompts
 		// use host-owned staging; text-only oversize prompts still fail before dispatch.
+		const connectionId = record.attachment.connectionId;
 		const promptFrameBytes = Buffer.byteLength(
 			JSON.stringify({
 				type: "control_request",
@@ -2635,7 +2636,7 @@ export class AcpAgent implements Agent {
 				// the field even though it is not part of the skill input payload.
 				...(skillInvocation ? { confirm: false } : {}),
 				id: PROMPT_FRAME_ID_PLACEHOLDER,
-				...(record.adapter.connectionId === undefined ? {} : { connectionId: record.adapter.connectionId }),
+				...(connectionId === undefined ? {} : { connectionId }),
 			}),
 		);
 		const stageImages = !skillInvocation && payload.images.length > 0 && promptFrameBytes > MAX_PROMPT_FRAME_BYTES;
@@ -2650,7 +2651,7 @@ export class AcpAgent implements Agent {
 						stagedImages: ids.map(id => ({ id })),
 						clientRef,
 					},
-					...(record.adapter.connectionId === undefined ? {} : { connectionId: record.adapter.connectionId }),
+					...(connectionId === undefined ? {} : { connectionId }),
 				}),
 			);
 		if (stageImages && measureStagedPromptFrame([]) > MAX_PROMPT_FRAME_BYTES)
