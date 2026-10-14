@@ -4,6 +4,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
+	acquireFileLock,
 	FileLockAcquireError,
 	FileLockTestHooks,
 	processStartTime,
@@ -1362,6 +1363,18 @@ describe("file lock cleanup failure handling (#2478)", () => {
 			expect(await fs.exists(detachedPath)).toBe(true);
 		},
 	);
+
+	test("releases a lock acquired after its acquisition signal was cancelled", async () => {
+		const filePath = path.join(await makeTemp(), "cancelled-after-acquire.json");
+		const controller = new AbortController();
+		const abortReason = new Error("acquisition deadline elapsed");
+		const failure = await acquireFileLock(filePath, {
+			signal: controller.signal,
+			onAcquired: () => controller.abort(abortReason),
+		}).catch(error => error);
+		expect(failure).toBe(abortReason);
+		expect(await fs.exists(`${filePath}.lock`)).toBe(false);
+	});
 
 	test.skipIf(process.platform === "win32")(
 		"recovers a dead removal transition owner and acquires (#6101)",

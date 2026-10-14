@@ -2650,7 +2650,19 @@ export async function acquireFileLock(filePath: string, options: FileLockOptions
 				);
 		} else if (result) {
 			localLockStates.set(localKey, { owner: result, status: "held" });
-			return () => releaseLock(lockPath, result, localKey);
+			const release = (): Promise<void> => releaseLock(lockPath, result, localKey);
+			if (opts.signal?.aborted) {
+				try {
+					await release();
+				} catch (releaseError) {
+					throw new AggregateError(
+						[opts.signal.reason ?? new Error("File lock acquisition aborted"), releaseError],
+						"File lock acquisition was cancelled after ownership was published, and the lock could not be released.",
+					);
+				}
+				await abortAcquisition(attempt + 1);
+			}
+			return release;
 		}
 		if (!contentionObserved) {
 			contentionObserved = true;
