@@ -2690,7 +2690,8 @@ export async function acquireFileLock(filePath: string, options: FileLockOptions
 		const { promise, resolve, reject } = Promise.withResolvers<void>();
 		const onAbort = (): void => reject(opts.signal?.reason ?? new Error("File lock acquisition aborted"));
 		opts.signal.addEventListener("abort", onAbort, { once: true });
-		void Bun.sleep(opts.retryDelayMs).then(resolve);
+		if (opts.signal.aborted) onAbort();
+		else void Bun.sleep(opts.retryDelayMs).then(resolve);
 		try {
 			await promise;
 		} catch (error) {

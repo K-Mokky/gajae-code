@@ -1314,6 +1314,20 @@ it("the spawn lock rejects an ownerless empty directory instead of acquiring ove
 	}
 });
 
+it("bounds a contended spawn-lock retry by the remaining discovery deadline", async () => {
+	const dir = await temp();
+	const lockPath = path.join(dir, "sdk", "broker.spawn.lock");
+	try {
+		await fs.mkdir(lockPath, { recursive: true });
+		await expect(acquireSpawnLockForTest(dir, {}, Date.now() + 25)).rejects.toThrow(
+			"Timed out waiting for detached SDK broker discovery.",
+		);
+		expect(await fs.readdir(lockPath)).toEqual([]);
+	} finally {
+		await fs.rm(dir, { recursive: true, force: true });
+	}
+});
+
 it("two OS processes reclaim a dead holder without overlapping critical sections", async () => {
 	const dir = await temp();
 	const journal = path.join(dir, "journal");

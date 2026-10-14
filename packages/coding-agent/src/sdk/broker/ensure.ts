@@ -679,6 +679,7 @@ export interface EnsureBrokerSettings {
 const BROKER_PUBLICATION_TIMEOUT_MS = 15_000;
 const STALE_BROKER_RETIREMENT_TIMEOUT_MS = 5_000;
 const SPAWN_LOCK_RETRY_DELAY_MS = 50;
+const BROKER_DISCOVERY_TIMEOUT_MESSAGE = "Timed out waiting for detached SDK broker discovery.";
 /** Keep the startup fence alive long enough to adopt an ownerless removal transition. */
 const STARTUP_LOCK_WAIT_MS = Math.max(
 	9_000,
@@ -831,16 +832,33 @@ async function acquireSpawnLock(
 	const hostIdentity = await brokerLockHostIdentity(agentDir);
 	const retryDelayMs = options.retryDelayMs ?? SPAWN_LOCK_RETRY_DELAY_MS;
 	const retries = options.retries ?? Math.ceil(SPAWN_LOCK_WAIT_MS / retryDelayMs);
+	const remainingMs = deadlineAt === undefined ? undefined : deadlineAt - ensureBrokerTiming.now();
+	if (remainingMs !== undefined && remainingMs <= 0) throw new Error(BROKER_DISCOVERY_TIMEOUT_MESSAGE);
 	const boundedRetries =
-		deadlineAt === undefined
-			? retries
-			: Math.max(1, Math.min(retries, Math.ceil((deadlineAt - ensureBrokerTiming.now()) / retryDelayMs)));
-	return acquireFileLock(path.join(agentDir, "sdk", SPAWN_LOCK_TARGET_NAME), {
-		...hostIdentity,
-		...options,
-		retries: boundedRetries,
-		retryDelayMs,
-	});
+		remainingMs === undefined ? retries : Math.max(1, Math.min(retries, Math.ceil(remainingMs / retryDelayMs)));
+	const deadlineController = remainingMs === undefined ? undefined : new AbortController();
+	const signal =
+		deadlineController === undefined
+			? options.signal
+			: options.signal === undefined
+				? deadlineController.signal
+				: AbortSignal.any([options.signal, deadlineController.signal]);
+	const deadlineTimer =
+		deadlineController === undefined || remainingMs === undefined
+			? undefined
+			: setTimeout(() => deadlineController.abort(new Error(BROKER_DISCOVERY_TIMEOUT_MESSAGE)), remainingMs);
+	deadlineTimer?.unref?.();
+	try {
+		return await acquireFileLock(path.join(agentDir, "sdk", SPAWN_LOCK_TARGET_NAME), {
+			...hostIdentity,
+			...options,
+			...(signal === undefined ? {} : { signal }),
+			retries: boundedRetries,
+			retryDelayMs,
+		});
+	} finally {
+		if (deadlineTimer) clearTimeout(deadlineTimer);
+	}
 }
 
 /**
@@ -1787,7 +1805,7 @@ async function ensureBrokerOnce(
 					})
 				: discoveryError
 					? discoveryError
-					: new Error("Timed out waiting for detached SDK broker discovery.");
+					: new Error(BROKER_DISCOVERY_TIMEOUT_MESSAGE);
 		try {
 			await owner.stop();
 		} catch (cleanupError) {
