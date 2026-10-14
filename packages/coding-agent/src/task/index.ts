@@ -2229,16 +2229,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						routingByIndex.set(index, { ...outcome, pinnedSelector });
 						continue;
 					}
-					routingByIndex.set(index, {
-						kind: "manual-fallback",
-						tier: outcome.tier,
-						requestedTier: outcome.requestedTier,
-						...(outcome.defaultTierApplied ? { defaultTierApplied: true } : {}),
-						attemptedSelectorCount: effectiveAutorouting.active
-							? (effectiveAutorouting.map[outcome.tier] ?? []).length
-							: 0,
-						reason: "tier_unmatched",
-					});
+					routingPreflightErrorsByIndex.delete(index);
+					routingCandidatesByIndex.set(index, []);
 				}
 			}
 			const effectivePatterns = (index: number): string | string[] => {

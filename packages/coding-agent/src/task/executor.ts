@@ -2909,6 +2909,14 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			);
 		}
 	}
+	if ((options.runMode ?? "initial") !== "initial" && options.autoroutingCandidates?.length === 0 && options.routing) {
+		const skippedCandidates = options.autoroutingSkips?.filter(skip => skip.code === "credential_unavailable") ?? [];
+		return preflightTerminalResult(
+			{ ...options, routing: { ...options.routing, ...buildBoundedRoutingSkips(options.autoroutingSkips) } },
+			skippedCandidates.map(skip => ({ selector: skip.selector, phase: "probe", code: "credential_unavailable" })),
+			"all_candidates_skipped",
+		);
+	}
 	if (
 		!options.autoroutingPreflight ||
 		(options.runMode ?? "initial") !== "initial" ||
