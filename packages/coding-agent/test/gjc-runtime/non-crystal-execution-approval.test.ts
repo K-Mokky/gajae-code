@@ -11,7 +11,16 @@ import {
 	authoritativeConversationSnapshot,
 	runNativeDeepInterviewCommand,
 } from "@gajae-code/coding-agent/gjc-runtime/deep-interview-runtime";
+import {
+	clearRalplanReviewerCapabilities,
+	GJC_RALPLAN_REVIEWER_CAPABILITY_ENV,
+	GJC_RALPLAN_REVIEWER_ID_ENV,
+	GJC_RALPLAN_REVIEWER_ROLE_ENV,
+	getOrCreateRalplanReviewerCapability,
+	type RalplanReviewerRole,
+} from "@gajae-code/coding-agent/gjc-runtime/ralplan-reviewer-capability";
 import { runNativeRalplanCommand } from "@gajae-code/coding-agent/gjc-runtime/ralplan-runtime";
+import { GJC_RESTRICTED_ROLE_AGENT_BASH_ENV } from "@gajae-code/coding-agent/gjc-runtime/restricted-role-agent-bash";
 import {
 	auditPath,
 	modeStatePath,
@@ -63,6 +72,34 @@ function assistant(content: AssistantMessage["content"]): AssistantMessage {
 	};
 }
 
+async function withRalplanReviewer<T>(
+	sessionId: string,
+	role: RalplanReviewerRole,
+	agentId: string,
+	operation: () => Promise<T>,
+): Promise<T> {
+	const names = [
+		GJC_RESTRICTED_ROLE_AGENT_BASH_ENV,
+		GJC_RALPLAN_REVIEWER_ROLE_ENV,
+		GJC_RALPLAN_REVIEWER_ID_ENV,
+		GJC_RALPLAN_REVIEWER_CAPABILITY_ENV,
+	] as const;
+	const previous = new Map(names.map(name => [name, process.env[name]]));
+	process.env[GJC_RESTRICTED_ROLE_AGENT_BASH_ENV] = "1";
+	process.env[GJC_RALPLAN_REVIEWER_ROLE_ENV] = role;
+	process.env[GJC_RALPLAN_REVIEWER_ID_ENV] = agentId;
+	process.env[GJC_RALPLAN_REVIEWER_CAPABILITY_ENV] = getOrCreateRalplanReviewerCapability(sessionId, role, agentId);
+	try {
+		return await operation();
+	} finally {
+		for (const name of names) {
+			const value = previous.get(name);
+			if (value === undefined) delete process.env[name];
+			else process.env[name] = value;
+		}
+	}
+}
+
 async function withSession(fn: (cwd: string, manager: SessionManager, sessionId: string) => Promise<void>) {
 	const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "ordinary-execution-approval-"));
 	const oldId = process.env.GJC_SESSION_ID;
@@ -79,6 +116,7 @@ async function withSession(fn: (cwd: string, manager: SessionManager, sessionId:
 		await fn(cwd, manager, manager.getSessionId());
 	} finally {
 		await manager.close();
+		clearRalplanReviewerCapabilities(manager.getSessionId());
 		if (oldId === undefined) delete process.env.GJC_SESSION_ID;
 		else process.env.GJC_SESSION_ID = oldId;
 		if (oldFile === undefined) delete process.env.GJC_SESSION_FILE;
@@ -154,24 +192,40 @@ async function writeRalplanStage(
 	artifact: string,
 	extra: readonly string[] = [],
 ) {
-	const result = await runNativeRalplanCommand(
-		[
-			"--write",
-			"--stage",
-			stage,
-			"--stage_n",
-			String(stageN),
-			"--artifact",
-			artifact,
-			"--run-id",
-			runId,
-			"--session-id",
-			sessionId,
-			...extra,
-			"--json",
-		],
-		cwd,
-	);
+	const reviewerRole =
+		(stage === "architect" || stage === "critic") && extra.includes("--lane-verdict") ? stage : undefined;
+	const idFlag =
+		reviewerRole === "architect" ? "--architect-id" : reviewerRole === "critic" ? "--critic-id" : undefined;
+	const writeExtra = [...extra];
+	if (idFlag && !writeExtra.includes(idFlag)) writeExtra.push(idFlag, `${reviewerRole}-test-agent`);
+	const write = () =>
+		runNativeRalplanCommand(
+			[
+				"--write",
+				"--stage",
+				stage,
+				"--stage_n",
+				String(stageN),
+				"--artifact",
+				artifact,
+				"--run-id",
+				runId,
+				"--session-id",
+				sessionId,
+				...writeExtra,
+				"--json",
+			],
+			cwd,
+		);
+	const result = await (async () => {
+		if (reviewerRole && idFlag) {
+			const idIndex = writeExtra.indexOf(idFlag);
+			const agentId = idIndex >= 0 ? writeExtra[idIndex + 1] : undefined;
+			if (!agentId) throw new Error(`Ralplan ${stage} test write requires ${idFlag}`);
+			return await withRalplanReviewer(sessionId, reviewerRole, agentId, write);
+		}
+		return await write();
+	})();
 	expect(result.status, result.stderr).toBe(0);
 	return JSON.parse(result.stdout ?? "{}");
 }
@@ -338,6 +392,19 @@ describe("non-Crystal user-gated execution approval", () => {
 		});
 	});
 
+	it("consumes a Ralplan approval after reviewer capabilities are cleared", async () => {
+		await withSession(async (cwd, manager, sessionId) => {
+			await createUltragoalPlan({ cwd, brief: "Implement the approved repair" });
+			await publishReviewedRalplanFinal(cwd, sessionId);
+			await ask(cwd, manager, "ralplan", "approval-after-restart", false, true);
+			clearRalplanReviewerCapabilities(sessionId);
+
+			const result = await handoff(cwd, sessionId, "ralplan");
+			expect(result.status, result.stderr).toBe(0);
+			expect(JSON.parse(await fs.readFile(modeStatePath(cwd, sessionId, "ultragoal"), "utf8")).active).toBe(true);
+		});
+	});
+
 	it("keeps built-in Ask approval through SDK extension-wrapper preflight", async () => {
 		await withSession(async (cwd, _manager, sessionId) => {
 			await createUltragoalPlan({ cwd, brief: "Implement the approved repair" });
@@ -473,26 +540,34 @@ describe("non-Crystal user-gated execution approval", () => {
 				"--architect-decision",
 				"APPROVE",
 			]);
-			const conflictingRetry = await runNativeRalplanCommand(
-				[
-					"--write",
-					"--stage",
-					"architect",
-					"--stage_n",
-					"1",
-					"--artifact",
-					architectArtifact,
-					"--run-id",
-					"duplicate-review-provenance",
-					"--session-id",
-					sessionId,
-					"--lane-verdict",
-					"CLEAR",
-					"--architect-decision",
-					"REQUEST_CHANGES",
-					"--json",
-				],
-				cwd,
+			const conflictingRetry = await withRalplanReviewer(
+				sessionId,
+				"architect",
+				"architect-test-agent",
+				async () =>
+					await runNativeRalplanCommand(
+						[
+							"--write",
+							"--stage",
+							"architect",
+							"--stage_n",
+							"1",
+							"--artifact",
+							architectArtifact,
+							"--run-id",
+							"duplicate-review-provenance",
+							"--session-id",
+							sessionId,
+							"--architect-id",
+							"architect-test-agent",
+							"--lane-verdict",
+							"CLEAR",
+							"--architect-decision",
+							"REQUEST_CHANGES",
+							"--json",
+						],
+						cwd,
+					),
 			);
 			expect(conflictingRetry.status).toBe(2);
 			expect(conflictingRetry.stderr).toContain("conflicting Architect decision");

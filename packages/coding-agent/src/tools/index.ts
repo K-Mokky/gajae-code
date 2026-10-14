@@ -234,6 +234,8 @@ export interface ToolSession {
 	taskDepth?: number;
 	/** Current role-agent type/name for nested task sessions. */
 	currentAgentType?: string;
+	/** @internal Opaque capability passed only to trusted Ralplan review-lane Bash children. */
+	ralplanReviewerCapability?: string;
 	/** Get session file */
 	getSessionFile: () => string | null;
 	/** Get eval kernel owner ID for session-scoped retained-kernel cleanup. */

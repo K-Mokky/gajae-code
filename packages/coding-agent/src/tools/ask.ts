@@ -1881,8 +1881,11 @@ function displayRalplanApprovalQuestion(question: string): string {
 		replaceTabs(shortenPath(sanitizeDisplayLine(artifactPath))),
 		TRUNCATE_LENGTHS.CONTENT,
 	);
-	return replaceTabs(
-		`${safeQuestion.slice(0, pathStart)}${JSON.stringify(displayPath)}${safeQuestion.slice(pathEnd + 1)}`,
+	return truncateToWidth(
+		replaceTabs(
+			`${safeQuestion.slice(0, pathStart)}${JSON.stringify(displayPath)}${safeQuestion.slice(pathEnd + 1)}`,
+		),
+		TRUNCATE_LENGTHS.LINE,
 	);
 }
 

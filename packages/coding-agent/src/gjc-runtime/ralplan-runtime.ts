@@ -22,6 +22,12 @@ import {
 	serializeReviewConflictDocument,
 } from "./ralplan-review-conflicts";
 import {
+	createRalplanReviewAttestation,
+	type RalplanReviewAttestation,
+	type RalplanReviewerIdentity,
+	readRalplanReviewerIdentity,
+} from "./ralplan-reviewer-capability";
+import {
 	assertCwdMatchesRepositoryBinding,
 	assertPathUnderRepositoryBinding,
 	captureRepositoryBinding,
@@ -1118,6 +1124,7 @@ interface LaneVerdictUpdate {
 	verdict: string;
 	stageN: number;
 	architectDecision?: string;
+	reviewer: RalplanReviewerIdentity;
 }
 
 const PERSISTED_ROLES = ["planner", "architect", "critic"] as const;
@@ -1295,6 +1302,20 @@ function parseLaneVerdictArgs(
 			`--lane-verdict is only valid with --stage architect or critic (received ${stage}).`,
 		);
 	}
+	const reviewer = readRalplanReviewerIdentity();
+	if (!reviewer || reviewer.role !== stage) {
+		throw new RalplanCommandError(
+			2,
+			`--lane-verdict for ${stage} requires a dispatcher-authenticated ${stage} role-agent write.`,
+		);
+	}
+	const reviewerIdFlag = PERSISTED_ROLE_FLAGS[reviewer.role].id;
+	if (roleStateFlagValue(args, reviewerIdFlag) !== reviewer.agentId) {
+		throw new RalplanCommandError(
+			2,
+			`${reviewerIdFlag} must match the dispatcher-authenticated ${stage} agent identity.`,
+		);
+	}
 	const verdict = rawVerdict.trim().toUpperCase();
 	if (!LANE_VERDICTS[stage].has(verdict)) {
 		throw new RalplanCommandError(
@@ -1313,6 +1334,7 @@ function parseLaneVerdictArgs(
 		lane: stage,
 		verdict,
 		stageN,
+		reviewer,
 		...(architectDecision === undefined ? {} : { architectDecision }),
 	};
 }
@@ -1843,6 +1865,7 @@ function ralplanIndexKeyWithReviewMetadata(entry: unknown): string | undefined {
 		reviewed_planner: record.reviewed_planner ?? null,
 		lane_verdict: record.lane_verdict ?? null,
 		architect_decision: record.architect_decision ?? null,
+		reviewer_attestation: record.reviewer_attestation ?? null,
 	})}`;
 }
 
@@ -2116,6 +2139,7 @@ async function persistArtifact(
 	finalAdmission?: RalplanAutoHandoffResolution,
 	reviewedPlanner?: RalplanPlannerReference,
 	laneVerdict?: LaneVerdictUpdate,
+	reviewerAttestation?: RalplanReviewAttestation,
 ): Promise<PersistedArtifact> {
 	const runDir = path.join(sessionPlansDir(cwd, resolved.sessionId), "ralplan", resolved.runId);
 
@@ -2142,6 +2166,7 @@ async function persistArtifact(
 		...(reviewedPlanner ? { reviewed_planner: reviewedPlanner } : {}),
 		...(laneVerdict ? { lane_verdict: laneVerdict.verdict } : {}),
 		...(laneVerdict?.architectDecision ? { architect_decision: laneVerdict.architectDecision } : {}),
+		...(reviewerAttestation ? { reviewer_attestation: reviewerAttestation } : {}),
 		...(finalAdmission ? { auto_handoff: finalAdmission } : {}),
 	};
 	await appendRalplanIndexIdempotent(
@@ -2197,6 +2222,7 @@ interface ExistingStageArtifact {
 	reviewedPlanner?: RalplanPlannerReference;
 	laneVerdict?: string;
 	architectDecision?: string;
+	reviewerAttestation?: unknown;
 	autoHandoff?: RalplanAutoHandoffResolution;
 }
 
@@ -2265,6 +2291,7 @@ function findExistingStageArtifact(
 				: {}),
 			...(typeof record.lane_verdict === "string" ? { laneVerdict: record.lane_verdict } : {}),
 			...(typeof record.architect_decision === "string" ? { architectDecision: record.architect_decision } : {}),
+			...(record.reviewer_attestation !== undefined ? { reviewerAttestation: record.reviewer_attestation } : {}),
 			...(stage === "final" ? { autoHandoff: parseRalplanFinalAdmission(record.auto_handoff) } : {}),
 		};
 	}
@@ -2394,6 +2421,7 @@ async function repairMissingStageArtifactLedger(
 	finalAdmission?: RalplanAutoHandoffResolution,
 	reviewedPlanner?: RalplanPlannerReference,
 	laneVerdict?: LaneVerdictUpdate,
+	reviewerAttestation?: RalplanReviewAttestation,
 ): Promise<ExistingStageArtifact> {
 	const createdAt = new Date().toISOString();
 	const indexEntry = {
@@ -2405,6 +2433,7 @@ async function repairMissingStageArtifactLedger(
 		...(reviewedPlanner ? { reviewed_planner: reviewedPlanner } : {}),
 		...(laneVerdict ? { lane_verdict: laneVerdict.verdict } : {}),
 		...(laneVerdict?.architectDecision ? { architect_decision: laneVerdict.architectDecision } : {}),
+		...(reviewerAttestation ? { reviewer_attestation: reviewerAttestation } : {}),
 		...(finalAdmission ? { auto_handoff: finalAdmission } : {}),
 	};
 	const result = await appendRalplanIndexIdempotent(
@@ -2610,6 +2639,7 @@ async function handleArtifactWrite(
 	args: readonly string[],
 	cwd: string,
 	agentDir?: string,
+	stageWriteLockHeld = false,
 	finalPublicationLockHeld = false,
 ): Promise<RalplanCommandResult> {
 	// #4693: explicit --worktree-root binds every persistence root to the selected
@@ -2621,6 +2651,21 @@ async function handleArtifactWrite(
 	const resolved = await resolveArtifactArgs(args, persistCwd, cwd, {
 		confineArtifactRoot: target.explicit ? cwd : undefined,
 	});
+	if (!stageWriteLockHeld) {
+		// Duplicate lookup, deterministic stage-file publication, and index append
+		// are one cross-process transaction for this exact stage identity.
+		const stageWriteLockPath = path.join(
+			sessionPlansDir(persistCwd, resolved.sessionId),
+			"ralplan",
+			resolved.runId,
+			`stage-${pad2(resolved.stageN)}-${resolved.stage}-write`,
+		);
+		return await withWorkflowStateLock(
+			stageWriteLockPath,
+			() => handleArtifactWrite(args, cwd, agentDir, true, false),
+			{ cwd: persistCwd },
+		);
+	}
 	if (resolved.stage === "final" && !finalPublicationLockHeld) {
 		const publicationLockPath = path.join(
 			sessionPlansDir(persistCwd, resolved.sessionId),
@@ -2628,9 +2673,13 @@ async function handleArtifactWrite(
 			resolved.runId,
 			"final-publication",
 		);
-		return await withWorkflowStateLock(publicationLockPath, () => handleArtifactWrite(args, cwd, agentDir, true), {
-			cwd: persistCwd,
-		});
+		return await withWorkflowStateLock(
+			publicationLockPath,
+			() => handleArtifactWrite(args, cwd, agentDir, true, true),
+			{
+				cwd: persistCwd,
+			},
+		);
 	}
 	const persistedRoleState = parsePersistedRoleStateArgs(args, resolved.stage);
 	const laneVerdict = parseLaneVerdictArgs(args, resolved.stage, resolved.stageN);
@@ -2674,6 +2723,23 @@ async function handleArtifactWrite(
 		resolved.stage === "architect" || resolved.stage === "critic" || resolved.stage === "final"
 			? latestRalplanPlannerReference(indexLoad.rawText, runDir, resolved.stageN)
 			: undefined;
+	const reviewerAttestation =
+		laneVerdict === undefined
+			? undefined
+			: createRalplanReviewAttestation(
+					{
+						sessionId: resolved.sessionId,
+						runId: resolved.runId,
+						stage: laneVerdict.lane,
+						stageN: laneVerdict.stageN,
+						artifactPath: path.join(runDir, `stage-${pad2(resolved.stageN)}-${resolved.stage}.md`),
+						artifactSha256: sha256,
+						reviewedPlanner,
+						laneVerdict: laneVerdict.verdict,
+						architectDecision: laneVerdict.architectDecision,
+					},
+					laneVerdict.reviewer,
+				);
 	// Duplicate-write guard: a second `--write` for the same (stage, stage_n) must not
 	// silently clobber the artifact or append a duplicate ledger row. Classify before any
 	// state mutation so a conflict never regresses run-state phase.
@@ -2704,6 +2770,11 @@ async function handleArtifactWrite(
 					...(mergedReviewedPlanner ? { reviewed_planner: mergedReviewedPlanner } : {}),
 					...(mergedLaneVerdict ? { lane_verdict: mergedLaneVerdict } : {}),
 					...(mergedArchitectDecision ? { architect_decision: mergedArchitectDecision } : {}),
+					...(reviewerAttestation
+						? { reviewer_attestation: reviewerAttestation }
+						: existingArtifact.reviewerAttestation !== undefined
+							? { reviewer_attestation: existingArtifact.reviewerAttestation }
+							: {}),
 					...(existingArtifact.autoHandoff ? { auto_handoff: existingArtifact.autoHandoff } : {}),
 				},
 				{
@@ -2733,6 +2804,11 @@ async function handleArtifactWrite(
 					...(mergedReviewedPlanner ? { reviewed_planner: mergedReviewedPlanner } : {}),
 					...(mergedLaneVerdict ? { lane_verdict: mergedLaneVerdict } : {}),
 					...(mergedArchitectDecision ? { architect_decision: mergedArchitectDecision } : {}),
+					...(reviewerAttestation
+						? { reviewer_attestation: reviewerAttestation }
+						: existingArtifact.reviewerAttestation !== undefined
+							? { reviewer_attestation: existingArtifact.reviewerAttestation }
+							: {}),
 					...(existingArtifact.autoHandoff ? { auto_handoff: existingArtifact.autoHandoff } : {}),
 				},
 				{
@@ -2814,6 +2890,7 @@ async function handleArtifactWrite(
 			resolved.stage === "final" ? unavailableRalplanFinalAdmission() : undefined,
 			reviewedPlanner,
 			laneVerdict,
+			reviewerAttestation,
 		);
 		if (resolved.stage === "final") {
 			const recoveryPublication = { id: randomUUID(), sha256 };
@@ -2931,6 +3008,7 @@ async function handleArtifactWrite(
 		autoHandoff,
 		reviewedPlanner,
 		laneVerdict,
+		reviewerAttestation,
 	);
 	if (persistedRoleState) {
 		await applyPersistedRoleStateUpdate(persistCwd, resolved.sessionId, persistedRoleState);

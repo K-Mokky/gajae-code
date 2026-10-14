@@ -1957,7 +1957,7 @@ describe("AskTool option rendering", () => {
 			theme!,
 		);
 
-		expect(stripAnsi(rendered.render(300).join("\n"))).toContain(question);
+		expect(stripAnsi(rendered.render(300).join("\n"))).toContain("[click](https://example.invalid)");
 		const renderedResult = askToolRenderer.renderResult(
 			{
 				content: [{ type: "text", text: "Approval recorded." }],
@@ -1971,7 +1971,7 @@ describe("AskTool option rendering", () => {
 			{ expanded: true, isPartial: false },
 			theme!,
 		);
-		expect(stripAnsi(renderedResult.render(300).join("\n"))).toContain(question);
+		expect(stripAnsi(renderedResult.render(300).join("\n"))).toContain("[click](https://example.invalid)");
 	});
 
 	it("shortens and truncates the display-only approval path in both renderers", async () => {
@@ -2008,6 +2008,14 @@ describe("AskTool option rendering", () => {
 		);
 		const callText = stripAnsi(renderedCall.render(120).join("\n"));
 		const resultText = stripAnsi(renderedResult.render(120).join("\n"));
+		for (const rendered of [
+			stripAnsi(renderedCall.render(300).join("\n")),
+			stripAnsi(renderedResult.render(300).join("\n")),
+		]) {
+			const approvalLine = rendered.split("\n").find(line => line.includes("Approve execution via ultragoal"));
+			expect(approvalLine).toBeDefined();
+			expect(Bun.stringWidth((approvalLine ?? "").trimEnd())).toBeLessThanOrEqual(120);
+		}
 
 		for (const output of [callText, resultText]) {
 			expect(output).not.toContain(os.homedir());
