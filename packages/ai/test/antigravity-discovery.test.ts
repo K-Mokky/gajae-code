@@ -216,4 +216,69 @@ describe("Antigravity model discovery", () => {
 		expect(stale).toBe(false);
 		expect(models.map(model => model.id)).toEqual(["gemini-3.1-pro-low", "gemini-3.7-flash-tiered"]);
 	});
+
+	it("logs model discovery filtering decisions when GJC_DEBUG_ANTIGRAVITY_DISCOVERY=1", async () => {
+		const originalEnv = process.env.GJC_DEBUG_ANTIGRAVITY_DISCOVERY;
+		process.env.GJC_DEBUG_ANTIGRAVITY_DISCOVERY = "1";
+
+		const consoleErrorSpyData: string[] = [];
+		const originalConsoleError = console.error;
+		const spyConsoleError = (message?: unknown) => {
+			consoleErrorSpyData.push(String(message));
+		};
+
+		Object.assign(console, { error: spyConsoleError });
+
+		const models: Record<string, unknown> = {};
+		models["gemini-3.1-pro-low"] = {
+			displayName: "Gemini 3.1 Pro (Low)",
+			maxTokens: 1_048_576,
+		};
+		models.chat_20706 = { displayName: "Denylisted Model" };
+		models["gemini-3.1-pro-high"] = { displayName: "Retired Model" };
+		models["internal-hidden-model"] = {
+			displayName: "Internal Hidden",
+			isInternal: true,
+		};
+		const payload = {
+			models,
+			agentModelSorts: [{ groups: [{ modelIds: ["gemini-3.1-pro-low"] }] }],
+		};
+
+		const fetcher = (async () =>
+			new Response(JSON.stringify(payload), {
+				headers: { "content-type": "application/json" },
+			})) as unknown as typeof fetch;
+
+		try {
+			await fetchAntigravityDiscoveryModels({
+				token: "test-token",
+				endpoint: "https://antigravity.example.test",
+				fetcher,
+			});
+
+			expect(consoleErrorSpyData).toContain("[GJC_DEBUG_ANTIGRAVITY_DISCOVERY]");
+			const output = consoleErrorSpyData.join("\n");
+			expect(output).toContain("HTTP Status:");
+			expect(output).toContain("User-Agent:");
+			expect(output).toContain("Endpoint:");
+			expect(output).toContain("Total raw models from response:");
+			expect(output).toContain("=== KEPT MODELS ===");
+			expect(output).toContain("gemini-3.1-pro-low");
+			expect(output).toContain("=== FILTERED BY DENYLIST ===");
+			expect(output).toContain("chat_20706");
+			expect(output).toContain("=== FILTERED BY RETIREMENT (google-antigravity) ===");
+			expect(output).toContain("gemini-3.1-pro-high");
+			expect(output).toContain("=== FILTERED (internal, not surfaced) ===");
+			expect(output).toContain("internal-hidden-model");
+			expect(output).toContain("isInternal=true");
+		} finally {
+			Object.assign(console, { error: originalConsoleError });
+			if (originalEnv !== undefined) {
+				process.env.GJC_DEBUG_ANTIGRAVITY_DISCOVERY = originalEnv;
+			} else {
+				delete process.env.GJC_DEBUG_ANTIGRAVITY_DISCOVERY;
+			}
+		}
+	});
 });

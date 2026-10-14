@@ -35,6 +35,12 @@ export interface AntigravityDiscoveryApiModel {
 	modelProvider?: string;
 	isInternal?: boolean;
 	supportsVideo?: boolean;
+	/** Account-specific entitlement status */
+	entitlement?: string;
+	/** Whether the model is disabled for this account */
+	disabled?: boolean;
+	/** Per-account quota/tier information */
+	quota?: string;
 }
 
 /**
@@ -81,6 +87,9 @@ const AntigravityDiscoveryApiModelSchema: z.ZodType<AntigravityDiscoveryApiModel
 		modelProvider: z.preprocess(value => (typeof value === "string" ? value : undefined), z.string().optional()),
 		isInternal: z.preprocess(value => (typeof value === "boolean" ? value : undefined), z.boolean().optional()),
 		supportsVideo: z.preprocess(value => (typeof value === "boolean" ? value : undefined), z.boolean().optional()),
+		entitlement: z.preprocess(value => (typeof value === "string" ? value : undefined), z.string().optional()),
+		disabled: z.preprocess(value => (typeof value === "boolean" ? value : undefined), z.boolean().optional()),
+		quota: z.preprocess(value => (typeof value === "string" ? value : undefined), z.string().optional()),
 	})
 	.loose();
 const AntigravityDiscoveryAgentModelGroupSchema: z.ZodType<AntigravityDiscoveryAgentModelGroup> = z
@@ -228,14 +237,47 @@ export async function fetchAntigravityDiscoveryModels(
 			}
 		}
 
+		const debugEnabled = process.env.GJC_DEBUG_ANTIGRAVITY_DISCOVERY === "1";
+		const keptModelIds: string[] = [];
+		const filteredByDenylist: string[] = [];
+		const filteredByRetirement: string[] = [];
+		const filteredByInternal: string[] = [];
+		const keptModelDetails: Record<string, Partial<AntigravityDiscoveryApiModel>> = {};
+		const filteredModelDetails: Record<string, Partial<AntigravityDiscoveryApiModel> & { reason: string }> = {};
+
 		const models: Model<"google-gemini-cli">[] = [];
 
 		for (const [modelId, model] of Object.entries(parsed.models ?? {})) {
-			if (ANTIGRAVITY_DISCOVERY_DENYLIST.has(modelId) || isRetiredModelKey(targetProvider, modelId)) {
+			if (ANTIGRAVITY_DISCOVERY_DENYLIST.has(modelId)) {
+				if (debugEnabled) {
+					filteredByDenylist.push(modelId);
+					filteredModelDetails[modelId] = { ...model, reason: "denylist" };
+				}
+				continue;
+			}
+			if (isRetiredModelKey(targetProvider, modelId)) {
+				if (debugEnabled) {
+					filteredByRetirement.push(modelId);
+					filteredModelDetails[modelId] = { ...model, reason: `retired-${targetProvider}` };
+				}
 				continue;
 			}
 			if (model.isInternal === true && !surfacedModelIds.has(modelId)) {
+				if (debugEnabled) {
+					filteredByInternal.push(modelId);
+					filteredModelDetails[modelId] = { ...model, reason: "internal-not-surfaced" };
+				}
 				continue;
+			}
+			if (debugEnabled) {
+				keptModelIds.push(modelId);
+				keptModelDetails[modelId] = {
+					displayName: model.displayName,
+					isInternal: model.isInternal,
+					entitlement: model.entitlement,
+					disabled: model.disabled,
+					quota: model.quota,
+				};
 			}
 
 			const supportsImages = model.supportsImages === true;
@@ -259,6 +301,76 @@ export async function fetchAntigravityDiscoveryModels(
 		}
 
 		models.sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
+
+		if (debugEnabled) {
+			const allRawModelIds = Object.keys(parsed.models ?? {}).sort();
+			const ua = options.userAgent ?? "(using default getAntigravityUserAgent())";
+			console.error("[GJC_DEBUG_ANTIGRAVITY_DISCOVERY]");
+			console.error(`  HTTP Status: ${response.status}`);
+			console.error(`  User-Agent: ${ua}`);
+			console.error(`  Endpoint: ${endpoint}`);
+			console.error(`  Total raw models from response: ${allRawModelIds.length}`);
+			console.error("\n  === KEPT MODELS ===");
+			console.error(`  Count: ${keptModelIds.length}`);
+			for (const modelId of keptModelIds) {
+				const details = keptModelDetails[modelId];
+				const attrs = [];
+				if (details?.entitlement) attrs.push(`entitlement=${details.entitlement}`);
+				if (details?.disabled === true) attrs.push("disabled=true");
+				if (details?.quota) attrs.push(`quota=${details.quota}`);
+				if (details?.isInternal === true) attrs.push("isInternal=true");
+				const attrStr = attrs.length > 0 ? ` [${attrs.join(", ")}]` : "";
+				console.error(`    ${modelId}${attrStr}`);
+			}
+			if (filteredByDenylist.length > 0) {
+				console.error(`\n  === FILTERED BY DENYLIST ===`);
+				console.error(`  Count: ${filteredByDenylist.length}`);
+				for (const modelId of filteredByDenylist) {
+					const details = filteredModelDetails[modelId];
+					const attrs = [];
+					if (details?.entitlement) attrs.push(`entitlement=${details.entitlement}`);
+					if (details?.disabled === true) attrs.push("disabled=true");
+					if (details?.quota) attrs.push(`quota=${details.quota}`);
+					if (details?.isInternal === true) attrs.push("isInternal=true");
+					const attrStr = attrs.length > 0 ? ` [${attrs.join(", ")}]` : "";
+					console.error(`    ${modelId}${attrStr}`);
+				}
+			}
+			if (filteredByRetirement.length > 0) {
+				console.error(`\n  === FILTERED BY RETIREMENT (${targetProvider}) ===`);
+				console.error(`  Count: ${filteredByRetirement.length}`);
+				for (const modelId of filteredByRetirement) {
+					const details = filteredModelDetails[modelId];
+					const attrs = [];
+					if (details?.entitlement) attrs.push(`entitlement=${details.entitlement}`);
+					if (details?.disabled === true) attrs.push("disabled=true");
+					if (details?.quota) attrs.push(`quota=${details.quota}`);
+					if (details?.isInternal === true) attrs.push("isInternal=true");
+					const attrStr = attrs.length > 0 ? ` [${attrs.join(", ")}]` : "";
+					console.error(`    ${modelId}${attrStr}`);
+				}
+			}
+			if (filteredByInternal.length > 0) {
+				console.error(`\n  === FILTERED (internal, not surfaced) ===`);
+				console.error(`  Count: ${filteredByInternal.length}`);
+				for (const modelId of filteredByInternal) {
+					const details = filteredModelDetails[modelId];
+					const attrs = [];
+					if (details?.entitlement) attrs.push(`entitlement=${details.entitlement}`);
+					if (details?.disabled === true) attrs.push("disabled=true");
+					if (details?.quota) attrs.push(`quota=${details.quota}`);
+					if (details?.isInternal === true) attrs.push("isInternal=true");
+					const attrStr = attrs.length > 0 ? ` [${attrs.join(", ")}]` : "";
+					console.error(`    ${modelId}${attrStr}`);
+				}
+			}
+			console.error(`\n  === SURFACE INFO ===`);
+			console.error(`  agentModelSorts surfaced: ${surfacedModelIds.size}`);
+			if (surfacedModelIds.size > 0) {
+				console.error(`    ${Array.from(surfacedModelIds).sort().join(", ")}`);
+			}
+		}
+
 		return models;
 	}
 
