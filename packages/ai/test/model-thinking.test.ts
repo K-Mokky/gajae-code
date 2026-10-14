@@ -279,6 +279,24 @@ describe("model thinking metadata", () => {
 		expect(requireSupportedEffort(flash36, Effort.Minimal)).toBe(Effort.Minimal);
 	});
 
+	it("sends thinkingLevel for Gemini 4 Argon with low/medium/high only", () => {
+		const argon = createModel({
+			id: "gemini-4-argon",
+			api: "google-generative-ai",
+			provider: "google",
+		});
+
+		expect(argon.thinking).toEqual({
+			mode: "google-level",
+			minLevel: Effort.Low,
+			maxLevel: Effort.High,
+		});
+		expect(mapEffortToGoogleThinkingLevel(argon, Effort.Low)).toBe("LOW");
+		expect(mapEffortToGoogleThinkingLevel(argon, Effort.Medium)).toBe("MEDIUM");
+		expect(mapEffortToGoogleThinkingLevel(argon, Effort.High)).toBe("HIGH");
+		expect(() => requireSupportedEffort(argon, Effort.Minimal)).toThrow(/not supported/);
+	});
+
 	it("encodes anthropic transport mode in metadata", () => {
 		const opus45 = createModel({
 			id: "claude-opus-4-5",
@@ -396,6 +414,16 @@ describe("model thinking metadata", () => {
 });
 
 describe("generated model policies", () => {
+	it("normalizes negative and non-finite catalog prices without changing valid prices", () => {
+		const model = createModel({ id: "pareto-code", api: "openai-completions", provider: "openrouter" });
+		model.cost = { input: -1_000_000, output: 0.5, cacheRead: Number.NaN, cacheWrite: 0 };
+		const models = [model];
+
+		applyGeneratedModelPolicies(models);
+
+		expect(models[0]?.cost).toEqual({ input: 0, output: 0.5, cacheRead: 0, cacheWrite: 0 });
+	});
+
 	it("corrects stale direct xAI Grok reasoning metadata before enrichment", () => {
 		const models = [
 			createModel({ id: "grok-4.5", api: "openai-completions", provider: "xai", reasoning: false }),
