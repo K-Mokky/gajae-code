@@ -3,6 +3,14 @@ import { isRetiredModelKey } from "../../model-retirements";
 import { getAntigravityUserAgent } from "../../providers/google-gemini-headers";
 import type { Model } from "../../types";
 
+/**
+ * Returns the default Antigravity discovery User-Agent.
+ * Can be overridden via PI_AI_ANTIGRAVITY_USER_AGENT environment variable.
+ */
+export function getDefaultAntigravityUserAgent(): string {
+	return getAntigravityUserAgent();
+}
+
 const DEFAULT_ANTIGRAVITY_DISCOVERY_ENDPOINTS = [
 	"https://daily-cloudcode-pa.googleapis.com",
 	"https://daily-cloudcode-pa.sandbox.googleapis.com",
@@ -242,6 +250,7 @@ export async function fetchAntigravityDiscoveryModels(
 		const filteredByDenylist: string[] = [];
 		const filteredByRetirement: string[] = [];
 		const filteredByInternal: string[] = [];
+		const filteredByDisabled: string[] = [];
 		const keptModelDetails: Record<string, Partial<AntigravityDiscoveryApiModel>> = {};
 		const filteredModelDetails: Record<string, Partial<AntigravityDiscoveryApiModel> & { reason: string }> = {};
 
@@ -259,6 +268,13 @@ export async function fetchAntigravityDiscoveryModels(
 				if (debugEnabled) {
 					filteredByRetirement.push(modelId);
 					filteredModelDetails[modelId] = { ...model, reason: `retired-${targetProvider}` };
+				}
+				continue;
+			}
+			if (model.disabled === true) {
+				if (debugEnabled) {
+					filteredByDisabled.push(modelId);
+					filteredModelDetails[modelId] = { ...model, reason: "disabled" };
 				}
 				continue;
 			}
@@ -340,6 +356,20 @@ export async function fetchAntigravityDiscoveryModels(
 				console.error(`\n  === FILTERED BY RETIREMENT (${targetProvider}) ===`);
 				console.error(`  Count: ${filteredByRetirement.length}`);
 				for (const modelId of filteredByRetirement) {
+					const details = filteredModelDetails[modelId];
+					const attrs = [];
+					if (details?.entitlement) attrs.push(`entitlement=${details.entitlement}`);
+					if (details?.disabled === true) attrs.push("disabled=true");
+					if (details?.quota) attrs.push(`quota=${details.quota}`);
+					if (details?.isInternal === true) attrs.push("isInternal=true");
+					const attrStr = attrs.length > 0 ? ` [${attrs.join(", ")}]` : "";
+					console.error(`    ${modelId}${attrStr}`);
+				}
+			}
+			if (filteredByDisabled.length > 0) {
+				console.error(`\n  === FILTERED (disabled) ===`);
+				console.error(`  Count: ${filteredByDisabled.length}`);
+				for (const modelId of filteredByDisabled) {
 					const details = filteredModelDetails[modelId];
 					const attrs = [];
 					if (details?.entitlement) attrs.push(`entitlement=${details.entitlement}`);
