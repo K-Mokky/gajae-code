@@ -70,6 +70,7 @@ import {
 	type SdkLifecycleStartupOwner,
 } from "../sdk/lifecycle-session";
 import { listManagedSessionCandidates, resolveManagedSessionScope } from "../sdk/session-directory";
+import { sessionLaunchEnvironment } from "../sdk/session-environment";
 import {
 	SdkStartupCapability,
 	type SdkStartupFailure,
@@ -580,6 +581,7 @@ export async function runSessionHost(
 	const writeLifecycleReady = timing.writeSessionLifecycleReady ?? writeSessionLifecycleReady;
 	const writeMcpConfig = timing.writeMcpConfig ?? ((filePath, contents) => Bun.write(filePath, contents));
 	const request = readSessionLifecycleLaunchRequest(process.env.GJC_SDK_LIFECYCLE_REQUEST, now());
+	delete process.env.GJC_SDK_LIFECYCLE_REQUEST;
 	let constructionCleanupComplete = true;
 	const agentDir = process.env.GJC_AGENT_DIR;
 	if (!agentDir) throw new Error("GJC_AGENT_DIR is required for sdk session-host-internal.");
@@ -1145,6 +1147,9 @@ export async function runSessionHost(
 						...(mcpStartupTimeoutMs !== undefined ? { mcpStartupTimeoutMs } : {}),
 						...(request.readiness ? { readiness: request.readiness } : {}),
 						...(request.modelId ? { modelId: request.modelId } : {}),
+						...(request.env === undefined && request.unsetEnv === undefined
+							? {}
+							: { sessionEnvironment: sessionLaunchEnvironment(request.env, request.unsetEnv) }),
 						lifecycleRequestId: effectMarker,
 					},
 					startupOwner,

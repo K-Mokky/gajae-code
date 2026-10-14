@@ -29,6 +29,7 @@ export default {
 		const executorOptions: PythonExecutorOptions = {
 			cwd: opts.cwd,
 			settings: opts.session.settings,
+			sessionEnvironment: opts.session.sessionEnvironment,
 			deadlineMs: opts.deadlineMs,
 			signal: opts.signal,
 			sessionId: namespaceSessionId(opts.sessionId),

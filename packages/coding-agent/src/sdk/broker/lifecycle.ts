@@ -87,6 +87,12 @@ import {
 	resolveManagedSessionScope,
 } from "../session-directory";
 import {
+	applySessionLaunchEnvironment,
+	isValidSessionLaunchEnvironment,
+	type SessionLaunchEnvironment,
+	sessionLaunchEnvironment,
+} from "../session-environment";
+import {
 	lifecycleKnownSecrets,
 	normalizeSdkStartupFailure,
 	type SdkStartupFailure,
@@ -721,6 +727,8 @@ export interface SessionLifecycleLaunchRequestBase {
 	 */
 	modelId?: string;
 	modelPreset?: string;
+	env?: Readonly<Record<string, string>>;
+	unsetEnv?: readonly string[];
 	mcpServers?: SessionLifecycleMcpServer[];
 	worktree?: SessionLifecycleWorktreeTarget;
 	/** Absent means the stock immediate contract; `deferred` prepares the session. */
@@ -901,6 +909,7 @@ export function readSessionLifecycleLaunchRequest(
 			(typeof request.effectMarker !== "string" || !/^[A-Za-z0-9._-]{1,128}$/.test(request.effectMarker))) ||
 		(request.modelId !== undefined && (typeof request.modelId !== "string" || !request.modelId.trim())) ||
 		(request.modelPreset !== undefined && (typeof request.modelPreset !== "string" || !request.modelPreset)) ||
+		!isValidSessionLaunchEnvironment(request.env, request.unsetEnv) ||
 		(request.mcpServers !== undefined && !isSessionLifecycleMcpServers(request.mcpServers)) ||
 		!hasValidLifecycleDeadlines(
 			{
@@ -950,6 +959,7 @@ type SessionLaunch = {
 	 */
 	modelId?: string;
 	modelPreset?: string;
+	sessionEnvironment?: SessionLaunchEnvironment;
 	mcpServers?: SessionLifecycleMcpServer[];
 	/** Coordinator namespace dir; broker computes the state file path from launch.id (#2549). */
 	coordinatorStateDir?: string;
@@ -968,6 +978,7 @@ function lifecycleLaunchKnownSecrets(launch: SessionLaunch): string[] {
 	const secrets = [
 		...lifecycleKnownSecrets(),
 		...(launch.coordinatorSidecarSigningKey ? [launch.coordinatorSidecarSigningKey] : []),
+		...Object.values(launch.sessionEnvironment?.env ?? {}).filter(value => value.length > 0),
 		...(launch.mcpServers ?? []).flatMap(server => {
 			if ("url" in server) {
 				// Only credential-bearing headers are secrets. Treating every header
@@ -5938,6 +5949,20 @@ async function launchInput(
 	operation: "session.create" | "session.fork" | "session.resume",
 	input: Input,
 ): Promise<SessionLaunch | BrokerResponse> {
+	const target =
+		typeof input.target === "object" && input.target !== null && !Array.isArray(input.target)
+			? (input.target as Record<string, unknown>)
+			: undefined;
+	const hasTopLevelEnvironment = input.env !== undefined || input.unsetEnv !== undefined;
+	const hasTargetEnvironment = target?.env !== undefined || target?.unsetEnv !== undefined;
+	if (hasTopLevelEnvironment && hasTargetEnvironment)
+		return fail("invalid_input", "Session launch environment fields must be supplied in one location.");
+	const env = input.env ?? target?.env;
+	const unsetEnv = input.unsetEnv ?? target?.unsetEnv;
+	if (!isValidSessionLaunchEnvironment(env, unsetEnv))
+		return fail("invalid_input", "Session launch environment is invalid.");
+	const hasRequestedEnvironment = env !== undefined || unsetEnv !== undefined;
+	let sessionEnvironment = sessionLaunchEnvironment(env, unsetEnv);
 	const requestedCwd = lifecycleCwd(input);
 	if (!requestedCwd) return fail("invalid_input", "A target path is required.");
 	const sourceCwd = requestedCwd;
@@ -5995,6 +6020,10 @@ async function launchInput(
 	const requested = sessionId(input);
 	if (requested !== undefined && !isCanonicalSessionId(requested))
 		return fail("invalid_input", "sessionId must be a canonical safe identifier.");
+	if (operation === "session.resume" && requested && !hasRequestedEnvironment) {
+		await broker.index.refresh();
+		sessionEnvironment = broker.index.findSessionLaunchEnvironment(requested, resolvedRoot);
+	}
 	if (input.mcpServers !== undefined && !isSessionLifecycleMcpServers(input.mcpServers))
 		return fail("invalid_input", "mcpServers must contain unique valid stdio, HTTP, or SSE server definitions.");
 	const mcpServers = input.mcpServers as SessionLifecycleMcpServer[] | undefined;
@@ -6046,6 +6075,7 @@ async function launchInput(
 			root: resolvedRoot,
 			modelId,
 			modelPreset,
+			...(sessionEnvironment === undefined ? {} : { sessionEnvironment }),
 			mcpServers,
 			worktree,
 			worktreePlan,
@@ -6069,6 +6099,7 @@ async function launchInput(
 			modelId,
 			sessionIdentity: saved.identity,
 			modelPreset,
+			...(sessionEnvironment === undefined ? {} : { sessionEnvironment }),
 			mcpServers,
 			worktree,
 			worktreePlan,
@@ -6103,6 +6134,7 @@ async function launchInput(
 		sourceCwd,
 		modelId,
 		modelPreset,
+		...(sessionEnvironment === undefined ? {} : { sessionEnvironment }),
 		mcpServers,
 		worktree,
 		worktreePlan,
@@ -7130,6 +7162,8 @@ async function executeLifecycleResponse(
 			...(launch.sessionIdentity ? { sessionIdentity: launch.sessionIdentity } : {}),
 			...(launch.modelPreset ? { modelPreset: launch.modelPreset } : {}),
 			...(launch.modelId ? { modelId: launch.modelId } : {}),
+			...(launch.sessionEnvironment?.env === undefined ? {} : { env: launch.sessionEnvironment.env }),
+			...(launch.sessionEnvironment?.unsetEnv === undefined ? {} : { unsetEnv: launch.sessionEnvironment.unsetEnv }),
 			...(launch.mcpServers ? { mcpServers: launch.mcpServers } : {}),
 			...(launch.worktree ? { worktree: launch.worktree } : {}),
 			...(launch.readiness ? { readiness: launch.readiness } : {}),
@@ -7152,6 +7186,13 @@ async function executeLifecycleResponse(
 			const authorizedSpawn = broker.runSynchronousEffectWithFreshPublicationAuthority(() => {
 				const cmd = command(broker);
 				validateLifecycleExecutable(cmd.file);
+				const childEnvironment = Object.fromEntries(
+					Object.entries("kind" in cmd ? cmd.env : process.env).filter(
+						(entry): entry is [string, string] =>
+							entry[0] !== "GJC_MASTER_CAPABILITY" && typeof entry[1] === "string",
+					),
+				);
+				applySessionLaunchEnvironment(childEnvironment, launch.sessionEnvironment);
 				return spawn(cmd.file, cmd.args, {
 					cwd: launch.cwd,
 					detached: true,
@@ -7159,13 +7200,7 @@ async function executeLifecycleResponse(
 					// usable after this broker exits while the artifact stays bounded.
 					stdio: ["ignore", "ignore", childStderrSink?.drainer.stdin ?? "ignore"],
 					env: {
-						// Master capability is process-local to direct Bash children and must
-						// never cross a broker lifecycle launch boundary.
-						...Object.fromEntries(
-							Object.entries("kind" in cmd ? cmd.env : process.env).filter(
-								([key]) => key !== "GJC_MASTER_CAPABILITY",
-							),
-						),
+						...childEnvironment,
 						GJC_AGENT_DIR: broker.settings.agentDir,
 						GJC_CODING_AGENT_DIR: broker.settings.agentDir,
 						GJC_SESSION_ID: launch.id,

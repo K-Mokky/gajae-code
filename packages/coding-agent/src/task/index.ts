@@ -2394,6 +2394,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						parentActiveModelProfile: parentOwnedModelProfile,
 						parentModelProfileOwnershipMarker: parentModelProfileOwnershipMarker as any,
 						parentSessionId: session.getSessionId?.() ?? undefined,
+						sessionEnvironment: session.sessionEnvironment,
 						parentCredentialSessionId:
 							session.getCredentialSessionId?.() ?? session.getSessionId?.() ?? undefined,
 						thinkingLevel: thinkingLevelOverride,
@@ -2482,6 +2483,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						parentActiveModelProfile: parentOwnedModelProfile,
 						parentModelProfileOwnershipMarker: parentModelProfileOwnershipMarker as any,
 						parentSessionId: session.getSessionId?.() ?? undefined,
+						sessionEnvironment: session.sessionEnvironment,
 						parentCredentialSessionId:
 							session.getCredentialSessionId?.() ?? session.getSessionId?.() ?? undefined,
 						thinkingLevel: thinkingLevelOverride,

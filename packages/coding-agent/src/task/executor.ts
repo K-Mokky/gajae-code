@@ -56,6 +56,7 @@ import subagentUserPromptTemplate from "../prompts/system/subagent-user-prompt.m
 import submitReminderTemplate from "../prompts/system/subagent-yield-reminder.md" with { type: "text" };
 import { AgentRegistry } from "../registry/agent-registry";
 import { discoverAuthStorage } from "../sdk";
+import type { SessionLaunchEnvironment } from "../sdk/session-environment";
 import type { AgentSession, AgentSessionEvent, ForkContextSeed } from "../session/agent-session";
 import { ArtifactManager } from "../session/artifacts";
 import type { AuthStorage } from "../session/auth-storage";
@@ -267,6 +268,7 @@ export interface ExecutorOptions {
 	parentModelProfileOwnershipMarker?: ModelProfileOwnershipMarker;
 	parentSessionId?: string;
 	parentCredentialSessionId?: string;
+	sessionEnvironment?: SessionLaunchEnvironment;
 	thinkingLevel?: ThinkingLevel;
 	outputSchema?: unknown;
 	/** Parent task recursion depth (0 = top-level, 1 = first child, etc.) */
@@ -2035,6 +2037,7 @@ export async function runSubprocessOnce(options: ExecutorOptions): Promise<Singl
 					thinkingLevel: effectiveThinkingLevel,
 					activeModelProfile: options.parentActiveModelProfile,
 					modelProfileOwnershipMarker: options.parentModelProfileOwnershipMarker,
+					sessionEnvironment: options.sessionEnvironment,
 					credentialSessionId: options.parentCredentialSessionId ?? options.parentSessionId,
 					modelSubstitution:
 						modelSubstitutionWarning?.reason === "auth_unavailable" && requestedModel

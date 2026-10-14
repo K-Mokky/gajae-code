@@ -87,6 +87,7 @@ import type { MasterModeContext } from "../master-mode/context";
 import { describeFoldReceipt } from "../session/fold-coordinator";
 import type { BashRestrictionProfile } from "../tools/bash-allowed-prefixes";
 import { SearchTool } from "../tools/search";
+import type { SessionLaunchEnvironment } from "./session-environment";
 import "../discovery";
 import { resolveConfigValue } from "../config/resolve-config-value";
 import { resolveGlobalUserSkillLinkTrust } from "../config/skill-settings-defaults";
@@ -473,6 +474,8 @@ export interface CreateAgentSessionOptions {
 	cwd?: string;
 	/** Global config directory. Default: ~/.gjc/agent */
 	agentDir?: string;
+	/** @internal Broker-validated subprocess environment for a lifecycle-owned session host. */
+	sessionEnvironment?: SessionLaunchEnvironment;
 	/** Resolver-owned classification for `agentDir`; required when authority must survive HOME/config refreshes. */
 	profileAuthority?: "default" | "custom";
 	/** Spawns to allow. Default: "*" */
@@ -2878,6 +2881,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			get cwd() {
 				return sessionManager.getCwd();
 			},
+			sessionEnvironment: options.sessionEnvironment,
 			hasUI: options.hasUI ?? false,
 			profileAuthority,
 			workflowGateEligible: true,
@@ -4032,6 +4036,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 						const createNotificationsExtension = await notificationAdapterService.get("session-extension");
 						createNotificationsExtension(api, {
 							settings,
+							sessionEnvironment: options.sessionEnvironment,
 							primaryControlSurface,
 
 							controller: notificationSessionController,
@@ -4102,6 +4107,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 							| undefined;
 						createSdkSessionRuntimeExtension(api, {
 							agentDir,
+							sessionEnvironment: options.sessionEnvironment,
 							brokerRegistrationRequired: lifecycleStartupCapability !== undefined,
 							...(lifecycleStartupCapability?.lifecycleRequestId
 								? { lifecycleRequestId: lifecycleStartupCapability.lifecycleRequestId }

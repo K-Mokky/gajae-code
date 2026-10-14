@@ -59,6 +59,29 @@ describe("PythonExecutorOptions.onKernelStart", () => {
 		expect(kernel.execute).toHaveBeenCalledTimes(2);
 	});
 
+	it("forwards the broker-validated session environment to Python kernel startup", async () => {
+		const kernel = new FakeKernel();
+		vi.spyOn(pythonKernel, "checkPythonKernelAvailability").mockResolvedValue({ ok: true });
+		const start = vi
+			.spyOn(pythonKernel.PythonKernel, "start")
+			.mockResolvedValue(kernel as unknown as PythonKernelInstance);
+		const sessionEnvironment = { env: { SESSION_VALUE: "python-session" }, unsetEnv: ["GH_TOKEN"] };
+
+		await executePython("inspect environment", {
+			cwd: "/tmp/python-kernel-start-environment",
+			sessionId: "kernel-start-environment",
+			kernelMode: "session",
+			sessionEnvironment,
+		});
+
+		expect(start).toHaveBeenCalledWith(
+			expect.objectContaining({
+				env: { SESSION_VALUE: "python-session" },
+				sessionEnvironment,
+			}),
+		);
+	});
+
 	it("reports a fresh instance id when a dead retained kernel is transparently replaced", async () => {
 		const firstKernel = new FakeKernel();
 		const replacementKernel = new FakeKernel();

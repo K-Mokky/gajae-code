@@ -9220,6 +9220,151 @@ test("production broker session.create authenticates a source-workspace v3 nativ
 	}
 }, 30_000);
 
+test("broker isolates per-session env in bash and restores it after resume", async () => {
+	if (process.platform !== "linux") return;
+	const root = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-sdk-session-environment-"));
+	const agentDir = path.join(root, "agent");
+	const guardedBin = path.join(root, "guarded-bin");
+	const guardedGh = path.join(guardedBin, "gh");
+	const inheritedPath = process.env.PATH ?? "/usr/bin:/bin";
+	const previousGhToken = process.env.GH_TOKEN;
+	const brokerSecret = "session-environment-broker-secret";
+	process.env.GH_TOKEN = brokerSecret;
+	const broker = new Broker({ agentDir });
+	let isolatedClient: SdkClient | undefined;
+	let siblingClient: SdkClient | undefined;
+	let resumedClient: SdkClient | undefined;
+	try {
+		await fs.mkdir(guardedBin, { recursive: true });
+		await fs.writeFile(guardedGh, "#!/bin/sh\nprintf 'guarded-gh\\n'\n", "utf8");
+		await fs.chmod(guardedGh, 0o755);
+		await broker.start();
+		expect(
+			await broker.handleRequest(
+				"session.create",
+				{ cwd: root, env: { GJC_STATE_ROOT: "/outside" } },
+				"session-environment-invalid-create",
+			),
+		).toMatchObject({ ok: false, error: { code: "invalid_input" } });
+
+		const isolatedCreated = await broker.handleRequest(
+			"session.create",
+			{
+				cwd: root,
+				readinessTimeoutMs: 25_000,
+				env: { PATH: `${guardedBin}:${inheritedPath}` },
+				unsetEnv: ["GH_TOKEN"],
+			},
+			"session-environment-isolated-create",
+		);
+		if (!isolatedCreated.ok) throw new Error(isolatedCreated.error.message);
+		const isolatedSession = isolatedCreated.result as {
+			sessionId: string;
+			endpoint: { url: string; token: string };
+		};
+		isolatedClient = await SdkClient.connect(isolatedSession.endpoint.url, isolatedSession.endpoint.token, {
+			timeoutMs: 10_000,
+			reconnectAttempts: 0,
+		});
+
+		const siblingCreated = await broker.handleRequest(
+			"session.create",
+			{ cwd: root, readinessTimeoutMs: 25_000 },
+			"session-environment-sibling-create",
+		);
+		if (!siblingCreated.ok) throw new Error(siblingCreated.error.message);
+		const siblingSession = siblingCreated.result as {
+			sessionId: string;
+			endpoint: { url: string; token: string };
+		};
+		siblingClient = await SdkClient.connect(siblingSession.endpoint.url, siblingSession.endpoint.token, {
+			timeoutMs: 10_000,
+			reconnectAttempts: 0,
+		});
+
+		const command = `printf 'GH_TOKEN=%s\\nPATH=%s\\nGH=%s\\nLIFECYCLE_REQUEST=%s\\n' "\${GH_TOKEN-unset}" "$PATH" "$(command -v gh || true)" "\${GJC_SDK_LIFECYCLE_REQUEST-unset}"`;
+		const isolatedOutput = JSON.stringify(await isolatedClient.control("bash.execute", { cmd: command }));
+		const siblingOutput = JSON.stringify(await siblingClient.control("bash.execute", { cmd: command }));
+		expect(isolatedOutput).toContain("GH_TOKEN=unset");
+		expect(isolatedOutput).toContain(`PATH=${guardedBin}:`);
+		expect(isolatedOutput).toContain(`GH=${guardedGh}`);
+		expect(isolatedOutput).toContain("LIFECYCLE_REQUEST=unset");
+		expect(siblingOutput).toContain(`GH_TOKEN=${brokerSecret}`);
+		expect(siblingOutput).not.toContain(guardedBin);
+		expect(siblingOutput).toContain("LIFECYCLE_REQUEST=unset");
+
+		await isolatedClient.close();
+		isolatedClient = undefined;
+		expect(
+			await broker.handleRequest(
+				"session.close",
+				{ sessionId: isolatedSession.sessionId },
+				"session-environment-isolated-close",
+			),
+		).toMatchObject({ ok: true });
+		await broker.index.refresh();
+		expect(
+			broker.index.findSessionLaunchEnvironment(isolatedSession.sessionId, path.join(root, ".gjc", "state")),
+		).toEqual({
+			env: { PATH: `${guardedBin}:${inheritedPath}` },
+			unsetEnv: ["GH_TOKEN"],
+		});
+		const sessionDir = SessionManager.getDefaultSessionDir(root, agentDir);
+		const savedSession = (await SessionManager.list(root, sessionDir)).find(
+			session => session.id === isolatedSession.sessionId,
+		);
+		if (!savedSession) throw new Error("Expected the isolated session transcript to remain resumable.");
+		const resumed = await broker.handleRequest(
+			"session.resume",
+			{
+				cwd: root,
+				sessionId: isolatedSession.sessionId,
+				sessionPath: savedSession.path,
+				readinessTimeoutMs: 25_000,
+			},
+			"session-environment-isolated-resume",
+		);
+		if (!resumed.ok) throw new Error(resumed.error.message);
+		const resumedSession = resumed.result as { endpoint: { url: string; token: string } };
+		resumedClient = await SdkClient.connect(resumedSession.endpoint.url, resumedSession.endpoint.token, {
+			timeoutMs: 10_000,
+			reconnectAttempts: 0,
+		});
+		const resumedOutput = JSON.stringify(await resumedClient.control("bash.execute", { cmd: command }));
+		const siblingAfterResume = JSON.stringify(await siblingClient.control("bash.execute", { cmd: command }));
+		expect(resumedOutput).toContain("GH_TOKEN=unset");
+		expect(resumedOutput).toContain(`PATH=${guardedBin}:`);
+		expect(resumedOutput).toContain(`GH=${guardedGh}`);
+		expect(resumedOutput).toContain("LIFECYCLE_REQUEST=unset");
+		expect(siblingAfterResume).toContain(`GH_TOKEN=${brokerSecret}`);
+		expect(siblingAfterResume).not.toContain(guardedBin);
+		expect(siblingAfterResume).toContain("LIFECYCLE_REQUEST=unset");
+
+		const inspected: unknown[] = [];
+		const listed = JSON.stringify(
+			await broker.handleRequest("session.list", { resolveSessionId: isolatedSession.sessionId }),
+		);
+		expect(listed).not.toContain("GH_TOKEN");
+		expect(listed).not.toContain(guardedBin);
+		expect(listed).not.toContain(brokerSecret);
+		await runSdkSessionCli(
+			{ action: "inspect", agentDir, sessionId: isolatedSession.sessionId },
+			value => inspected.push(value),
+			() => undefined,
+		);
+		const inspectJson = JSON.stringify(inspected);
+		expect(inspectJson).toContain('"environment":{"set":["PATH"],"unset":["GH_TOKEN"]}');
+		expect(inspectJson).not.toContain(guardedBin);
+		expect(inspectJson).not.toContain(brokerSecret);
+	} finally {
+		await Promise.all([isolatedClient?.close(), siblingClient?.close(), resumedClient?.close()]);
+		await broker.stop();
+		if (previousGhToken === undefined) delete process.env.GH_TOKEN;
+		else process.env.GH_TOKEN = previousGhToken;
+		await fs.rm(root, { recursive: true, force: true });
+	}
+}, 90_000);
+
 test("broker agentDir profile validates, activates, and is discoverable through session Q27", async () => {
 	const root = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-sdk-profile-agent-dir-"));
 	const cwd = path.join(root, "workspace");
