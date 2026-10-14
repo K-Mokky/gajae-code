@@ -19031,6 +19031,31 @@
         "mode": "google-level"
       }
     },
+    "gemini-4-argon": {
+      "api": "google-gemini-cli",
+      "baseUrl": "https://daily-cloudcode-pa.sandbox.googleapis.com",
+      "contextWindow": 1048576,
+      "cost": {
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "input": 0,
+        "output": 0
+      },
+      "id": "gemini-4-argon",
+      "input": [
+        "text",
+        "image"
+      ],
+      "maxTokens": 65536,
+      "name": "Gemini 4 Argon (Antigravity)",
+      "provider": "google-antigravity",
+      "reasoning": true,
+      "thinking": {
+        "maxLevel": "high",
+        "minLevel": "low",
+        "mode": "google-level"
+      }
+    },
     "gemini-pro-agent": {
       "api": "google-gemini-cli",
       "baseUrl": "https://daily-cloudcode-pa.sandbox.googleapis.com",

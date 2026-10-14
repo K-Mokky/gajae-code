@@ -216,4 +216,66 @@ describe("Antigravity model discovery", () => {
 		expect(stale).toBe(false);
 		expect(models.map(model => model.id)).toEqual(["gemini-3.1-pro-low", "gemini-3.7-flash-tiered"]);
 	});
+
+	it("surfaces Gemini 4 Argon when marked internal but in agentModelSorts", async () => {
+		const models = await resolveDiscoveryPayload({
+			models: {
+				"gemini-4-argon": {
+					displayName: "Gemini 4 Argon",
+					isInternal: true,
+					supportsImages: true,
+					supportsThinking: true,
+					maxTokens: 1_048_576,
+					maxOutputTokens: 65_536,
+				},
+			},
+			agentModelSorts: [{ groups: [{ modelIds: ["gemini-4-argon"] }] }],
+		});
+
+		expect(models.map(model => model.id)).toEqual(["gemini-4-argon"]);
+	});
+
+	it("does not surface Gemini 4 Argon if marked internal and not in agentModelSorts", async () => {
+		const models = await resolveDiscoveryPayload({
+			models: {
+				"gemini-4-argon": {
+					displayName: "Gemini 4 Argon",
+					isInternal: true,
+					supportsImages: true,
+					supportsThinking: true,
+					maxTokens: 1_048_576,
+					maxOutputTokens: 65_536,
+				},
+			},
+		});
+
+		expect(models).toEqual([]);
+	});
+
+	it("surfaces Gemini 4 Argon from discovery when target is google-gemini-cli", async () => {
+		const fetcher = (async () =>
+			new Response(
+				JSON.stringify({
+					models: {
+						"gemini-4-argon": {
+							displayName: "Gemini 4 Argon",
+							supportsImages: true,
+							supportsThinking: true,
+							maxTokens: 1_048_576,
+							maxOutputTokens: 65_536,
+						},
+					},
+				}),
+				{ headers: { "content-type": "application/json" } },
+			)) as unknown as typeof fetch;
+
+		const models = await fetchAntigravityDiscoveryModels({
+			token: "test-token",
+			endpoint: "https://antigravity.example.test",
+			fetcher,
+			targetProvider: "google-gemini-cli",
+		});
+
+		expect(models?.map(model => model.id)).toEqual(["gemini-4-argon"]);
+	});
 });
