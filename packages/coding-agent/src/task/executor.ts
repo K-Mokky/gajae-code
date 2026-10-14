@@ -2886,6 +2886,29 @@ function preflightTerminalResult(
 
 /** Run routed initial tasks through the bounded probe/durable candidate ledger. */
 export async function runSubprocess(options: ExecutorOptions): Promise<SingleResult> {
+	// Resume routing resolves credentials before dispatch; do not let an unexpected
+	// lookup exception bypass terminalization just because the initial probe ledger is off.
+	if (
+		(options.runMode ?? "initial") !== "initial" &&
+		options.autoroutingCandidates &&
+		options.autoroutingPreflightErrors
+	) {
+		const failedSelector = options.autoroutingCandidates.find(selector =>
+			options.autoroutingPreflightErrors?.has(selector),
+		);
+		if (failedSelector) {
+			const preflightError = options.autoroutingPreflightErrors.get(failedSelector);
+			const failure = classifyAutoroutingPreflightFailure(preflightError, "auth_resolve");
+			const { code } = autoroutingAttemptDisposition(failure);
+			const skips = buildBoundedRoutingSkips(options.autoroutingSkips);
+			const routedOptions = options.routing ? { ...options.routing, ...skips } : options.routing;
+			return preflightTerminalResult(
+				{ ...options, routing: routedOptions },
+				[{ selector: failedSelector, phase: "probe", code }],
+				"preflight_exhausted",
+			);
+		}
+	}
 	if (
 		!options.autoroutingPreflight ||
 		(options.runMode ?? "initial") !== "initial" ||

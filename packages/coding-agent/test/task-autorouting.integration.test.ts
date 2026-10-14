@@ -406,9 +406,22 @@ describe("TaskTool autorouting integration surfaces", () => {
 			"task.autorouting.tiers": { fast: ["anthropic/claude-haiku-4-5"] },
 		});
 		const unavailableCredentials = new Set<string>();
-		const captured: Array<{ runMode?: string; routing?: unknown; modelOverride?: string | string[] }> = [];
+		const failedCredentialLookups = new Set<string>();
+		const captured: Array<{
+			runMode?: string;
+			routing?: unknown;
+			modelOverride?: string | string[];
+			autoroutingCandidates?: string[];
+			autoroutingPreflightErrors?: Map<string, unknown>;
+		}> = [];
 		const stub = async (options: Parameters<typeof runSubprocess>[0]) => {
-			captured.push({ runMode: options.runMode, routing: options.routing, modelOverride: options.modelOverride });
+			captured.push({
+				runMode: options.runMode,
+				routing: options.routing,
+				modelOverride: options.modelOverride,
+				autoroutingCandidates: options.autoroutingCandidates,
+				autoroutingPreflightErrors: options.autoroutingPreflightErrors,
+			});
 			return {
 				index: options.index,
 				id: options.id,
@@ -433,8 +446,11 @@ describe("TaskTool autorouting integration surfaces", () => {
 					settings,
 					modelRegistry: {
 						getAvailable: () => registryModels,
-						getApiKey: async (model: { provider: string; id: string }) =>
-							unavailableCredentials.has(`${model.provider}/${model.id}`) ? undefined : "test-key",
+						getApiKey: async (model: { provider: string; id: string }) => {
+							const selector = `${model.provider}/${model.id}`;
+							if (failedCredentialLookups.has(selector)) throw new Error("keychain access denied");
+							return unavailableCredentials.has(selector) ? undefined : "test-key";
+						},
 						withConsumerLease: async <T>(body: () => T | Promise<T>): Promise<T> => await body(),
 					} as never,
 				},
@@ -460,6 +476,17 @@ describe("TaskTool autorouting integration surfaces", () => {
 			freshOnResume: true,
 			effectiveModel: "anthropic/claude-opus-5",
 			skips: [{ selector: "anthropic/claude-haiku-4-5", code: "credential_unavailable" }],
+		});
+
+		failedCredentialLookups.add("anthropic/claude-haiku-4-5");
+		expect(AsyncJobManager.instance()!.resumeSubagent(record.subagentId).ok).toBe(true);
+		await AsyncJobManager.instance()!.waitForAll();
+		expect(captured.at(-1)?.modelOverride).toEqual(["anthropic/claude-haiku-4-5"]);
+		expect(captured.at(-1)?.autoroutingCandidates).toEqual(["anthropic/claude-haiku-4-5"]);
+		expect(captured.at(-1)?.autoroutingPreflightErrors?.has("anthropic/claude-haiku-4-5")).toBe(true);
+		expect(captured.at(-1)?.routing).toMatchObject({
+			freshOnResume: true,
+			effectiveModel: "anthropic/claude-haiku-4-5",
 		});
 
 		settings.override("disabledProviders", ["anthropic"]);
