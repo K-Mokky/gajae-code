@@ -42,6 +42,20 @@
 				},
 				"credentialPinStoreIdentity": {
 					"type": "string"
+				},
+				"credentialPreferences": {
+					"type": "object",
+					"additionalProperties": {
+						"type": "string",
+						"pattern": "^(email:[^@\\s]+@[^@\\s]+|account:\\S+)$"
+					},
+					"default": {}
+				},
+				"credentialPreferenceMaxUsedPercent": {
+					"type": "number",
+					"default": 100,
+					"exclusiveMinimum": 0,
+					"maximum": 100
 				}
 			},
 			"additionalProperties": false
@@ -1009,10 +1023,11 @@
 				"flex",
 				"scale",
 				"priority",
+				"ultrafast",
 				"openai-only",
 				"claude-only"
 			],
-			"description": "Processing priority hint (none = omit). OpenAI accepts the tier values directly; Anthropic realizes `priority` as `speed: \"fast\"` on supported Opus models. Scoped values target one family.",
+			"description": "Processing priority hint (none = omit). OpenAI accepts the tier values directly; ultrafast is a 6x premium tier. Anthropic realizes `priority` as `speed: \"fast\"` on supported Opus models. Scoped values target one family.",
 			"default": "none"
 		},
 		"task": {
@@ -1028,6 +1043,7 @@
 						"flex",
 						"scale",
 						"priority",
+						"ultrafast",
 						"openai-only",
 						"claude-only"
 					],
