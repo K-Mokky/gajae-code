@@ -993,7 +993,7 @@ describe("AgentSession message pipeline", () => {
 
 		const agentEnds = events.filter(event => event.type === "agent_end");
 		expect(agentEnds).toHaveLength(1);
-		expect(agentEnds[0]).not.toMatchObject({ stopReason: "cancelled" });
+		expect(agentEnds[0]).toMatchObject({ stopReason: "completed" });
 		expect(events.at(-1)?.type).toBe("agent_end");
 	});
 	it("isolates throwing subscribers from terminal settlement and later events", async () => {
@@ -1112,7 +1112,8 @@ describe("AgentSession message pipeline", () => {
 		});
 		try {
 			await sdkIntegrationStarted.promise;
-			await Bun.sleep(0);
+			// turn_end may start worker reconciliation before the terminal event is
+			// published, so worker-start is not a barrier for agent_end delivery.
 			await secondAgentEnd.promise;
 			expect(events.filter(event => event.type === "agent_end")).toHaveLength(2);
 		} finally {

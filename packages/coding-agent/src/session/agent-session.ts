@@ -2326,8 +2326,10 @@ export class WorkerIntegrationRequestScheduler {
 		this.#ownedRequests.add(request);
 		void request.finally(() => this.#ownedRequests.delete(request)).catch(() => {});
 		let timeout: ReturnType<typeof setTimeout> | undefined;
+		let timedOut = false;
 		const deadline = new Promise<WorkerIntegrationOutcome>(resolve => {
 			timeout = setTimeout(() => {
+				timedOut = true;
 				controller.abort(new Error("Worker integration request timed out"));
 				resolve({ status: "timed_out" });
 			}, this.timeoutMs);
@@ -2340,7 +2342,12 @@ export class WorkerIntegrationRequestScheduler {
 			deadline,
 		]).finally(() => {
 			if (timeout) clearTimeout(timeout);
-			controller.abort();
+			// Only abort if the timeout actually fired. If the request settled before the
+			// timeout (timedOut=false), don't send the abort signal again: this ensures
+			// SDK/ACP settlement is not delayed by recovery requests that ignore their
+			// abort signal (#6508). The request may still be running, but that work
+			// should not block client-visible completion.
+			if (timedOut) controller.abort();
 			this.#inFlight = undefined;
 			if (this.#pending) this.#start();
 		});
@@ -2679,6 +2686,7 @@ export interface AgentSessionProfileInstalledOverrideState {
 	installedAgentModelOverrides: ReadonlyMap<string, ModelSelectorValue>;
 	manualModelRoles: ReadonlySet<string>;
 	manualAgentModelOverrides: ReadonlySet<string>;
+	configuredAgentModelOverrides: ReadonlySet<string>;
 	preProfileModel: Model | undefined;
 }
 
@@ -2843,6 +2851,7 @@ export class AgentSession {
 	#activeProfileInstalledAgentOverrideValues = new Map<string, ModelSelectorValue>();
 	#activeProfileManualModelRoles = new Set<string>();
 	#activeProfileManualAgentModelOverrides = new Set<string>();
+	#activeProfileConfiguredAgentModelOverrides = new Set<string>();
 	#preProfileModel: Model | undefined;
 	#sessionAdmissionQueue: SessionAdmissionEntry[] = [];
 	#activeSessionAdmission: SessionAdmissionEntry | undefined;
@@ -6981,7 +6990,11 @@ export class AgentSession {
 				throw new Error("Owned async jobs did not settle before artifact retirement.");
 			committed = true;
 		} finally {
-			manager.finishOwnerSubagentShutdown(lease, committed ? "commit" : "release");
+			if (committed) {
+				manager.finishOwnerSubagentShutdown(lease, "commit");
+			} else {
+				manager.finishOwnerSubagentShutdown(lease, "release", { drainResumeQueue: !this.#isDisposed });
+			}
 		}
 	}
 
@@ -17948,7 +17961,7 @@ export class AgentSession {
 						"Unable to confirm owned subagent cleanup; session was not replaced. Wait for or inspect remaining subagents, then retry /new.",
 						"new-session-subagent-cleanup",
 					);
-					manager.finishOwnerSubagentShutdown(lease, "release");
+					manager.finishOwnerSubagentShutdown(lease, "release", { drainResumeQueue: !this.#isDisposed });
 					return false;
 				}
 			} catch {
@@ -17957,7 +17970,7 @@ export class AgentSession {
 					"Unable to confirm owned subagent cleanup; session was not replaced. Wait for or inspect remaining subagents, then retry /new.",
 					"new-session-subagent-cleanup",
 				);
-				manager.finishOwnerSubagentShutdown(lease, "release");
+				manager.finishOwnerSubagentShutdown(lease, "release", { drainResumeQueue: !this.#isDisposed });
 				return false;
 			}
 
@@ -18015,10 +18028,11 @@ export class AgentSession {
 			manager.finishOwnerSubagentShutdown(lease, "commit");
 			return true;
 		} catch (error) {
-			manager.finishOwnerSubagentShutdown(
-				lease,
-				this.sessionManager.getSessionId() !== previousSessionIdentity ? "commit" : "release",
-			);
+			if (this.sessionManager.getSessionId() !== previousSessionIdentity) {
+				manager.finishOwnerSubagentShutdown(lease, "commit");
+			} else {
+				manager.finishOwnerSubagentShutdown(lease, "release", { drainResumeQueue: !this.#isDisposed });
+			}
 			throw error;
 		}
 	}
@@ -19148,6 +19162,7 @@ export class AgentSession {
 			this.#activeProfileInstalledAgentOverrides.clear();
 			this.#activeProfileInstalledRoleValues.clear();
 			this.#activeProfileInstalledAgentOverrideValues.clear();
+			this.#activeProfileConfiguredAgentModelOverrides.clear();
 		}
 		if (hadInstalledKeys || this.getActiveModelProfile() !== undefined) {
 			this.#modelRegistry.reapplyConfiguredModelBindings(this.settings);
@@ -19189,6 +19204,7 @@ export class AgentSession {
 			if (!agentOverrideSet.has(role)) {
 				this.#activeProfileInstalledAgentOverrides.delete(role);
 				this.#activeProfileInstalledAgentOverrideValues.delete(role);
+				this.#activeProfileConfiguredAgentModelOverrides.delete(role);
 			}
 		}
 		for (const role of modelRoles) {
@@ -19207,6 +19223,11 @@ export class AgentSession {
 			if (installedValue !== undefined) this.#activeProfileInstalledRoleValues.set(role, installedValue);
 		}
 		for (const role of agentModelOverrides) {
+			if (Object.hasOwn(bindings?.agentModelOverrides ?? {}, role)) {
+				this.#activeProfileConfiguredAgentModelOverrides.add(role);
+			} else {
+				this.#activeProfileConfiguredAgentModelOverrides.delete(role);
+			}
 			if (!this.#activeProfileInstalledAgentOverrides.has(role)) {
 				const bindingValue = bindings?.agentModelOverrides?.[role];
 				this.#activeProfileInstalledAgentOverrides.set(
@@ -19234,6 +19255,7 @@ export class AgentSession {
 			installedAgentModelOverrides: new Map(this.#activeProfileInstalledAgentOverrideValues),
 			manualModelRoles: new Set(this.#activeProfileManualModelRoles),
 			manualAgentModelOverrides: new Set(this.#activeProfileManualAgentModelOverrides),
+			configuredAgentModelOverrides: new Set(this.#activeProfileConfiguredAgentModelOverrides),
 			preProfileModel: this.#preProfileModel,
 		};
 	}
@@ -19245,6 +19267,7 @@ export class AgentSession {
 		this.#activeProfileInstalledAgentOverrideValues = new Map(state.installedAgentModelOverrides);
 		this.#activeProfileManualModelRoles = new Set(state.manualModelRoles);
 		this.#activeProfileManualAgentModelOverrides = new Set(state.manualAgentModelOverrides);
+		this.#activeProfileConfiguredAgentModelOverrides = new Set(state.configuredAgentModelOverrides);
 		this.#preProfileModel = state.preProfileModel;
 	}
 
@@ -19256,6 +19279,7 @@ export class AgentSession {
 		this.#activeProfileInstalledAgentOverrideValues.clear();
 		this.#activeProfileManualModelRoles.clear();
 		this.#activeProfileManualAgentModelOverrides.clear();
+		this.#activeProfileConfiguredAgentModelOverrides.clear();
 	}
 
 	/** Current profile-installed override keys, for deriving the activation base. */
@@ -27582,6 +27606,7 @@ export class AgentSession {
 		let ownerShutdownManager: AsyncJobManager | undefined;
 		let ownerShutdownLease: OwnerSubagentShutdownLease | undefined;
 		let ownerShutdownTransitionCommitted = false;
+		let ownerShutdownCanDrainResumes = false;
 		let ownerShutdownFinalizationDeferred = false;
 		this.#beginSessionTransition("switch-session");
 		try {
@@ -27620,6 +27645,8 @@ export class AgentSession {
 			if (lease && asyncManager) {
 				ownerShutdownManager = asyncManager;
 				ownerShutdownLease = lease;
+				// Early failures leave the predecessor live, so releasing its fence may drain resumes.
+				ownerShutdownCanDrainResumes = true;
 			}
 			await this.abort();
 			if (this.isCompacting) {
@@ -27656,6 +27683,9 @@ export class AgentSession {
 			);
 			const previousActiveProfileManualModelRoles = new Set(this.#activeProfileManualModelRoles);
 			const previousActiveProfileManualAgentModelOverrides = new Set(this.#activeProfileManualAgentModelOverrides);
+			const previousActiveProfileConfiguredAgentModelOverrides = new Set(
+				this.#activeProfileConfiguredAgentModelOverrides,
+			);
 			const previousPreProfileModel = this.#preProfileModel;
 			const previousServiceTier = this.agent.serviceTier;
 			const previousSelectedMCPToolNames = new Set(this.#selectedMCPToolNames);
@@ -27670,6 +27700,8 @@ export class AgentSession {
 			const previousActiveAttemptScope = this.#activeAttemptScope;
 			const previousActiveLogicalRunId = this.#activeLogicalRunId;
 
+			// Once session state starts changing, resumes are safe only after rollback completes.
+			ownerShutdownCanDrainResumes = false;
 			this.#steeringMessages = [];
 			this.#followUpMessages = [];
 			this.#pendingNextTurnMessages = [];
@@ -28092,6 +28124,9 @@ export class AgentSession {
 				);
 				this.#activeProfileManualModelRoles = new Set(previousActiveProfileManualModelRoles);
 				this.#activeProfileManualAgentModelOverrides = new Set(previousActiveProfileManualAgentModelOverrides);
+				this.#activeProfileConfiguredAgentModelOverrides = new Set(
+					previousActiveProfileConfiguredAgentModelOverrides,
+				);
 				this.#preProfileModel = previousPreProfileModel;
 				this.#activeModelProfile = previousActiveModelProfile;
 				this.#restoreWorkflowGateEmitter(suspendedWorkflowGateEmitter);
@@ -28155,6 +28190,7 @@ export class AgentSession {
 					}
 					throw new AggregateError([error, rollbackErrors[0]], "Session switch rollback failed");
 				}
+				ownerShutdownCanDrainResumes = true;
 				if (unavailableDefaultChainMessage) {
 					this.emitNotice(
 						"error",
@@ -28167,10 +28203,17 @@ export class AgentSession {
 			}
 		} finally {
 			if (ownerShutdownManager && ownerShutdownLease && !ownerShutdownFinalizationDeferred) {
-				ownerShutdownManager.finishOwnerSubagentShutdown(
-					ownerShutdownLease,
-					ownerShutdownTransitionCommitted ? "commit" : "release",
-				);
+				if (ownerShutdownTransitionCommitted) {
+					ownerShutdownManager.finishOwnerSubagentShutdown(ownerShutdownLease, "commit");
+				} else {
+					// A pre-mutation flush or snapshot failure can leave the predecessor
+					// live after the Agent event bridge was disconnected. Reconnect before
+					// releasing the lease, which may synchronously start queued resumes.
+					if (!this.#isDisposed) this.#reconnectToAgent();
+					ownerShutdownManager.finishOwnerSubagentShutdown(ownerShutdownLease, "release", {
+						drainResumeQueue: ownerShutdownCanDrainResumes && !this.#isDisposed,
+					});
+				}
 			}
 			this.#endSessionTransition();
 		}
