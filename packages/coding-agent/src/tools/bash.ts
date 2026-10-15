@@ -1586,13 +1586,15 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		const args = parseDirectSdkSpawnArgs(command);
 		args.agentDir = sessionAgentDir;
 		if (args.cwd !== undefined && !path.isAbsolute(args.cwd)) args.cwd = path.resolve(commandCwd, args.cwd);
+		const spawnEnv = {
+			...process.env,
+			[MASTER_CAPABILITY_ENV]: masterCapability,
+			[MASTER_OWNER_SESSION_ENV]: ownerSessionId,
+			GJC_CODING_AGENT_DIR: sessionAgentDir,
+		};
+		applySessionLaunchEnvironment(spawnEnv, this.session.sessionEnvironment);
 		const request = runSdkSpawn(args, {
-			env: {
-				...process.env,
-				[MASTER_CAPABILITY_ENV]: masterCapability,
-				[MASTER_OWNER_SESSION_ENV]: ownerSessionId,
-				GJC_CODING_AGENT_DIR: sessionAgentDir,
-			},
+			env: spawnEnv,
 		});
 		const timeout = Bun.sleep(timeoutMs).then(() => {
 			throw new ToolError(`Command timed out after ${Math.ceil(timeoutMs / 1000)} seconds`);
