@@ -638,6 +638,54 @@ describe("subagent await renderer body cache (PR2)", () => {
 		expect(lines.join("\n")).toContain("1 failed");
 	});
 
+	it("preserves timeout guidance in compact final receipts", () => {
+		const details: SubagentToolDetails = {
+			awaitOutcome: "timed_out",
+			waitOutcome: "timed_out_wait",
+			subagents: Array.from({ length: 15 }, (_, index) => {
+				const id = `0-Timeout${index}`;
+				return snapshot({ id, liveProgressAvailable: true });
+			}),
+		};
+
+		const lines = renderWith(details, { expanded: false });
+		expect(lines).toHaveLength(1);
+		expect(lines.join("\n")).toContain("Await timed out");
+		expect(lines.join("\n")).toContain("children continue");
+		expect(lines.join("\n")).toContain("inspect progress before cancelling");
+		expect(lines.join("\n")).toContain("15 subagents running");
+	});
+
+	it("shows successful any-terminal results in compact final receipts", () => {
+		const completedId = "0-Completed";
+		const details: SubagentToolDetails = {
+			awaitOutcome: "completed",
+			waitOutcome: "completed",
+			condition: "any_terminal",
+			terminalIds: [completedId],
+			subagents: [
+				snapshot({
+					id: completedId,
+					jobId: "job-0-Completed",
+					status: "completed",
+					resultPreview: "finished successfully",
+					outputRef: `agent://${completedId}`,
+				}),
+				...Array.from({ length: 10 }, (_, index) => {
+					const id = `0-StillRunning${index}`;
+					return snapshot({ id, liveProgressAvailable: true });
+				}),
+			],
+		};
+
+		const lines = renderWith(details, { expanded: false });
+		expect(lines).toHaveLength(1);
+		expect(lines.join("\n")).toContain("Await completed");
+		expect(lines.join("\n")).toContain("1 completed");
+		expect(lines.join("\n")).toContain("10 subagents running");
+		expect(lines.join("\n")).toContain("result: finished successfully");
+	});
+
 	it("refreshes nested retry age and countdown on await-body updates", () => {
 		const details = nestedRetry();
 		const originalNow = Date.now;
