@@ -51,7 +51,7 @@ Set an action to an empty array to disable it:
 | `app.model.select` | `ctrl+l` | Open the model selector and set roles |
 | `app.plan.toggle` | `alt+shift+p` | Toggle plan mode |
 | `app.history.search` | `ctrl+r` | Search prompt history |
-| `app.tools.expand` | `ctrl+o` | Toggle tool-output expansion |
+| `app.tools.expand` | `ctrl+o` | Toggle tool-output expansion; expands compact high-concurrency subagent summaries |
 | `app.thinking.toggle` | `ctrl+t` | Toggle thinking-block visibility |
 | `app.thinking.cycle` | `shift+tab` | Cycle thinking level |
 | `app.editor.external` | `ctrl+g` | Edit the draft in `$VISUAL` / `$EDITOR` |
@@ -64,6 +64,8 @@ Set an action to an empty array to disable it:
 | `app.clipboard.copyPrompt` | `alt+shift+c` | Copy the whole prompt |
 | `app.stt.toggle` | `alt+h` | Toggle speech-to-text recording |
 | `app.irc.sidebar.toggle` | `alt+i` | Toggle IRC sidebar |
+
+Collapsed subagent results with 10 or more running subagents render one summary row with the running count and the number idle for more than 30 seconds. Use `app.tools.expand` to reveal each subagent's live progress. Awaits with 10 or more running subagents cap positive heartbeat refreshes at one per second; `heartbeat_ms: 0` still disables heartbeat updates, and smaller awaits retain their requested heartbeat cadence.
 
 For setup, microphone permissions, first-use behavior, and troubleshooting, see [Speech-to-text](./speech-to-text.md).
 

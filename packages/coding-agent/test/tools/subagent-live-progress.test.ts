@@ -599,20 +599,25 @@ describe("subagent await emit gating", () => {
 		const ac = new AbortController();
 		const spies = ids.map(() => vi.fn());
 		const execs = ids.map((id, i) =>
-			tool.execute(`await-${id}`, { action: "await", ids: [id], timeout_ms: 3_600_000 }, ac.signal, spies[i]),
+			tool.execute(
+				`await-${id}`,
+				{ action: "await", ids: [id], heartbeat_ms: 100, timeout_ms: 3_600_000 },
+				ac.signal,
+				spies[i],
+			),
 		);
 
 		// The initial partial emission runs synchronously when the await starts.
 		await Promise.resolve();
 		for (const spy of spies) expect(spy).toHaveBeenCalledTimes(1);
 
-		// Idle: 5 interval ticks (2500ms) with unchanged progress must not emit.
+		// Unchanged progress remains quiet across repeated heartbeat polls.
 		vi.advanceTimersByTime(2_500);
 		for (const spy of spies) expect(spy).toHaveBeenCalledTimes(1);
 
 		// A real progress change on 0-A emits exactly once; idle peers stay quiet.
 		manager.recordSubagentProgress("0-A", makeProgress({ id: "0-A", currentTool: "bash", recentOutput: ["scan"] }));
-		vi.advanceTimersByTime(500);
+		vi.advanceTimersByTime(100);
 		expect(spies[0]).toHaveBeenCalledTimes(2);
 		expect(spies[1]).toHaveBeenCalledTimes(1);
 		expect(spies[2]).toHaveBeenCalledTimes(1);
@@ -620,6 +625,55 @@ describe("subagent await emit gating", () => {
 		ac.abort();
 		for (const control of controls) control.resolve();
 		await Promise.all(execs);
+		await manager.dispose({ timeoutMs: 100 });
+	});
+
+	it("caps 15-subagent await refreshes at one per second when heartbeat is shorter", async () => {
+		vi.useFakeTimers();
+		const manager = createManager();
+		const tool = new SubagentTool(createSession());
+		const ids = Array.from({ length: 15 }, (_, index) => `0-Busy${index}`);
+		const controls = ids.map(() => Promise.withResolvers<void>());
+		ids.forEach((id, index) => {
+			const jobId = manager.register(
+				"task",
+				id,
+				async () => {
+					await controls[index]!.promise;
+					return "done";
+				},
+				{
+					id: `job-${id}`,
+					ownerId: "0-Main",
+					metadata: { subagent: { id, agent: "executor", agentSource: "bundled" } },
+				},
+			);
+			manager.registerSubagentRecord(runningRecord(id, jobId));
+			manager.recordSubagentProgress(id, makeProgress({ id, currentTool: "read" }));
+		});
+
+		const ac = new AbortController();
+		const spy = vi.fn();
+		const pending = tool.execute(
+			"await-many",
+			{ action: "await", ids, heartbeat_ms: 100, timeout_ms: 3_600_000 },
+			ac.signal,
+			spy,
+		);
+		await Promise.resolve();
+		expect(spy).toHaveBeenCalledTimes(1);
+
+		for (const id of ids) manager.recordSubagentProgress(id, makeProgress({ id, currentTool: "bash" }));
+		vi.advanceTimersByTime(999);
+		expect(spy).toHaveBeenCalledTimes(1);
+		vi.advanceTimersByTime(1);
+		expect(spy).toHaveBeenCalledTimes(2);
+		const emitted = spy.mock.calls.at(-1)?.[0] as { details?: SubagentToolDetails } | undefined;
+		expect(emitted?.details?.subagents?.every(snapshot => snapshot.progress?.currentTool === "bash")).toBe(true);
+
+		ac.abort();
+		for (const control of controls) control.resolve();
+		await pending;
 		await manager.dispose({ timeoutMs: 100 });
 	});
 

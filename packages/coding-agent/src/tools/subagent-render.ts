@@ -8,7 +8,7 @@
  * producer is available (resumed-from-disk or backward-compat records).
  */
 import type { Component } from "@gajae-code/tui";
-import { Text } from "@gajae-code/tui";
+import { getKeybindings, Text } from "@gajae-code/tui";
 import { formatNumber } from "@gajae-code/utils";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import type { Theme } from "../modes/theme/theme";
@@ -24,6 +24,7 @@ import {
 } from "./render-utils";
 import {
 	SUBAGENT_ACTIVITY_BUCKET_MS,
+	SUBAGENT_COMPACT_THRESHOLD,
 	type SubagentLiveProgress,
 	type SubagentSnapshot,
 	type SubagentToolDetails,
@@ -35,6 +36,7 @@ export { subagentAwaitRenderedStateSignature } from "./subagent";
 const PREVIEW_LINES_COLLAPSED = 1;
 const PREVIEW_LINES_EXPANDED = 4;
 const PREVIEW_LINE_WIDTH = 80;
+const SUBAGENT_IDLE_THRESHOLD_MS = 30_000;
 
 /**
  * Bounded, content-addressed cache for each subagent's heavy body lines (the
@@ -390,9 +392,45 @@ export const subagentToolRenderer = {
 			return new Text(theme.fg("dim", truncateToWidth(fallback, 100)), 0, 0);
 		}
 
-		const runningCount = subagents.filter(s => s.status === "running").length;
-		const failedCount = subagents.filter(s => s.status === "failed" || s.status === "not_found").length;
+		let runningCount = 0;
+		let failedCount = 0;
+		for (const snapshot of subagents) {
+			if (snapshot.status === "running") runningCount++;
+			else if (snapshot.status === "failed" || snapshot.status === "not_found") failedCount++;
+		}
 		const interrupted = result.details?.interrupted === true;
+		if (!options.expanded && runningCount >= SUBAGENT_COMPACT_THRESHOLD) {
+			const nowMs = Date.now();
+			let idleCount = 0;
+			for (const snapshot of subagents) {
+				const lastActivityMs = snapshot.progress?.lastActivityMs;
+				if (
+					snapshot.status === "running" &&
+					snapshot.liveProgressAvailable !== false &&
+					snapshot.progress?.status === "running" &&
+					lastActivityMs !== undefined &&
+					nowMs - lastActivityMs > SUBAGENT_IDLE_THRESHOLD_MS
+				) {
+					idleCount++;
+				}
+			}
+			const expandKey = getKeybindings().getKeys("app.tools.expand")[0];
+			const idleSummary = idleCount > 0 ? ` · ${idleCount} idle >30s` : "";
+			const failedSummary = failedCount > 0 ? ` · ${failedCount} failed` : "";
+			const expandHint = expandKey ? `${expandKey} to expand` : "expand tools";
+			const interruptedSummary = interrupted ? "Subagent await interrupted · " : "";
+			const summaryTone = interrupted ? "warning" : failedCount > 0 ? "error" : "muted";
+			const summary = theme.fg(
+				summaryTone,
+				`${interruptedSummary}${runningCount} subagents running${idleSummary}${failedSummary} · ${expandHint}`,
+			);
+			return {
+				render(width: number): string[] {
+					return [truncateToWidth(replaceTabs(summary), width, Ellipsis.Omit)];
+				},
+				invalidate() {},
+			};
+		}
 
 		// Each snapshot's rendered-state signature is constant for this component
 		// instance, so compute them at most once; the heavy per-subagent bodies are

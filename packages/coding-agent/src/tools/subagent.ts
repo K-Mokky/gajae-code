@@ -13,6 +13,8 @@ import { ToolError } from "./tool-errors";
 const DEFAULT_AWAIT_TIMEOUT_MS = 30_000;
 const MAX_AWAIT_TIMEOUT_MS = 60 * 60 * 1000;
 const MAX_AWAIT_HEARTBEAT_MS = 60_000;
+export const SUBAGENT_COMPACT_THRESHOLD = 10;
+export const SUBAGENT_COMPACT_MIN_REFRESH_MS = 1_000;
 /**
  * Bounded cadence for await liveness: even when the rendered-state signature is
  * stable (a running subagent emitting no new progress), the await panel re-emits
@@ -512,6 +514,11 @@ export class SubagentTool implements AgentTool<typeof subagentSchema, SubagentTo
 		const watchedJobIds = targets.map(target => target.jobId).filter((jobId): jobId is string => jobId !== null);
 		const watchHandle = manager.watchJobGenerations(watchedJobIds);
 		const heartbeatMs = params.heartbeat_ms === undefined ? 500 : params.heartbeat_ms;
+		const runningCount = records.filter(record => record.status === "running").length;
+		const progressRefreshMs =
+			heartbeatMs > 0 && runningCount >= SUBAGENT_COMPACT_THRESHOLD
+				? Math.max(heartbeatMs, SUBAGENT_COMPACT_MIN_REFRESH_MS)
+				: heartbeatMs;
 		// Liveness interval: force a re-emit even when the rendered-state signature
 		// is stable so a healthy wait never looks like a hung session (#4465). The
 		// `#livenessNowMs` clock is injected for deterministic tests; `Date.now`
@@ -570,7 +577,8 @@ export class SubagentTool implements AgentTool<typeof subagentSchema, SubagentTo
 		let terminalJobIds: string[] | undefined;
 		const steeringWaitAbort = new AbortController();
 		try {
-			progressTimer = onUpdate && heartbeatMs > 0 ? setInterval(() => emitIfChanged(false), heartbeatMs) : undefined;
+			progressTimer =
+				onUpdate && progressRefreshMs > 0 ? setInterval(() => emitIfChanged(false), progressRefreshMs) : undefined;
 			stopProgressTimer = () => {
 				if (progressTimer) clearInterval(progressTimer);
 				progressTimer = undefined;

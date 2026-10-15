@@ -529,6 +529,84 @@ describe("subagent await renderer body cache (PR2)", () => {
 		),
 	});
 
+	it("renders 15 live subagents as one expandable summary row when collapsed", () => {
+		const now = vi.spyOn(Date, "now").mockReturnValue(100_000);
+		try {
+			const details: SubagentToolDetails = {
+				subagents: Array.from({ length: 15 }, (_, index) => {
+					const id = `0-Agent${index}`;
+					const lastActivityMs = index < 3 ? 69_999 : index === 3 ? 70_000 : 99_000;
+					return snapshot({
+						id,
+						liveProgressAvailable: true,
+						progress: progress({ id, currentTool: "read", lastActivityMs }),
+					});
+				}),
+			};
+
+			const compact = renderWith(details, { expanded: false });
+			expect(compact).toHaveLength(1);
+			expect(compact.join("\n")).toContain("15 subagents running");
+			expect(compact.join("\n")).toContain("3 idle >30s");
+			expect(compact.join("\n")).not.toContain("0-Agent");
+			expect(subagentBodyCacheTestHooks.bodyRenders).toBe(0);
+
+			const expanded = renderWith(details, { expanded: true });
+			expect(expanded.join("\n")).toContain("0-Agent0");
+			expect(expanded.length).toBeGreaterThan(15);
+			expect(subagentBodyCacheTestHooks.bodyRenders).toBe(15);
+		} finally {
+			now.mockRestore();
+		}
+	});
+
+	it("keeps collapsed rendering detailed below the high-concurrency threshold", () => {
+		const details: SubagentToolDetails = {
+			subagents: Array.from({ length: 9 }, (_, index) => {
+				const id = `0-Agent${index}`;
+				return snapshot({ id, liveProgressAvailable: true, progress: progress({ id, currentTool: "read" }) });
+			}),
+		};
+
+		const lines = renderWith(details, { expanded: false });
+		expect(lines.length).toBeGreaterThan(1);
+		expect(lines.join("\n")).toContain("0-Agent0");
+		expect(subagentBodyCacheTestHooks.bodyRenders).toBe(9);
+	});
+
+	it("starts compact rendering at 10 running subagents", () => {
+		const details: SubagentToolDetails = {
+			subagents: Array.from({ length: 10 }, (_, index) => {
+				const id = `0-Agent${index}`;
+				return snapshot({ id, liveProgressAvailable: true, progress: progress({ id, currentTool: "read" }) });
+			}),
+		};
+
+		const lines = renderWith(details, { expanded: false });
+		expect(lines).toHaveLength(1);
+		expect(lines.join("\n")).toContain("10 subagents running");
+		expect(subagentBodyCacheTestHooks.bodyRenders).toBe(0);
+	});
+
+	it("keeps interruption and failure status visible in compact summaries", () => {
+		const details: SubagentToolDetails = {
+			interrupted: true,
+			subagents: [
+				...Array.from({ length: 10 }, (_, index) => {
+					const id = `0-Agent${index}`;
+					return snapshot({ id, liveProgressAvailable: true, progress: progress({ id, currentTool: "read" }) });
+				}),
+				snapshot({ id: "0-Failed", status: "failed" }),
+			],
+		};
+
+		const lines = renderWith(details, { expanded: false });
+		expect(lines).toHaveLength(1);
+		expect(lines.join("\n")).toContain("Subagent await interrupted");
+		expect(lines.join("\n")).toContain("10 subagents running");
+		expect(lines.join("\n")).toContain("1 failed");
+	});
+
 	it("refreshes nested retry age and countdown on await-body updates", () => {
 		const details = nestedRetry();
 		const originalNow = Date.now;
