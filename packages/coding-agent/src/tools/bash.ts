@@ -1874,8 +1874,14 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		// Skip when pty=true (PTY needs the local terminal UI).
 		const clientBridge =
 			this.session.bashRestrictionProfile === "read-only" ? undefined : this.session.getClientBridge?.();
+		const sessionEnvironmentHasUnsets = (this.session.sessionEnvironment?.unsetEnv?.length ?? 0) > 0;
+		// ACP terminal/create accepts environment assignments but cannot remove variables inherited by the client.
 		const clientTerminalActive = Boolean(
-			!directMasterSpawn && clientBridge?.capabilities.terminal && clientBridge.createTerminal && !pty,
+			!directMasterSpawn &&
+				!sessionEnvironmentHasUnsets &&
+				clientBridge?.capabilities.terminal &&
+				clientBridge.createTerminal &&
+				!pty,
 		);
 
 		// Run non-PTY bash through the managed job path so Ctrl+B-twice fold-on-demand works
@@ -2024,7 +2030,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			});
 		}
 
-		if (clientBridge?.capabilities.terminal && clientBridge.createTerminal && !pty) {
+		if (clientBridge?.capabilities.terminal && clientBridge.createTerminal && !pty && !sessionEnvironmentHasUnsets) {
 			const clientAdmission = ownedManager?.reserveCapacity();
 			const clientHeadBytes = resolveBashOutputSinkHeadBytes(this.session.settings);
 			const clientTailBytes = resolveBashOutputSinkTailBytes(this.session.settings);
