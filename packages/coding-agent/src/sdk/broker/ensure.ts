@@ -1974,8 +1974,13 @@ export const acquireSpawnLockForTest = acquireSpawnLock;
 export const waitForStartupLockRetryForTest = waitForStartupLockRetry;
 /** Test hook: proves discovery reads honor their enclosing absolute deadline. */
 export const readBrokerDiscoveryBeforeDeadlineForTest = readBrokerDiscoveryBeforeDeadline;
-/** Test hook: proves restart-intent reads honor their enclosing absolute deadline. */
-export const readBrokerRestartIntentBeforeDeadlineForTest = readBrokerRestartIntentBeforeDeadline;
+/** Test hook: exercises both restart-intent reads under an inherited absolute deadline. */
+export function ensureBrokerOnceWithDeadlineForTest(
+	settings: EnsureBrokerSettings,
+	deadline: number,
+): Promise<BrokerDiscovery> {
+	return ensureBrokerOnce(settings, "discovery", true, deadline).then(outcome => outcome.discovery);
+}
 
 export function brokerOwnerForTest(agentDir: string): BrokerOwner | undefined {
 	return owners.get(agentDir);

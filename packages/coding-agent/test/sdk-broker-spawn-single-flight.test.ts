@@ -23,8 +23,8 @@ import {
 	closeBrokerClientBeforeDeadline,
 	type EnsureBrokerTiming,
 	ensureBroker,
+	ensureBrokerOnceWithDeadlineForTest,
 	readBrokerDiscoveryBeforeDeadlineForTest,
-	readBrokerRestartIntentBeforeDeadlineForTest,
 	reconcileBrokerGenerationForStartup,
 	setEnsureBrokerTimingForTest,
 	waitForStartupLockRetryForTest,
@@ -591,24 +591,38 @@ it("clips the startup-lock retry delay to the remaining discovery budget", async
 	}
 });
 
-it("bounds restart-intent reads by the shared discovery deadline", async () => {
-	const dir = await temp();
-	const stalledRead = Promise.withResolvers<BrokerRestartIntentWithIdentity | null>();
-	const readSpy = spyOn(brokerDiscovery, "readBrokerRestartIntent").mockImplementation(() => stalledRead.promise);
-	const deadline = Date.now() + 25;
+it("bounds pre-lock and under-lock restart-intent reads by the shared deadline", async () => {
+	const preLockDir = await temp();
+	const stalledPreLockRead = Promise.withResolvers<BrokerRestartIntentWithIdentity | null>();
+	const preLockReadSpy = spyOn(brokerDiscovery, "readBrokerRestartIntent").mockImplementation(
+		() => stalledPreLockRead.promise,
+	);
 	try {
-		await expect(readBrokerRestartIntentBeforeDeadlineForTest(dir, deadline)).rejects.toThrow(
+		await expect(ensureBrokerOnceWithDeadlineForTest({ agentDir: preLockDir }, Date.now() + 1_000)).rejects.toThrow(
 			"Timed out waiting for detached SDK broker discovery.",
 		);
-		expect(readSpy).toHaveBeenCalledTimes(1);
-		expect(Date.now()).toBeGreaterThanOrEqual(deadline);
-		await expect(readBrokerRestartIntentBeforeDeadlineForTest(dir, Date.now())).rejects.toThrow(
-			"Timed out waiting for detached SDK broker discovery.",
-		);
-		expect(readSpy).toHaveBeenCalledTimes(1);
+		expect(preLockReadSpy).toHaveBeenCalledTimes(1);
 	} finally {
-		readSpy.mockRestore();
-		await fs.rm(dir, { recursive: true, force: true });
+		preLockReadSpy.mockRestore();
+		await fs.rm(preLockDir, { recursive: true, force: true });
+	}
+
+	const underLockDir = await temp();
+	const stalledUnderLockRead = Promise.withResolvers<BrokerRestartIntentWithIdentity | null>();
+	let readCount = 0;
+	const underLockReadSpy = spyOn(brokerDiscovery, "readBrokerRestartIntent").mockImplementation(() => {
+		readCount++;
+		return readCount === 1 ? Promise.resolve(null) : stalledUnderLockRead.promise;
+	});
+	try {
+		await expect(ensureBrokerOnceWithDeadlineForTest({ agentDir: underLockDir }, Date.now() + 1_000)).rejects.toThrow(
+			"Timed out waiting for detached SDK broker discovery.",
+		);
+		expect(underLockReadSpy).toHaveBeenCalledTimes(2);
+		expect(await fs.exists(path.join(underLockDir, "sdk", "broker.spawn.lock"))).toBe(false);
+	} finally {
+		underLockReadSpy.mockRestore();
+		await fs.rm(underLockDir, { recursive: true, force: true });
 	}
 });
 
