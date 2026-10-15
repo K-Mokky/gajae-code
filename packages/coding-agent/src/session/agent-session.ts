@@ -19402,12 +19402,12 @@ export class AgentSession {
 	/**
 	 * Clear the active-profile marker after a successful concrete
 	 * materialization that persists as the session default with a
-	 * user-selection or startup-override cause. Internal temporary/fallback/
+	 * user-selection cause. Internal temporary/fallback/
 	 * restore/rollback switches and the activation transaction itself (cause
 	 * `profile-activation`) never clear the marker.
 	 */
 	#clearActiveModelProfileForConcreteDefault(cause: ModelChangeCause | undefined): void {
-		if (cause !== "user-selection" && cause !== "startup-override") return;
+		if (cause !== "user-selection") return;
 		// A persisted default profile is replaced by materializing its effective
 		// assignments into the durable layer first. A session-only marker is
 		// dropped together with the runtime role overrides the profile activation
@@ -19691,7 +19691,9 @@ export class AgentSession {
 				`${model.provider}/${model.id}`,
 				options?.persistAsSessionDefault ? "default" : "temporary",
 			);
-			this.settings.getStorage()?.recordModelUsage(`${model.provider}/${model.id}`);
+			if (options?.cause !== "startup-override") {
+				this.settings.getStorage()?.recordModelUsage(`${model.provider}/${model.id}`);
+			}
 			if (options?.persistAsSessionDefault) {
 				this.#seedSessionCanonicalVariant(model);
 				if (options.cause === "user-selection") this.#recordUserCanonicalVariantSelection();
@@ -19701,16 +19703,17 @@ export class AgentSession {
 			// configured defaultLevel; otherwise re-clamp the current level.
 			this.setThinkingLevel(thinkingLevel ?? model.thinking?.defaultLevel ?? this.thinkingLevel);
 			if (options?.persistAsSessionDefault === true && options.cause !== "profile-activation") {
-				// Concrete model selection clears session-scoped profile state (#5919).
-				// Materialize durable profiles first (if persisted and active), then reset
-				// without force to preserve durable semantics.
-				if (this.model && this.settings.get("modelProfile.default") !== undefined) {
-					this.materializeActiveDefaultModelProfileAssignment(this.model);
+				// Concrete user selections clear session-scoped profile state (#5919).
+				// Startup overrides still reset session-only profiles, but never turn
+				// the run-scoped model into a durable profile materialization.
+				if (options.cause !== "startup-override") {
+					if (this.model && this.settings.get("modelProfile.default") !== undefined) {
+						this.materializeActiveDefaultModelProfileAssignment(this.model);
+					}
 				}
 				this.#resetSessionScopedModelProfileState({ preserveDefaultConfiguredChain: true });
-				// For user-selection and startup-override causes, also clear stale persisted
-				// defaults via the legacy path when there is no ownership record.
-				if (options.cause === "user-selection" || options.cause === "startup-override") {
+				// Legacy profile ownership has no durable ownership record to validate.
+				if (options.cause === "user-selection") {
 					const ownership = readDurableModelProfileOwnership(this.settings);
 					if (ownership.version === 0) {
 						this.#clearActiveModelProfileForConcreteDefault(options.cause);
@@ -19721,7 +19724,7 @@ export class AgentSession {
 				this.setConfiguredModelChain(
 					"default",
 					[formatModelSelectorValue(`${model.provider}/${model.id}`, effectiveLevel)],
-				origin,
+					origin,
 				);
 			}
 			await this.#syncEditToolModeAfterModelChange(previousEditMode);

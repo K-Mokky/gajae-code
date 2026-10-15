@@ -95,6 +95,7 @@ type ModelProfileActivationSession = Pick<
 		| "getSessionCanonicalVariant"
 		| "restoreSessionCanonicalVariant"
 		| "clearCanonicalVariant"
+		| "getModelProfile"
 		| "getAvailable"
 		| "lookupAliasExists"
 		| "resolveModelByLookupAlias"
@@ -310,9 +311,39 @@ function getMaterializedAssignments(
 	return result;
 }
 
+function modelRolesForMaterialization(
+	options: MaterializeModelProfileAssignmentOptions | MaterializeModelProfileAssignmentsOptions,
+): Record<string, ModelSelectorValue> {
+	const modelRoles = { ...options.settings.get("modelRoles") };
+	const defaultChain = options.session.getConfiguredModelChainState?.("default");
+	if (defaultChain?.origin !== "startup-override" || !defaultChain.entries[0]) return modelRoles;
+
+	const runtimeDefault = normalizeModelSelectorValue(options.settings.getOverride("modelRoles")?.default);
+	if (
+		runtimeDefault.length !== 1 ||
+		splitSelectorThinkingSuffix(runtimeDefault[0] ?? "")
+			.selector.trim()
+			.toLowerCase() !== splitSelectorThinkingSuffix(defaultChain.entries[0]).selector.trim().toLowerCase()
+	) {
+		return modelRoles;
+	}
+
+	const activeProfile = options.session.getActiveModelProfile?.() ?? options.settings.get("modelProfile.default");
+	const profile = activeProfile ? options.session.modelRegistry?.getModelProfile?.(activeProfile) : undefined;
+	const profileDefault = profile ? resolveProfileBindings(profile).defaultSelector : undefined;
+	const configuredDefault = profileDefault ?? options.settings.getGlobal("modelRoles")?.default;
+	if (configuredDefault === undefined) delete modelRoles.default;
+	else modelRoles.default = configuredDefault;
+	return modelRoles;
+}
+
 function materializeConfiguredDefaultChain(
-	session: Pick<ModelProfileActivationSession, "model" | "thinkingLevel" | "getConfiguredModelChain">,
+	session: Pick<
+		ModelProfileActivationSession,
+		"model" | "thinkingLevel" | "getConfiguredModelChain" | "getConfiguredModelChainState"
+	>,
 ): ModelSelectorValue | undefined {
+	if (session.getConfiguredModelChainState?.("default")?.origin === "startup-override") return undefined;
 	if (!session.model) return undefined;
 	return formatModelSelectorValue(`${session.model.provider}/${session.model.id}`, session.thinkingLevel);
 }
@@ -476,7 +507,7 @@ export function materializeActiveModelProfileAssignment(options: MaterializeMode
 	const activeProfile = options.session.getActiveModelProfile?.() ?? options.settings.get("modelProfile.default");
 	if (!activeProfile) return false;
 
-	const nextModelRoles = { ...options.settings.get("modelRoles") };
+	const nextModelRoles = modelRolesForMaterialization(options);
 	const nextAgentModelOverrides = { ...options.settings.get("task.agentModelOverrides") };
 	const target = GJC_MODEL_ASSIGNMENT_TARGETS[options.role];
 
@@ -505,7 +536,7 @@ export function materializeActiveModelProfileAssignments(options: MaterializeMod
 	const materializedAssignments = getMaterializedAssignments(options.assignments);
 	if (materializedAssignments.length === 0) return true;
 
-	const nextModelRoles = { ...options.settings.get("modelRoles") };
+	const nextModelRoles = modelRolesForMaterialization(options);
 	const nextAgentModelOverrides = { ...options.settings.get("task.agentModelOverrides") };
 	const includesDefault = materializedAssignments.some(([role]) => role === "default");
 

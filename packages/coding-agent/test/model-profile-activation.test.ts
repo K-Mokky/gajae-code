@@ -2635,6 +2635,57 @@ describe("model profile activation", () => {
 		expect(settings.get("modelRoles").default).toBe("provider-b/executor");
 	});
 
+	test("materializing a profile role preserves the profile default over a startup model override", async () => {
+		const baseRegistry = fakeRegistry();
+		const registry = { ...baseRegistry, getAvailable: () => baseRegistry.getAll() };
+		const startupModel = model("provider-c", "cli-model");
+		const session = Object.assign(fakeSession(startupModel), { modelRegistry: registry as unknown as ModelRegistry });
+		const settings = Settings.isolated({ "modelProfile.default": "profile-a" });
+		settings.overrideModelRoles({ default: `${startupModel.provider}/${startupModel.id}` });
+		await activateModelProfile({ session, modelRegistry: registry, settings, profileName: "profile-a" });
+
+		session.model = startupModel;
+		session.setConfiguredModelChain("default", [`${startupModel.provider}/${startupModel.id}`], "startup-override");
+
+		materializeActiveModelProfileAssignment({
+			session,
+			settings,
+			role: "executor",
+			selector: "provider-c/executor",
+		});
+
+		expect(settings.getGlobal("modelRoles")?.default).toBe("provider-a/default:high");
+		expect(settings.getGlobal("modelProfile.default")).toBeUndefined();
+	});
+
+	test("materializing a role-only profile does not promote a startup model to the global default", async () => {
+		const profile: ModelProfileDefinition = {
+			name: "role-only-profile",
+			requiredProviders: [],
+			modelMapping: { executor: "provider-b/executor" },
+			source: "user",
+		};
+		const baseRegistry = fakeRegistry({ profiles: [profile] });
+		const registry = { ...baseRegistry, getAvailable: () => baseRegistry.getAll() };
+		const startupModel = model("provider-c", "cli-model");
+		const session = Object.assign(fakeSession(startupModel), { modelRegistry: registry as unknown as ModelRegistry });
+		const settings = Settings.isolated({ "modelProfile.default": profile.name });
+		settings.overrideModelRoles({ default: `${startupModel.provider}/${startupModel.id}` });
+		await activateModelProfile({ session, modelRegistry: registry, settings, profileName: profile.name });
+
+		session.model = startupModel;
+		session.setConfiguredModelChain("default", [`${startupModel.provider}/${startupModel.id}`], "startup-override");
+
+		materializeActiveModelProfileAssignment({
+			session,
+			settings,
+			role: "executor",
+			selector: "provider-c/executor",
+		});
+
+		expect(settings.getGlobal("modelRoles")?.default).toBeUndefined();
+	});
+
 	test("profile deletion materializes the complete default fallback chain", async () => {
 		const profile: ModelProfileDefinition = {
 			name: "delete-chain-profile",
