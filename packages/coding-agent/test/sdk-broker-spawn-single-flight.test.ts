@@ -13,7 +13,7 @@ import {
 } from "../src/config/file-lock";
 import { Broker } from "../src/sdk/broker/broker";
 import { readBrokerExitRecord, readBrokerStartupExitRecord } from "../src/sdk/broker/broker-exit";
-import type { BrokerDiscovery } from "../src/sdk/broker/discovery";
+import type { BrokerDiscovery, BrokerRestartIntentWithIdentity } from "../src/sdk/broker/discovery";
 import * as brokerDiscovery from "../src/sdk/broker/discovery";
 import { brokerProcessIncarnation } from "../src/sdk/broker/discovery";
 import {
@@ -24,6 +24,7 @@ import {
 	type EnsureBrokerTiming,
 	ensureBroker,
 	readBrokerDiscoveryBeforeDeadlineForTest,
+	readBrokerRestartIntentBeforeDeadlineForTest,
 	reconcileBrokerGenerationForStartup,
 	setEnsureBrokerTimingForTest,
 	waitForStartupLockRetryForTest,
@@ -587,6 +588,27 @@ it("clips the startup-lock retry delay to the remaining discovery budget", async
 		expect(clock.elapsedMs()).toBe(75);
 	} finally {
 		setEnsureBrokerTimingForTest(undefined);
+	}
+});
+
+it("bounds restart-intent reads by the shared discovery deadline", async () => {
+	const dir = await temp();
+	const stalledRead = Promise.withResolvers<BrokerRestartIntentWithIdentity | null>();
+	const readSpy = spyOn(brokerDiscovery, "readBrokerRestartIntent").mockImplementation(() => stalledRead.promise);
+	const deadline = Date.now() + 25;
+	try {
+		await expect(readBrokerRestartIntentBeforeDeadlineForTest(dir, deadline)).rejects.toThrow(
+			"Timed out waiting for detached SDK broker discovery.",
+		);
+		expect(readSpy).toHaveBeenCalledTimes(1);
+		expect(Date.now()).toBeGreaterThanOrEqual(deadline);
+		await expect(readBrokerRestartIntentBeforeDeadlineForTest(dir, Date.now())).rejects.toThrow(
+			"Timed out waiting for detached SDK broker discovery.",
+		);
+		expect(readSpy).toHaveBeenCalledTimes(1);
+	} finally {
+		readSpy.mockRestore();
+		await fs.rm(dir, { recursive: true, force: true });
 	}
 });
 

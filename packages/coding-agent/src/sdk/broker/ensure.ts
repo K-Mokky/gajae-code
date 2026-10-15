@@ -16,6 +16,7 @@ import { SdkClient, SdkClientError } from "../client/client";
 import { type BrokerStartupExitRecord, clearBrokerStartupExitRecord, readBrokerStartupExitRecord } from "./broker-exit";
 import {
 	type BrokerDiscovery,
+	type BrokerRestartIntentWithIdentity,
 	brokerProcessIncarnation,
 	readBrokerDiscovery,
 	readBrokerRestartIntent,
@@ -819,6 +820,27 @@ async function readBrokerDiscoveryBeforeDeadline(
 	}
 }
 
+async function readBrokerRestartIntentBeforeDeadline(
+	agentDir: string,
+	deadline: number,
+): Promise<BrokerRestartIntentWithIdentity | null> {
+	const remainingMs = deadline - ensureBrokerTiming.now();
+	if (!Number.isFinite(remainingMs)) return await readBrokerRestartIntent(agentDir);
+	if (remainingMs <= 0) throw new Error(BROKER_DISCOVERY_TIMEOUT_MESSAGE);
+	const read = readBrokerRestartIntent(agentDir);
+	void read.catch(() => undefined);
+	const timeout = Promise.withResolvers<BrokerRestartIntentWithIdentity | null>();
+	const timer: NodeJS.Timeout = setTimeout(
+		() => timeout.reject(new Error(BROKER_DISCOVERY_TIMEOUT_MESSAGE)),
+		remainingMs,
+	);
+	try {
+		return await Promise.race([read, timeout.promise]);
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
 /**
  * Cross-process single-flight for the detached broker spawn (#5198).
  *
@@ -1508,7 +1530,7 @@ async function ensureBrokerOnce(
 		settings.heartbeatTtlMs,
 		initialDiscoveryDeadline,
 	);
-	const restartIntent = await readBrokerRestartIntent(settings.agentDir);
+	const restartIntent = await readBrokerRestartIntentBeforeDeadline(settings.agentDir, initialDiscoveryDeadline);
 	if (
 		restartIntent &&
 		restartIntent.expiresAt > ensureBrokerTiming.now() &&
@@ -1547,7 +1569,7 @@ async function ensureBrokerOnce(
 			retryDeadlineAt ??
 			ensureBrokerTiming.now() +
 				(initiator === "fixture-lease" ? FIXTURE_DISCOVERY_TIMEOUT_MS : DISCOVERY_TIMEOUT_MS);
-		const lockedIntent = await readBrokerRestartIntent(settings.agentDir);
+		const lockedIntent = await readBrokerRestartIntentBeforeDeadline(settings.agentDir, deadline);
 		if (
 			lockedIntent &&
 			lockedIntent.expiresAt > ensureBrokerTiming.now() &&
@@ -1952,6 +1974,8 @@ export const acquireSpawnLockForTest = acquireSpawnLock;
 export const waitForStartupLockRetryForTest = waitForStartupLockRetry;
 /** Test hook: proves discovery reads honor their enclosing absolute deadline. */
 export const readBrokerDiscoveryBeforeDeadlineForTest = readBrokerDiscoveryBeforeDeadline;
+/** Test hook: proves restart-intent reads honor their enclosing absolute deadline. */
+export const readBrokerRestartIntentBeforeDeadlineForTest = readBrokerRestartIntentBeforeDeadline;
 
 export function brokerOwnerForTest(agentDir: string): BrokerOwner | undefined {
 	return owners.get(agentDir);
