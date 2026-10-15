@@ -1331,7 +1331,7 @@ describe("file lock cleanup failure handling (#2478)", () => {
 	});
 
 	test.skipIf(process.platform === "win32")(
-		"preserves a retained transition diagnosis when acquisition is aborted",
+		"uses the cached transition diagnosis without filesystem work after cancellation",
 		async () => {
 			const lockedFile = path.join(await makeTemp(), "aborted-transition.json");
 			const detachedPath = `${lockedFile}.lock.removing`;
@@ -1343,8 +1343,15 @@ describe("file lock cleanup failure handling (#2478)", () => {
 			const controller = new AbortController();
 			const abortReason = new Error("acquisition deadline elapsed");
 			const realSleep = Bun.sleep;
+			const lstat = vi.spyOn(fs, "lstat");
+			const transitionLstatCount = () =>
+				lstat.mock.calls.filter(([target]) => String(target) === detachedPath).length;
+			let transitionLstatCountAtAbort = 0;
 			vi.spyOn(Bun, "sleep").mockImplementation((async (ms?: number) => {
-				if (ms === 100) controller.abort(abortReason);
+				if (ms === 100) {
+					transitionLstatCountAtAbort = transitionLstatCount();
+					controller.abort(abortReason);
+				}
 				return await realSleep(0);
 			}) as typeof Bun.sleep);
 
@@ -1360,6 +1367,8 @@ describe("file lock cleanup failure handling (#2478)", () => {
 				orphanPath: detachedPath,
 			});
 			expect(controller.signal.aborted).toBe(true);
+			expect(transitionLstatCountAtAbort).toBeGreaterThan(0);
+			expect(transitionLstatCount()).toBe(transitionLstatCountAtAbort);
 			expect(await fs.exists(detachedPath)).toBe(true);
 		},
 	);

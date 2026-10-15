@@ -2592,35 +2592,24 @@ export async function acquireFileLock(filePath: string, options: FileLockOptions
 	const contentionStartTimes = new Map<string, string | null>();
 	let contentionObserved = false;
 	let staleRemovalFailure: RecordedStaleRemovalFailure | undefined;
-	const abortAcquisition = async (attempts: number, originalError?: unknown): Promise<never> => {
-		if (contentionObserved && opts.signal?.aborted) {
-			let transitionState: FileLockRemovalTransitionState | null = null;
-			try {
-				transitionState = await classifyFileLockRemovalTransition(
-					lockPath,
-					orphanTransitionAgeMs,
-					opts.ownerHostId,
-					opts.previousOwnerHostIds ?? [],
-				);
-			} catch {
-				// Cancellation remains authoritative when the final transition check is unreadable.
-			}
-			if (transitionState === "orphan_transition") {
-				const orphanPath = fileLockRemovalTransitionPath(lockPath);
-				throw new FileLockAcquireError(
-					filePath,
-					lockPath,
-					Math.max(1, attempts),
-					`orphan transition retained at ${orphanPath}`,
-					"orphan_transition",
-					orphanPath,
-				);
-			}
+	let observedOrphanTransitionPath: string | undefined;
+	// Use the last completed transition check; never start a filesystem check after cancellation.
+	const abortAcquisition = (attempts: number, originalError?: unknown): never => {
+		if (contentionObserved && observedOrphanTransitionPath !== undefined) {
+			throw new FileLockAcquireError(
+				filePath,
+				lockPath,
+				Math.max(1, attempts),
+				`orphan transition retained at ${observedOrphanTransitionPath}`,
+				"orphan_transition",
+				observedOrphanTransitionPath,
+			);
 		}
 		throw originalError ?? opts.signal?.reason ?? new Error("File lock acquisition aborted");
 	};
 	for (let attempt = 0; attempt < opts.retries; attempt++) {
-		if (opts.signal?.aborted) await abortAcquisition(attempt);
+		if (opts.signal?.aborted) abortAcquisition(attempt);
+		observedOrphanTransitionPath = undefined;
 		const localKey = await localLockKey(lockPath);
 		const priorRelease = localLockStates.get(localKey);
 		if (priorRelease && priorRelease.status !== "held" && pendingDetachedLockCleanups.has(priorRelease.owner)) {
@@ -2635,6 +2624,7 @@ export async function acquireFileLock(filePath: string, options: FileLockOptions
 			ownerToken,
 			opts.onAcquired,
 		);
+		observedOrphanTransitionPath = isFileLockOrphanTransition(result) ? result.path : undefined;
 		if (isFileLockOrphanTransition(result)) {
 			// Adoption is identity-bound and can be refused by a transient cleanup race.
 			// Keep using the caller's bounded contention budget; the same generation is
@@ -2660,7 +2650,7 @@ export async function acquireFileLock(filePath: string, options: FileLockOptions
 						"File lock acquisition was cancelled after ownership was published, and the lock could not be released.",
 					);
 				}
-				await abortAcquisition(attempt + 1);
+				abortAcquisition(attempt + 1);
 			}
 			return release;
 		}
@@ -2668,19 +2658,20 @@ export async function acquireFileLock(filePath: string, options: FileLockOptions
 			contentionObserved = true;
 			opts.onContended?.();
 		}
-		if (opts.signal?.aborted) await abortAcquisition(attempt + 1);
+		if (opts.signal?.aborted) abortAcquisition(attempt + 1);
 		const pendingKey = await pendingLocalReleaseKey(lockPath, localKey);
 		const localState = localLockStates.get(pendingKey ?? localKey);
 		if (pendingKey !== undefined && localState?.status !== "held" && localState?.owner.owner_token !== undefined) {
 			try {
 				await retryPendingLocalRelease(lockPath, pendingKey);
+				observedOrphanTransitionPath = undefined;
 				continue;
 			} catch {
 				// Keep contending below. A failed local retry is not authority to steal a
 				// lock; the owner generation remains fenced until release succeeds.
 			}
 		}
-		if (opts.signal?.aborted) await abortAcquisition(attempt + 1);
+		if (opts.signal?.aborted) abortAcquisition(attempt + 1);
 		const stale = await staleLockSnapshot(
 			lockPath,
 			opts.staleMs,
@@ -2688,10 +2679,11 @@ export async function acquireFileLock(filePath: string, options: FileLockOptions
 			opts.previousOwnerHostIds,
 			contentionStartTimes,
 		);
-		if (opts.signal?.aborted) await abortAcquisition(attempt + 1);
+		if (opts.signal?.aborted) abortAcquisition(attempt + 1);
 		const staleRemoval = await removeStaleLockForAcquire(lockPath, stale);
 		if (staleRemoval.removed) {
 			staleRemovalFailure = undefined;
+			observedOrphanTransitionPath = undefined;
 			continue;
 		}
 		staleRemovalFailure =
@@ -2710,7 +2702,7 @@ export async function acquireFileLock(filePath: string, options: FileLockOptions
 		try {
 			await promise;
 		} catch (error) {
-			if (opts.signal?.aborted) await abortAcquisition(attempt + 1, error);
+			if (opts.signal?.aborted) abortAcquisition(attempt + 1, error);
 			throw error;
 		} finally {
 			opts.signal.removeEventListener("abort", onAbort);
