@@ -1563,6 +1563,10 @@ async function ensureBrokerOnce(
 		// A stale marker must never be misattributed to this spawn; clear it first.
 		await clearBrokerStartupExitRecord(settings.agentDir);
 		await clearBrokerStartupFailureMarker(settings.agentDir);
+		if (ensureBrokerTiming.now() >= deadline) {
+			await spawnLog?.handle.close().catch(() => undefined);
+			throw new Error(BROKER_DISCOVERY_TIMEOUT_MESSAGE);
+		}
 		const childSpawnedAt = Date.now();
 		const brokerArgs = [...command.args, "--agent-dir", settings.agentDir];
 		const env = brokerSpawnEnvironment(command, settings.env);
