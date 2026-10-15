@@ -20,7 +20,11 @@ import { planLaunchWorktree } from "../src/gjc-runtime/launch-worktree";
 import { AcpAgent } from "../src/modes/acp/acp-agent";
 import { Broker, type BrokerCleanupEvidence, type BrokerResponse } from "../src/sdk/broker/broker";
 import { endpointIncarnation } from "../src/sdk/broker/endpoint-authority";
-import { brokerOwnerForTest, startFixtureBrokerWithLeaseForTest } from "../src/sdk/broker/ensure";
+import {
+	brokerOwnerForTest,
+	SDK_BROKER_AUTOSTART_ENV,
+	startFixtureBrokerWithLeaseForTest,
+} from "../src/sdk/broker/ensure";
 import { deriveIdempotencyIdentity } from "../src/sdk/broker/identity";
 import {
 	canonicalDeleteLocatorPath,
@@ -64,6 +68,15 @@ const spawned: Array<ReturnType<typeof Bun.spawn>> = [];
 const brokerDirs: string[] = [];
 const lifecycleDirectoryDurabilityAvailable = process.platform !== "win32";
 
+function enableTestBrokerAutostart(): () => void {
+	const previous = process.env[SDK_BROKER_AUTOSTART_ENV];
+	delete process.env[SDK_BROKER_AUTOSTART_ENV];
+	return () => {
+		if (previous === undefined) delete process.env[SDK_BROKER_AUTOSTART_ENV];
+		else process.env[SDK_BROKER_AUTOSTART_ENV] = previous;
+	};
+}
+
 function expectedDurableRollbackReceipt(endpointGeneration: number | null) {
 	return {
 		endpointGeneration,
@@ -75,12 +88,17 @@ function expectedDurableRollbackReceipt(endpointGeneration: number | null) {
 }
 
 afterEach(async () => {
-	for (const process of spawned.splice(0)) {
-		if (process.exitCode === null) process.kill("SIGTERM");
-		await process.exited;
+	const children = spawned.splice(0);
+	for (const child of children) {
+		if (child.exitCode === null) child.kill("SIGTERM");
 	}
-	for (const agentDir of brokerDirs.splice(0)) await brokerOwnerForTest(agentDir)?.stop();
-});
+	await Promise.all(children.map(child => child.exited));
+	const owners = brokerDirs
+		.splice(0)
+		.map(agentDir => brokerOwnerForTest(agentDir))
+		.filter(owner => owner !== undefined);
+	await Promise.all(owners.map(owner => owner.stop()));
+}, 30_000);
 
 async function waitFor<T>(read: () => Promise<T | undefined>, label: string): Promise<T> {
 	const deadline = Date.now() + 10_000;
@@ -90,6 +108,18 @@ async function waitFor<T>(read: () => Promise<T | undefined>, label: string): Pr
 		await Bun.sleep(25);
 	}
 	throw new Error(`Timed out waiting for ${label}`);
+}
+
+async function readPersistedSessionIndexEvents(agentDir: string): Promise<SessionIndexEvent[]> {
+	const indexDir = path.join(agentDir, "sdk", "sessions");
+	const snapshot = JSON.parse(await fs.readFile(path.join(indexDir, "index.snapshot.json"), "utf8")) as {
+		events: SessionIndexEvent[];
+	};
+	const logEvents = (await fs.readFile(path.join(indexDir, "index.jsonl"), "utf8"))
+		.split("\n")
+		.filter(Boolean)
+		.map(line => JSON.parse(line) as SessionIndexEvent);
+	return [...snapshot.events, ...logEvents].sort((left, right) => left.indexSeq - right.indexSeq);
 }
 
 async function createSessionHostFixture(
@@ -4544,11 +4574,7 @@ test("broker directly resumes and forks a canonical cold saved session with scop
 			result: { sessions: expect.not.arrayContaining([expect.objectContaining({ sessionId: forkId })]) },
 		});
 		expect(
-			(await fs.readFile(path.join(agentDir, "sdk", "sessions", "index.jsonl"), "utf8"))
-				.split("\n")
-				.filter(Boolean)
-				.map(line => JSON.parse(line) as { sessionId?: string; type?: string })
-				.findLast(event => event.sessionId === forkId),
+			(await readPersistedSessionIndexEvents(agentDir)).findLast(event => event.sessionId === forkId),
 		).toMatchObject({ type: "session_deleted", sessionId: forkId });
 		expect(
 			await fs.access(forkCandidate.path).then(
@@ -7653,10 +7679,7 @@ test("reconcile_uncertain replays a ledger-stage receipt after deletion and same
 				retirementKey,
 			),
 		).resolves.toMatchObject({ ok: false, error: { code: "idempotency_conflict" } });
-		const events = (await fs.readFile(path.join(agentDir, "sdk", "sessions", "index.jsonl"), "utf8"))
-			.split("\n")
-			.filter(Boolean)
-			.map(line => JSON.parse(line) as { sessionId?: string; type?: string });
+		const events = await readPersistedSessionIndexEvents(agentDir);
 		expect(events.filter(event => event.sessionId === sessionId && event.type === "session_closed")).toHaveLength(1);
 		expect(events.filter(event => event.sessionId === sessionId && event.type === "session_deleted")).toHaveLength(1);
 		await reopened.stop();
@@ -7753,10 +7776,7 @@ test("reconcile_uncertain fails closed when deletion wins the closure append rac
 		raceSpy.mockRestore();
 		expect(reopened.ledger.get(createIdentity)).toMatchObject({ state: "terminal_uncertain" });
 		expect(reopened.index.listSessions().sessions).toEqual([]);
-		const events = (await fs.readFile(path.join(agentDir, "sdk", "sessions", "index.jsonl"), "utf8"))
-			.split("\n")
-			.filter(Boolean)
-			.map(line => JSON.parse(line) as { sessionId?: string; type?: string });
+		const events = await readPersistedSessionIndexEvents(agentDir);
 		expect(events.filter(event => event.sessionId === sessionId && event.type === "session_deleted")).toHaveLength(1);
 		expect(events.filter(event => event.sessionId === sessionId && event.type === "session_closed")).toHaveLength(1);
 		await reopened.stop();
@@ -9646,6 +9666,7 @@ test("broker preserves an acknowledged session.close result when endpoint client
 test("ACP, MCP, and daemon global requests bootstrap a broker with zero sessions", async () => {
 	const root = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-sdk-zero-global-"));
 	const agentDirs = ["acp", "mcp", "daemon"].map(name => path.join(root, name, "agent"));
+	const restoreBrokerAutostart = enableTestBrokerAutostart();
 	brokerDirs.push(...agentDirs);
 	try {
 		const acp = new AcpAgent({ signal: new AbortController().signal } as never, { agentDir: agentDirs[0] });
@@ -9667,9 +9688,10 @@ test("ACP, MCP, and daemon global requests bootstrap a broker with zero sessions
 		expect(output).toMatchObject([{ ok: true, result: { sessions: [] } }]);
 		expect(await readSdkBrokerDiscovery(agentDirs[2])).not.toBeNull();
 	} finally {
+		restoreBrokerAutostart();
 		await fs.rm(root, { recursive: true, force: true });
 	}
-}, 20_000);
+}, 30_000);
 
 test("lifecycle cleanup rejects transplanted and ambiguous receipts before mutation", async () => {
 	const root = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-broker-cleanup-receipt-"));
@@ -9929,6 +9951,7 @@ test("session/list does not grant a second ACP connection destructive lifecycle 
 	const agentDir = path.join(root, "agent");
 	const cwd = path.join(root, "repo");
 	await fs.mkdir(cwd, { recursive: true });
+	const restoreBrokerAutostart = enableTestBrokerAutostart();
 	brokerDirs.push(agentDir);
 	try {
 		// Both connections share one broker, which is the situation that makes
@@ -9966,6 +9989,7 @@ test("session/list does not grant a second ACP connection destructive lifecycle 
 			]),
 		).resolves.toEqual([{}, {}]);
 	} finally {
+		restoreBrokerAutostart();
 		await fs.rm(root, { recursive: true, force: true });
 	}
 }, 30_000);
