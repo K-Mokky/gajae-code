@@ -593,42 +593,50 @@ describe("subagent await emit gating", () => {
 		AsyncJobManager.resetForTests();
 	});
 
-	it("emits when a live subagent crosses the idle threshold before the liveness interval", async () => {
+	it("emits the compact idle-count change on the first heartbeat after 30 seconds", async () => {
 		vi.useFakeTimers();
 		const manager = createManager();
 		const tool = new SubagentTool(createSession());
-		let clock = 29_900;
+		let clock = 0;
 		const restore = tool.withLivenessClock(() => clock);
-		const control = Promise.withResolvers<void>();
-		const id = "0-Idle";
-		const jobId = manager.register("task", id, async () => control.promise.then(() => "done"), {
-			id: "job-idle",
-			ownerId: "0-Main",
-			metadata: { subagent: { id, agent: "executor", agentSource: "bundled" } },
-		});
-		manager.registerSubagentRecord(runningRecord(id, jobId));
-		manager.recordSubagentProgress(id, makeProgress({ id, currentTool: "read", lastActivityMs: 0 }));
+		const controls = Array.from({ length: 15 }, () => Promise.withResolvers<void>());
+		for (const [index, control] of controls.entries()) {
+			const id = `0-Idle${index}`;
+			const jobId = manager.register("task", id, async () => control.promise.then(() => "done"), {
+				id: `job-${id}`,
+				ownerId: "0-Main",
+				metadata: { subagent: { id, agent: "executor", agentSource: "bundled" } },
+			});
+			manager.registerSubagentRecord(runningRecord(id, jobId));
+			manager.recordSubagentProgress(id, makeProgress({ id, currentTool: "read", lastActivityMs: 0 }));
+		}
 
 		const abortController = new AbortController();
-		const updates = vi.fn();
+		const updates: SubagentToolDetails[] = [];
 		const pending = tool.execute(
 			"await-idle-threshold",
-			{ action: "await", ids: [id], heartbeat_ms: 100, timeout_ms: 3_600_000 },
+			{
+				action: "await",
+				ids: controls.map((_, index) => `0-Idle${index}`),
+				heartbeat_ms: 60_000,
+				timeout_ms: 3_600_000,
+			},
 			abortController.signal,
-			updates,
+			result => {
+				if (result.details) updates.push(result.details);
+			},
 		);
 		await Promise.resolve();
-		expect(updates).toHaveBeenCalledTimes(1);
+		expect(updates).toHaveLength(1);
+		expect(updates[0]?.subagents).toHaveLength(15);
 
-		clock = 30_000;
-		vi.advanceTimersByTime(100);
-		expect(updates).toHaveBeenCalledTimes(1);
-		clock = 30_100;
-		vi.advanceTimersByTime(100);
-		expect(updates).toHaveBeenCalledTimes(2);
+		clock = 60_000;
+		vi.advanceTimersByTime(60_000);
+		expect(updates).toHaveLength(2);
+		expect(updates[1]?.subagents).toHaveLength(15);
 
 		abortController.abort();
-		control.resolve();
+		for (const control of controls) control.resolve();
 		await pending;
 		restore();
 		await manager.dispose({ timeoutMs: 100 });
