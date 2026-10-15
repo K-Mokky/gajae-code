@@ -460,7 +460,11 @@ export const subagentToolRenderer = {
 			const summary = theme.fg(summaryTone, summarySegments.join(" · "));
 			return {
 				render(width: number): string[] {
-					return [truncateToWidth(replaceTabs(summary), width, Ellipsis.Omit)];
+					const normalizedSummary = replaceTabs(summary);
+					if (timedOut) {
+						return Bun.wrapAnsi(normalizedSummary, Math.max(1, width), { hard: true, trim: false }).split("\n");
+					}
+					return [truncateToWidth(normalizedSummary, width, Ellipsis.Omit)];
 				},
 				invalidate() {},
 			};

@@ -653,6 +653,19 @@ describe("subagent await renderer body cache (PR2)", () => {
 		expect(lines.join("\n")).toContain(
 			"Await timed out · timeout is not failure · children continue · inspect progress before cancelling · 15 subagents running",
 		);
+
+		for (const width of [60, 80]) {
+			const narrowLines = renderWith(details, { expanded: false, width });
+			const plainLines = narrowLines.map(line => Bun.stripANSI(line));
+			const plainSummary = plainLines.join(" ").replace(/\s+/g, " ");
+			expect(plainSummary).toContain("Await timed out");
+			expect(plainSummary).toContain("timeout is not failure");
+			expect(plainSummary).toContain("children continue");
+			expect(plainSummary).toContain("inspect progress before cancelling");
+			expect(plainSummary).toContain("15 subagents running");
+			expect(plainSummary).toContain("expand");
+			expect(plainLines.every(line => Bun.stringWidth(line) <= width)).toBe(true);
+		}
 	});
 
 	it("shows successful any-terminal results in compact final receipts", () => {
