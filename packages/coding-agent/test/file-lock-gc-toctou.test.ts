@@ -1406,6 +1406,41 @@ describe("file lock cleanup failure handling (#2478)", () => {
 		expect(await fs.readFile(path.join(lockDir, "info"), "utf8")).toContain(String(DEAD_PID));
 	});
 
+	test("does not start stale cleanup when cancellation races with stale snapshot collection", async () => {
+		const filePath = path.join(await makeTemp(), "cancelled-during-stale-snapshot.json");
+		const lockDir = `${filePath}.lock`;
+		const infoPath = path.join(lockDir, "info");
+		await writeInfo(lockDir, { pid: DEAD_PID, timestamp: Date.now() - 60_000 });
+		const ownerRecord = await fs.readFile(infoPath, "utf8");
+		const controller = new AbortController();
+		const abortReason = new Error("acquisition deadline elapsed");
+		let abortedDuringSnapshot = false;
+		let staleCleanupStarted = false;
+		const realOpen = fs.open;
+		vi.spyOn(fs, "open").mockImplementation(async (target, flags, mode) => {
+			const handle = await realOpen(target, flags, mode);
+			if (String(target) === infoPath && !abortedDuringSnapshot) {
+				abortedDuringSnapshot = true;
+				controller.abort(abortReason);
+			}
+			return handle;
+		});
+		FileLockTestHooks.nativeQuarantineBindings = () => {
+			staleCleanupStarted = true;
+			return {
+				snapshotDirectoryTree,
+				exactRemoveDirectoryTree: () => ({ ok: false, code: "sharing_violation" }),
+			};
+		};
+
+		await expect(acquireFileLock(filePath, { signal: controller.signal, retries: 2, retryDelayMs: 1 })).rejects.toBe(
+			abortReason,
+		);
+		expect(abortedDuringSnapshot).toBe(true);
+		expect(staleCleanupStarted).toBe(false);
+		expect(await fs.readFile(infoPath, "utf8")).toBe(ownerRecord);
+	});
+
 	test.skipIf(process.platform === "win32")(
 		"recovers a dead removal transition owner and acquires (#6101)",
 		async () => {
