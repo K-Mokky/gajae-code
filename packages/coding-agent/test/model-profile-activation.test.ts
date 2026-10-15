@@ -2701,6 +2701,11 @@ describe("model profile activation", () => {
 			role: "executor",
 			selector: "provider-c/executor",
 		});
+		expect(session.model).toBe(startupModel);
+		expect(session.getConfiguredModelChainState("default")).toMatchObject({
+			entries: [`${startupModel.provider}/${startupModel.id}`],
+			origin: "startup-override",
+		});
 
 		const reloadedSettings = Settings.isolated({
 			modelRoles: settings.getGlobal("modelRoles"),

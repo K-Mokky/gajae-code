@@ -401,6 +401,7 @@ function commitMaterializedProfileAssignments(
 	options: MaterializeModelProfileAssignmentOptions | MaterializeModelProfileAssignmentsOptions,
 	modelRoles: Record<string, ModelSelectorValue>,
 	agentModelOverrides: Record<string, ModelSelectorValue>,
+	preserveStartupOverrideChain = false,
 ): boolean {
 	const previousPersistedModelRoles = options.settings.getGlobal("modelRoles");
 	const previousPersistedAgentModelOverrides = options.settings.getGlobal("task.agentModelOverrides");
@@ -423,13 +424,17 @@ function commitMaterializedProfileAssignments(
 		options.settings.clearOverride("modelProfile.default");
 		options.settings.override("modelRoles", nextModelRoles);
 		options.settings.override("task.agentModelOverrides", nextAgentModelOverrides);
-		options.session.setConfiguredModelChain(
-			"default",
-			normalizeModelSelectorValue(nextModelRoles.default),
-			"modelRoles",
-			undefined,
-			true,
-		);
+		// Role-only materialization persists the profile default for future launches,
+		// but it must not replace the live run-scoped CLI model chain.
+		if (!preserveStartupOverrideChain || previousChain?.origin !== "startup-override") {
+			options.session.setConfiguredModelChain(
+				"default",
+				normalizeModelSelectorValue(nextModelRoles.default),
+				"modelRoles",
+				undefined,
+				true,
+			);
+		}
 		options.session.setActiveModelProfile?.(undefined);
 		return true;
 	} catch (error) {
@@ -526,7 +531,12 @@ export function materializeActiveModelProfileAssignment(options: MaterializeMode
 		nextAgentModelOverrides[options.role] = options.selector;
 	}
 
-	const committed = commitMaterializedProfileAssignments(options, nextModelRoles, nextAgentModelOverrides);
+	const committed = commitMaterializedProfileAssignments(
+		options,
+		nextModelRoles,
+		nextAgentModelOverrides,
+		options.role !== "default",
+	);
 	if (committed) options.session.clearProfileInstalledOverrides?.();
 	return committed;
 }
@@ -556,7 +566,12 @@ export function materializeActiveModelProfileAssignments(options: MaterializeMod
 		}
 	}
 
-	const committed = commitMaterializedProfileAssignments(options, nextModelRoles, nextAgentModelOverrides);
+	const committed = commitMaterializedProfileAssignments(
+		options,
+		nextModelRoles,
+		nextAgentModelOverrides,
+		!includesDefault,
+	);
 	if (committed) options.session.clearProfileInstalledOverrides?.();
 	return committed;
 }
