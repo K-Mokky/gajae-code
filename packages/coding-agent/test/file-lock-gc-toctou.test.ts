@@ -1373,6 +1373,34 @@ describe("file lock cleanup failure handling (#2478)", () => {
 		},
 	);
 
+	test("stops acquisition when cancellation occurs during local lock-key resolution", async () => {
+		const filePath = path.join(await makeTemp(), "cancelled-during-local-key.json");
+		const lockPath = `${filePath}.lock`;
+		const parent = path.dirname(lockPath);
+		const controller = new AbortController();
+		const abortReason = new Error("acquisition deadline elapsed");
+		const realpath = fs.realpath;
+		let abortedDuringLookup = false;
+		let tryAcquireStarted = false;
+		FileLockTestHooks.afterParentMkdir = target => {
+			if (target === lockPath) tryAcquireStarted = true;
+		};
+		vi.spyOn(fs, "realpath").mockImplementation((async target => {
+			const resolved = await realpath(target);
+			if (String(target) === parent && !abortedDuringLookup) {
+				abortedDuringLookup = true;
+				controller.abort(abortReason);
+			}
+			return resolved;
+		}) as typeof fs.realpath);
+
+		const failure = await acquireFileLock(filePath, { signal: controller.signal }).catch(error => error);
+		expect(failure).toBe(abortReason);
+		expect(abortedDuringLookup).toBe(true);
+		expect(tryAcquireStarted).toBe(false);
+		expect(await fs.exists(lockPath)).toBe(false);
+	});
+
 	test("releases a lock acquired after its acquisition signal was cancelled", async () => {
 		const filePath = path.join(await makeTemp(), "cancelled-after-acquire.json");
 		const controller = new AbortController();

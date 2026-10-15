@@ -2611,6 +2611,7 @@ export async function acquireFileLock(filePath: string, options: FileLockOptions
 		if (opts.signal?.aborted) abortAcquisition(attempt);
 		observedOrphanTransitionPath = undefined;
 		const localKey = await localLockKey(lockPath);
+		if (opts.signal?.aborted) abortAcquisition(attempt);
 		const priorRelease = localLockStates.get(localKey);
 		if (priorRelease && priorRelease.status !== "held" && pendingDetachedLockCleanups.has(priorRelease.owner)) {
 			await retryPendingLocalRelease(lockPath, localKey);
