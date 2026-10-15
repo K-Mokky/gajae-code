@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
 
 import { disposeAllKernelSessions, executePython } from "@gajae-code/coding-agent/eval/py/executor";
 import type {
@@ -8,6 +10,8 @@ import type {
 } from "@gajae-code/coding-agent/eval/py/kernel";
 import { checkPythonKernelAvailability, PythonKernel } from "@gajae-code/coding-agent/eval/py/kernel";
 import { TempDir } from "@gajae-code/utils";
+import { resolvePythonRuntime, resolveVenvPath } from "../../src/eval/py/runtime";
+import { applySessionLaunchEnvironment } from "../../src/sdk/session-environment";
 
 const originalStart = PythonKernel.start;
 
@@ -92,6 +96,35 @@ describe("python eval lifecycle", () => {
 		PythonKernel.start = originalStart;
 		try {
 			await disposeAllKernelSessions();
+		} finally {
+			restoreEnv(envKeys, previousEnv);
+		}
+	});
+
+	it("does not rediscover virtualenvs removed from the effective session environment", async () => {
+		using tempDir = TempDir.createSync("@gjc-python-session-venv-");
+		const venvPath = path.join(tempDir.path(), "ambient-venv");
+		const binDir = path.join(venvPath, process.platform === "win32" ? "Scripts" : "bin");
+		const venvPython = path.join(binDir, process.platform === "win32" ? "python.exe" : "python");
+		await fs.mkdir(binDir, { recursive: true });
+		await fs.writeFile(venvPython, "fixture interpreter");
+
+		const envKeys = ["VIRTUAL_ENV", "CONDA_PREFIX"] as const;
+		const previousEnv = snapshotEnv(envKeys);
+		try {
+			Bun.env.VIRTUAL_ENV = venvPath;
+			Bun.env.CONDA_PREFIX = venvPath;
+			const effectiveEnv: Record<string, string | undefined> = {
+				PATH: Bun.env.PATH,
+				VIRTUAL_ENV: venvPath,
+				CONDA_PREFIX: venvPath,
+			};
+			applySessionLaunchEnvironment(effectiveEnv, { unsetEnv: [...envKeys] });
+
+			expect(resolveVenvPath(tempDir.path(), effectiveEnv)).toBeUndefined();
+			const runtime = resolvePythonRuntime(tempDir.path(), effectiveEnv);
+			expect(runtime.pythonPath).not.toBe(venvPython);
+			expect(runtime.venvPath).not.toBe(venvPath);
 		} finally {
 			restoreEnv(envKeys, previousEnv);
 		}

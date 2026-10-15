@@ -881,12 +881,31 @@ function isSessionLifecycleMcpServers(value: unknown): value is SessionLifecycle
 // and terminator. The UTF-8 byte bound also limits Windows UTF-16 code units.
 const MAX_LIFECYCLE_REQUEST_ENV_ENTRY_BYTES = 24 * 1024;
 const LIFECYCLE_REQUEST_ENV_NAME = "GJC_SDK_LIFECYCLE_REQUEST";
+const MAX_WINDOWS_ENVIRONMENT_BLOCK_CODE_UNITS = 32_767;
 
 function lifecycleRequestEnvironmentValueFits(value: string): boolean {
 	return (
 		Buffer.byteLength(LIFECYCLE_REQUEST_ENV_NAME, "utf8") + 1 + Buffer.byteLength(value, "utf8") + 1 <=
 		MAX_LIFECYCLE_REQUEST_ENV_ENTRY_BYTES
 	);
+}
+
+/** Checks the complete Windows environment block, including one terminator per entry and the final null. */
+export function lifecycleEnvironmentBlockFits(
+	environment: Readonly<Record<string, string | undefined>>,
+	platform: NodeJS.Platform = lifecycleHostPlatform(),
+): boolean {
+	if (platform !== "win32") return true;
+	let codeUnits = 1;
+	let entryCount = 0;
+	for (const [name, value] of Object.entries(environment)) {
+		if (typeof value !== "string") continue;
+		entryCount += 1;
+		// JavaScript string length is the UTF-16 code-unit count used by Windows.
+		codeUnits += name.length + 1 + value.length + 1;
+	}
+	if (entryCount === 0) codeUnits = 2;
+	return codeUnits <= MAX_WINDOWS_ENVIRONMENT_BLOCK_CODE_UNITS;
 }
 
 export function readSessionLifecycleLaunchRequest(
@@ -1027,7 +1046,66 @@ function createSessionLifecycleLaunchRequest(
 	};
 }
 
+function filterLifecycleInheritedEnvironment(
+	environment: Readonly<Record<string, string | undefined>>,
+): Record<string, string> {
+	return Object.fromEntries(
+		Object.entries(environment).filter(
+			(entry): entry is [string, string] => entry[0] !== "GJC_MASTER_CAPABILITY" && typeof entry[1] === "string",
+		),
+	);
+}
+
+function lifecyclePreflightInheritedEnvironment(broker: Broker): Readonly<Record<string, string | undefined>> {
+	if (lifecycleCommandResolversForTest.has(broker) || sdkSessionCommandOverride()) return process.env;
+	try {
+		const cmd = resolveSdkInternalSpawnCommand("session-host-internal");
+		return "kind" in cmd ? cmd.env : process.env;
+	} catch {
+		return process.env;
+	}
+}
+
+function lifecycleHostEnvironmentAdditions(
+	broker: Broker,
+	launch: SessionLaunch,
+	effectMarker: string,
+	serializedRequest: string,
+): Record<string, string> {
+	return {
+		GJC_AGENT_DIR: broker.settings.agentDir,
+		GJC_CODING_AGENT_DIR: broker.settings.agentDir,
+		GJC_SESSION_ID: launch.id,
+		GJC_STATE_ROOT: launch.root,
+		GJC_LIFECYCLE_REQUEST_ID: effectMarker,
+		GJC_SDK_LIFECYCLE_REQUEST: serializedRequest,
+		// Coordinator-correlation values stay scoped to this designated host launch;
+		// the sidecar derives its shared state path from the coordinator root and session ID.
+		...(launch.coordinatorStateDir
+			? {
+					[GJC_COORDINATOR_SESSION_STATE_FILE_ENV]: path.join(
+						launch.coordinatorStateDir,
+						"session-states",
+						`${launch.id}.json`,
+					),
+				}
+			: {}),
+		...(launch.coordinatorSessionId ? { [GJC_COORDINATOR_SESSION_ID_ENV]: launch.coordinatorSessionId } : {}),
+		...(launch.coordinatorSessionBranch
+			? { [GJC_COORDINATOR_SESSION_BRANCH_ENV]: launch.coordinatorSessionBranch }
+			: {}),
+		...(launch.coordinatorSidecarSigningKey
+			? {
+					[GJC_COORDINATOR_SIDECAR_SIGNATURE_REQUIRED_ENV]: "true",
+					[GJC_COORDINATOR_SIDECAR_SIGNING_KEY_ENV]: launch.coordinatorSidecarSigningKey,
+					[GJC_COORDINATOR_SIDECAR_KEY_ID_ENV]: launch.coordinatorSidecarKeyId,
+				}
+			: {}),
+	};
+}
+
 function sessionLifecycleLaunchRequestFitsEnvironment(
+	broker: Broker,
 	launch: SessionLaunch,
 	operation: SessionLifecycleLaunchRequest["operation"],
 ): boolean {
@@ -1039,7 +1117,13 @@ function sessionLifecycleLaunchRequestFitsEnvironment(
 		terminationStartDeadlineAt: maxSafeInteger,
 		lifecycleCleanupDeadlineAt: maxSafeInteger,
 	});
-	return lifecycleRequestEnvironmentValueFits(JSON.stringify(request));
+	const serializedRequest = JSON.stringify(request);
+	if (!lifecycleRequestEnvironmentValueFits(serializedRequest)) return false;
+	const childEnvironment = {
+		...filterLifecycleInheritedEnvironment(lifecyclePreflightInheritedEnvironment(broker)),
+		...lifecycleHostEnvironmentAdditions(broker, launch, "00000000-0000-4000-8000-000000000000", serializedRequest),
+	};
+	return lifecycleEnvironmentBlockFits(childEnvironment);
 }
 
 const CREDENTIAL_NAME_PATTERN = /(?:token|secret|password|credential|api[_-]?key|auth|cookie)/iu;
@@ -1664,6 +1748,11 @@ export function prepareSpawnChildHostLaunch(
 	const stateRoot = defaultStateRoot(cwd);
 	const effectMarker = randomUUID();
 	const deadlines = deriveLifecycleDeadlines(input.receivedAt ?? Date.now(), DEFAULT_READINESS_TIMEOUT_MS);
+	const launch: SessionLaunch = {
+		id: childId,
+		cwd,
+		root: stateRoot,
+	};
 	const request: SessionLifecycleLaunchRequest = {
 		operation: "session.create",
 		sessionId: childId,
@@ -1679,25 +1768,17 @@ export function prepareSpawnChildHostLaunch(
 		throw new Error("Session lifecycle launch request exceeds the supported environment size.");
 	const cmd = command(broker);
 	const inherited = "kind" in cmd ? cmd.env : process.env;
-	const inheritedEnv = Object.fromEntries(
-		Object.entries(inherited).filter(
-			(entry): entry is [string, string] => entry[0] !== "GJC_MASTER_CAPABILITY" && typeof entry[1] === "string",
-		),
-	);
+	const inheritedEnv = filterLifecycleInheritedEnvironment(inherited);
+	const env = lifecycleHostEnvironmentAdditions(broker, launch, effectMarker, serializedRequest);
+	if (!lifecycleEnvironmentBlockFits({ ...inheritedEnv, ...env }))
+		throw new Error("Session lifecycle launch request exceeds the supported environment size.");
 	return {
 		childId,
 		cwd,
 		stateRoot,
 		argv: [cmd.file, ...cmd.args],
 		inheritedEnv,
-		env: {
-			GJC_AGENT_DIR: broker.settings.agentDir,
-			GJC_CODING_AGENT_DIR: broker.settings.agentDir,
-			GJC_SESSION_ID: childId,
-			GJC_STATE_ROOT: stateRoot,
-			GJC_LIFECYCLE_REQUEST_ID: effectMarker,
-			GJC_SDK_LIFECYCLE_REQUEST: serializedRequest,
-		},
+		env,
 		effectMarker,
 	};
 }
@@ -7039,7 +7120,7 @@ async function executeLifecycleResponse(
 					"Lifecycle worktree launches cannot carry a caller-supplied child deadline tuple.",
 				);
 			}
-			if (!sessionLifecycleLaunchRequestFitsEnvironment(launch, operation))
+			if (!sessionLifecycleLaunchRequestFitsEnvironment(broker, launch, operation))
 				return fail("invalid_input", "Session lifecycle launch request exceeds the supported environment size.");
 			const admitted = await broker.runStartup(queueWaitMs, timing, async admittedAt => {
 				const callerSuppliedDeadlines = suppliedDeadlineFields.some(value => value !== undefined);
@@ -7303,54 +7384,24 @@ async function executeLifecycleResponse(
 			const authorizedSpawn = broker.runSynchronousEffectWithFreshPublicationAuthority(() => {
 				const cmd = command(broker);
 				validateLifecycleExecutable(cmd.file);
-				const childEnvironment = Object.fromEntries(
-					Object.entries("kind" in cmd ? cmd.env : process.env).filter(
-						(entry): entry is [string, string] =>
-							entry[0] !== "GJC_MASTER_CAPABILITY" && typeof entry[1] === "string",
-					),
-				);
+				const serializedRequest = JSON.stringify(request);
+				const inherited = "kind" in cmd ? cmd.env : process.env;
+				const childEnvironment = {
+					...filterLifecycleInheritedEnvironment(inherited),
+					...lifecycleHostEnvironmentAdditions(broker, launch, effectMarker, serializedRequest),
+				};
+				if (
+					!lifecycleRequestEnvironmentValueFits(serializedRequest) ||
+					!lifecycleEnvironmentBlockFits(childEnvironment)
+				)
+					throw new Error("Session lifecycle launch request exceeds the supported environment size.");
 				return spawn(cmd.file, cmd.args, {
 					cwd: launch.cwd,
 					detached: true,
 					// The detached drainer owns the read side, so the host's stderr remains
 					// usable after this broker exits while the artifact stays bounded.
 					stdio: ["ignore", "ignore", childStderrSink?.drainer.stdin ?? "ignore"],
-					env: {
-						...childEnvironment,
-						GJC_AGENT_DIR: broker.settings.agentDir,
-						GJC_CODING_AGENT_DIR: broker.settings.agentDir,
-						GJC_SESSION_ID: launch.id,
-						GJC_STATE_ROOT: launch.root,
-						GJC_LIFECYCLE_REQUEST_ID: effectMarker,
-						GJC_SDK_LIFECYCLE_REQUEST: JSON.stringify(request),
-						// Coordinator-correlation env scoped to this designated launch only (#2549).
-						// The runtime sidecar reads these to write terminal state to the
-						// coordinator-shared file instead of an unread session-local fallback.
-						// The broker computes the file path from coordinatorStateDir + launch.id
-						// because the session ID is generated at spawn time.
-						...(launch.coordinatorStateDir
-							? {
-									[GJC_COORDINATOR_SESSION_STATE_FILE_ENV]: path.join(
-										launch.coordinatorStateDir,
-										"session-states",
-										`${launch.id}.json`,
-									),
-								}
-							: {}),
-						...(launch.coordinatorSessionId
-							? { [GJC_COORDINATOR_SESSION_ID_ENV]: launch.coordinatorSessionId }
-							: {}),
-						...(launch.coordinatorSessionBranch
-							? { [GJC_COORDINATOR_SESSION_BRANCH_ENV]: launch.coordinatorSessionBranch }
-							: {}),
-						...(launch.coordinatorSidecarSigningKey
-							? {
-									[GJC_COORDINATOR_SIDECAR_SIGNATURE_REQUIRED_ENV]: "true",
-									[GJC_COORDINATOR_SIDECAR_SIGNING_KEY_ENV]: launch.coordinatorSidecarSigningKey,
-									[GJC_COORDINATOR_SIDECAR_KEY_ID_ENV]: launch.coordinatorSidecarKeyId,
-								}
-							: {}),
-					},
+					env: childEnvironment,
 				});
 			});
 			if (!authorizedSpawn.authorized) {

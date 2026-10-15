@@ -43,9 +43,12 @@ import {
 } from "../src/sdk/broker/identity";
 import {
 	deriveLifecycleDeadlines,
+	lifecycleEnvironmentBlockFits,
+	prepareSpawnChildHostLaunch,
 	readSessionLifecycleLaunchRequest,
 	type SessionLifecycleLaunchRequest,
 	setLifecycleCommandResolverForTest,
+	setLifecycleHostPlatformForTest,
 	terminalUncertainStartupMessage,
 	waitForChildSpawn,
 } from "../src/sdk/broker/lifecycle";
@@ -541,6 +544,58 @@ it("SDK lifecycle launch request size includes JSON escaping and all serialized 
 	expect(() => readSessionLifecycleLaunchRequest(oversizedOtherFieldRequest)).toThrow(
 		"GJC_SDK_LIFECYCLE_REQUEST is invalid.",
 	);
+});
+
+it("preflights the complete Windows lifecycle child environment block", async () => {
+	const root = await temp();
+	const cwd = path.join(root, "workspace");
+	const agentDir = path.join(root, "agent");
+	const parentVariable = `GJC_TEST_LIFECYCLE_ENV_BLOCK_${process.pid}`;
+	const previousParent = process.env[parentVariable];
+	const previousCommand = process.env.GJC_SDK_SESSION_COMMAND;
+	const broker = new Broker({ agentDir });
+	try {
+		await fs.mkdir(cwd, { recursive: true });
+		process.env[parentVariable] = "p".repeat(12_000);
+		delete process.env.GJC_SDK_SESSION_COMMAND;
+		setLifecycleHostPlatformForTest("win32");
+		setLifecycleCommandResolverForTest(broker, () => ({
+			file: process.execPath,
+			args: ["-e", "process.exit(0)"],
+		}));
+
+		expect(lifecycleEnvironmentBlockFits({ A: "x".repeat(32_763) }, "win32")).toBe(true);
+		expect(lifecycleEnvironmentBlockFits({ A: "x".repeat(32_764) }, "win32")).toBe(false);
+		expect(lifecycleEnvironmentBlockFits({ A: "🦊".repeat(16_381) }, "win32")).toBe(true);
+		expect(lifecycleEnvironmentBlockFits({ A: "🦊".repeat(16_382) }, "win32")).toBe(false);
+		expect(lifecycleEnvironmentBlockFits({ A: "x".repeat(32_764) }, "linux")).toBe(true);
+		expect(() => prepareSpawnChildHostLaunch(broker, { cwd, modelId: "m".repeat(20_000) })).toThrow(
+			"Session lifecycle launch request exceeds the supported environment size.",
+		);
+
+		await broker.start();
+		const response = await broker.handleRequest(
+			"session.create",
+			{ cwd, env: { PAYLOAD: "x".repeat(20_000) } },
+			"windows-environment-block-preflight",
+		);
+		expect(response).toMatchObject({
+			ok: false,
+			error: {
+				code: "invalid_input",
+				message: "Session lifecycle launch request exceeds the supported environment size.",
+			},
+		});
+	} finally {
+		setLifecycleCommandResolverForTest(broker, undefined);
+		setLifecycleHostPlatformForTest(undefined);
+		if (previousParent === undefined) delete process.env[parentVariable];
+		else process.env[parentVariable] = previousParent;
+		if (previousCommand === undefined) delete process.env.GJC_SDK_SESSION_COMMAND;
+		else process.env.GJC_SDK_SESSION_COMMAND = previousCommand;
+		await broker.stop();
+		await fs.rm(root, { recursive: true, force: true });
+	}
 });
 
 it("SDK lifecycle explicit model pins reach the session host parser and validate shape", async () => {

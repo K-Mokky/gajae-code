@@ -7,7 +7,7 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { $env, $which, getPythonEnvDir, WhichCachePolicy } from "@gajae-code/utils";
+import { $which, getPythonEnvDir, WhichCachePolicy } from "@gajae-code/utils";
 import { withFileLock } from "../../config/file-lock";
 
 export const RLM_MANAGED_PYTHON_PACKAGES: readonly string[] = ["numpy", "pandas", "matplotlib", "polars"];
@@ -192,9 +192,9 @@ export function filterEnv(env: Record<string, string | undefined>): Record<strin
 /**
  * Detect virtual environment path from VIRTUAL_ENV or common locations.
  */
-export function resolveVenvPath(cwd: string): string | undefined {
-	if ($env.VIRTUAL_ENV) return $env.VIRTUAL_ENV;
-	if ($env.CONDA_PREFIX) return $env.CONDA_PREFIX;
+export function resolveVenvPath(cwd: string, env: Record<string, string | undefined>): string | undefined {
+	if (env.VIRTUAL_ENV) return env.VIRTUAL_ENV;
+	if (env.CONDA_PREFIX) return env.CONDA_PREFIX;
 	const candidates = [path.join(cwd, ".venv"), path.join(cwd, "venv")];
 	for (const candidate of candidates) {
 		if (fs.existsSync(candidate)) {
@@ -463,7 +463,7 @@ export function resolvePythonRuntime(
 	options: PythonRuntimeOptions = {},
 ): PythonRuntime {
 	const env = { ...baseEnv };
-	const venvPath = env.VIRTUAL_ENV ?? resolveVenvPath(cwd);
+	const venvPath = resolveVenvPath(cwd, env);
 
 	if (venvPath) {
 		const candidate = resolvePythonCandidateInVenv(venvPath);
@@ -502,7 +502,7 @@ export async function ensurePythonRuntime(
 ): Promise<PythonRuntime> {
 	if (options.managedWorkspaceVenv) {
 		const env = { ...baseEnv };
-		const venvPath = env.VIRTUAL_ENV ?? resolveVenvPath(cwd);
+		const venvPath = resolveVenvPath(cwd, env);
 		if (venvPath) {
 			const candidate = resolvePythonCandidateInVenv(venvPath);
 			if (fs.existsSync(candidate.pythonPath)) {
