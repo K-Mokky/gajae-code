@@ -1401,6 +1401,46 @@ describe("file lock cleanup failure handling (#2478)", () => {
 		expect(await fs.exists(lockPath)).toBe(false);
 	});
 
+	test.skipIf(process.platform === "win32")(
+		"preserves the last orphan-transition diagnosis while cancellation races with local-key resolution",
+		async () => {
+			const filePath = path.join(await makeTemp(), "cancelled-after-orphan-transition.json");
+			const lockPath = `${filePath}.lock`;
+			const transitionPath = `${lockPath}.removing`;
+			const infoPath = path.join(transitionPath, "info");
+			await fs.mkdir(transitionPath);
+			await Bun.write(infoPath, "");
+			const old = new Date(Date.now() - 120_000);
+			await fs.utimes(infoPath, old, old);
+			const controller = new AbortController();
+			const abortReason = new Error("acquisition deadline elapsed");
+			const realpath = fs.realpath;
+			let localKeyLookups = 0;
+			vi.spyOn(fs, "realpath").mockImplementation((async target => {
+				try {
+					return await realpath(target);
+				} catch (error) {
+					if (String(target) === lockPath && ++localKeyLookups === 2) controller.abort(abortReason);
+					throw error;
+				}
+			}) as typeof fs.realpath);
+			const failure = await acquireFileLock(filePath, {
+				signal: controller.signal,
+				retries: 3,
+				retryDelayMs: 1,
+			}).catch(error => error);
+			expect(failure).toBeInstanceOf(FileLockAcquireError);
+			expect(failure).toMatchObject({
+				code: "orphan_transition",
+				reason: "orphan_transition",
+				orphanPath: transitionPath,
+			});
+			expect(controller.signal.aborted).toBe(true);
+			expect(localKeyLookups).toBe(2);
+			expect(await fs.exists(transitionPath)).toBe(true);
+		},
+	);
+
 	test("releases a lock acquired after its acquisition signal was cancelled", async () => {
 		const filePath = path.join(await makeTemp(), "cancelled-after-acquire.json");
 		const controller = new AbortController();
