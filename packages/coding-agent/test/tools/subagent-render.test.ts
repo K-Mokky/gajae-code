@@ -577,6 +577,20 @@ describe("subagent await renderer body cache (PR2)", () => {
 		expect(lines.join("\n")).toContain("14 idle >30s");
 	});
 
+	it("does not infer idle time when live progress is not attached", () => {
+		const details: SubagentToolDetails = {
+			subagents: Array.from({ length: 15 }, (_, index) => {
+				const id = `0-NotAwaited${index}`;
+				return snapshot({ id, durationMs: 60_000 });
+			}),
+		};
+
+		const lines = renderWith(details, { expanded: false });
+		expect(lines).toHaveLength(1);
+		expect(lines.join("\n")).toContain("15 subagents running");
+		expect(lines.join("\n")).not.toContain("idle >30s");
+	});
+
 	it("keeps collapsed rendering detailed below the high-concurrency threshold", () => {
 		const details: SubagentToolDetails = {
 			subagents: Array.from({ length: 9 }, (_, index) => {

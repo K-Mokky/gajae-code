@@ -408,7 +408,7 @@ export const subagentToolRenderer = {
 					lastActivityMs === undefined ? snapshot.durationMs : Math.max(0, nowMs - lastActivityMs);
 				if (
 					snapshot.status === "running" &&
-					snapshot.liveProgressAvailable !== false &&
+					snapshot.liveProgressAvailable === true &&
 					idleDurationMs > SUBAGENT_IDLE_THRESHOLD_MS
 				) {
 					idleCount++;
