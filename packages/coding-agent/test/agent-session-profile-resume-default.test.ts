@@ -175,6 +175,11 @@ describe("AgentSession profile resume defaults", () => {
 		settings.overrideModelRoles({ default: `${base.provider}/${base.id}` });
 		session = makeSession(base, settings);
 		await activateModelProfile({ session, modelRegistry, settings, profileName: "claude-opus" });
+		const activatedDefaultChain = session.getConfiguredModelChainState("default");
+		expect(activatedDefaultChain?.origin).toBe("profile-activation");
+		const installedProfileState = session.getProfileInstalledOverrideState();
+		expect(installedProfileState.configuredDefaultChain).toBeDefined();
+		expect(installedProfileState.configuredDefaultChain).toEqual(activatedDefaultChain?.entries);
 
 		const storage = { recordModelUsage: (_selector: string) => {} };
 		const recordModelUsage = spyOn(storage, "recordModelUsage");
@@ -187,6 +192,9 @@ describe("AgentSession profile resume defaults", () => {
 
 			expect(session.model).toEqual(base);
 			expect(session.sessionManager.buildSessionContext().models.default).toBe("openai-codex/gpt-5.5");
+			expect(session.getProfileInstalledOverrideState().configuredDefaultChain).toEqual(
+				activatedDefaultChain?.entries,
+			);
 			expect(settings.getGlobal("modelProfile.default")).toBe("claude-opus");
 			expect(settings.getGlobal("modelRoles")).toBeUndefined();
 			expect(settings.getGlobal("task.agentModelOverrides")).toBeUndefined();

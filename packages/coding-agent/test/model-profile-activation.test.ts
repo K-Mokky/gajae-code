@@ -2639,10 +2639,27 @@ describe("model profile activation", () => {
 		const baseRegistry = fakeRegistry();
 		const registry = { ...baseRegistry, getAvailable: () => baseRegistry.getAll() };
 		const startupModel = model("provider-c", "cli-model");
-		const session = Object.assign(fakeSession(startupModel), { modelRegistry: registry as unknown as ModelRegistry });
+		let profileState: AgentSessionProfileInstalledOverrideState = {
+			modelRoles: new Map(),
+			agentModelOverrides: new Map(),
+			installedModelRoles: new Map(),
+			installedAgentModelOverrides: new Map(),
+			manualModelRoles: new Set(),
+			manualAgentModelOverrides: new Set(),
+			configuredAgentModelOverrides: new Set(),
+			preProfileModel: undefined,
+		};
+		const session = Object.assign(fakeSession(startupModel), {
+			modelRegistry: registry as unknown as ModelRegistry,
+			getProfileInstalledOverrideState: () => profileState,
+		});
 		const settings = Settings.isolated({ "modelProfile.default": "profile-a" });
 		settings.overrideModelRoles({ default: "cli-model-alias" });
 		await activateModelProfile({ session, modelRegistry: registry, settings, profileName: "profile-a" });
+		profileState = {
+			...profileState,
+			configuredDefaultChain: ["provider-c/default:low", "provider-a/default:high"],
+		};
 
 		session.model = startupModel;
 		session.setConfiguredModelChain("default", [`${startupModel.provider}/${startupModel.id}`], "startup-override");
@@ -2654,7 +2671,7 @@ describe("model profile activation", () => {
 			selector: "provider-c/executor",
 		});
 
-		expect(settings.getGlobal("modelRoles")?.default).toBe("provider-a/default:high");
+		expect(settings.getGlobal("modelRoles")?.default).toEqual(["provider-c/default:low", "provider-a/default:high"]);
 		expect(settings.getGlobal("modelProfile.default")).toBeUndefined();
 	});
 

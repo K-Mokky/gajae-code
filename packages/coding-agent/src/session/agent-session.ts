@@ -2717,6 +2717,7 @@ export interface AgentSessionProfileInstalledOverrideState {
 	manualModelRoles: ReadonlySet<string>;
 	manualAgentModelOverrides: ReadonlySet<string>;
 	configuredAgentModelOverrides: ReadonlySet<string>;
+	configuredDefaultChain?: readonly string[];
 	preProfileModel: Model | undefined;
 }
 
@@ -3725,6 +3726,7 @@ export class AgentSession {
 	#retryPromise: Promise<void> | undefined = undefined;
 	#retryResolve: (() => void) | undefined = undefined;
 	#defaultFallbackController: FallbackChainController | undefined;
+	#activeProfileConfiguredDefaultChain: readonly string[] | undefined;
 	#startupRecoveryBindingsRequired = false;
 	#fallbackTransitionGeneration = 0;
 	/** Managed escaped-non-ASCII retries issued for the current logical run. Bounded so a deterministic escaper cannot loop forever through un-charged fallback retries. */
@@ -19202,6 +19204,7 @@ export class AgentSession {
 			this.setConfiguredModelChain("default", [], "user-selection");
 		}
 		this.setActiveModelProfile(undefined);
+		this.#activeProfileConfiguredDefaultChain = undefined;
 		this.#preProfileModel = undefined;
 	}
 
@@ -19275,6 +19278,12 @@ export class AgentSession {
 		}
 		this.#activeProfileManualModelRoles = new Set(manual?.modelRoles ?? []);
 		this.#activeProfileManualAgentModelOverrides = new Set(manual?.agentModelOverrides ?? []);
+		const configuredDefaultChain = this.getConfiguredModelChainState("default");
+		this.#activeProfileConfiguredDefaultChain =
+			configuredDefaultChain?.origin === "profile-activation" &&
+			configuredDefaultChain.identity === this.getActiveModelProfile()
+				? [...configuredDefaultChain.entries]
+				: undefined;
 	}
 
 	getProfileInstalledOverrideState(): AgentSessionProfileInstalledOverrideState {
@@ -19286,6 +19295,9 @@ export class AgentSession {
 			manualModelRoles: new Set(this.#activeProfileManualModelRoles),
 			manualAgentModelOverrides: new Set(this.#activeProfileManualAgentModelOverrides),
 			configuredAgentModelOverrides: new Set(this.#activeProfileConfiguredAgentModelOverrides),
+			configuredDefaultChain: this.#activeProfileConfiguredDefaultChain
+				? [...this.#activeProfileConfiguredDefaultChain]
+				: undefined,
 			preProfileModel: this.#preProfileModel,
 		};
 	}
@@ -19298,6 +19310,9 @@ export class AgentSession {
 		this.#activeProfileManualModelRoles = new Set(state.manualModelRoles);
 		this.#activeProfileManualAgentModelOverrides = new Set(state.manualAgentModelOverrides);
 		this.#activeProfileConfiguredAgentModelOverrides = new Set(state.configuredAgentModelOverrides);
+		this.#activeProfileConfiguredDefaultChain = state.configuredDefaultChain
+			? [...state.configuredDefaultChain]
+			: undefined;
 		this.#preProfileModel = state.preProfileModel;
 	}
 
@@ -19310,6 +19325,7 @@ export class AgentSession {
 		this.#activeProfileManualModelRoles.clear();
 		this.#activeProfileManualAgentModelOverrides.clear();
 		this.#activeProfileConfiguredAgentModelOverrides.clear();
+		this.#activeProfileConfiguredDefaultChain = undefined;
 	}
 
 	/** Current profile-installed override keys, for deriving the activation base. */

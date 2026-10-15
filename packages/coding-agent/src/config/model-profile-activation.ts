@@ -261,6 +261,7 @@ export interface MaterializeModelProfileAssignmentOptions {
 		| "setConfiguredModelChain"
 		| "setActiveModelProfile"
 		| "getActiveModelProfile"
+		| "getProfileInstalledOverrideState"
 		| "getDefaultFallbackRuntimeState"
 		| "restoreDefaultFallbackRuntimeState"
 		| "modelRegistry"
@@ -283,6 +284,7 @@ export interface MaterializeModelProfileAssignmentsOptions {
 		| "setConfiguredModelChain"
 		| "setActiveModelProfile"
 		| "getActiveModelProfile"
+		| "getProfileInstalledOverrideState"
 		| "getDefaultFallbackRuntimeState"
 		| "restoreDefaultFallbackRuntimeState"
 		| "modelRegistry"
@@ -319,10 +321,17 @@ function modelRolesForMaterialization(
 	if (defaultChain?.origin !== "startup-override" || !defaultChain.entries[0]) return modelRoles;
 
 	// The merged runtime roles can still contain the CLI model; materialize the
-	// profile's configured default (or the pre-existing global default) instead.
+	// profile's activated default chain (or pre-existing global default) instead.
 	const activeProfile = options.session.getActiveModelProfile?.() ?? options.settings.get("modelProfile.default");
 	const profile = activeProfile ? options.session.modelRegistry?.getModelProfile?.(activeProfile) : undefined;
-	const profileDefault = profile ? resolveProfileBindings(profile).defaultSelector : undefined;
+	const activatedDefaultChain = options.session.getProfileInstalledOverrideState?.().configuredDefaultChain;
+	const profileDefault = activatedDefaultChain?.length
+		? activatedDefaultChain.length === 1
+			? activatedDefaultChain[0]
+			: [...activatedDefaultChain]
+		: profile
+			? resolveProfileBindings(profile).defaultSelector
+			: undefined;
 	const configuredDefault = profileDefault ?? options.settings.getGlobal("modelRoles")?.default;
 	if (configuredDefault === undefined) delete modelRoles.default;
 	else modelRoles.default = configuredDefault;
