@@ -15,6 +15,7 @@ const MAX_AWAIT_TIMEOUT_MS = 60 * 60 * 1000;
 const MAX_AWAIT_HEARTBEAT_MS = 60_000;
 export const SUBAGENT_COMPACT_THRESHOLD = 10;
 export const SUBAGENT_COMPACT_MIN_REFRESH_MS = 1_000;
+export const SUBAGENT_IDLE_THRESHOLD_MS = 30_000;
 /**
  * Bounded cadence for await liveness: even when the rendered-state signature is
  * stable (a running subagent emitting no new progress), the await panel re-emits
@@ -554,7 +555,7 @@ export class SubagentTool implements AgentTool<typeof subagentSchema, SubagentTo
 					return;
 				}
 				const result = this.#progressResult(manager, records, true);
-				const signature = subagentAwaitRenderedStateSignature(result.details?.subagents ?? []);
+				const signature = subagentAwaitRenderedStateSignature(result.details?.subagents ?? [], undefined, t);
 				const livenessDue = force || t - lastEmitMs >= livenessIntervalMs;
 				if (!livenessDue && signature === lastEmittedSignature) return;
 				lastEmittedSignature = signature;
@@ -1131,9 +1132,10 @@ function previewJobOutput(
  * Time-derived fields are intentionally excluded so the panel does not churn while
  * idle (the child's last-event timestamp is included; it moves only on real
  * activity): raw durations (`durationMs`), current-tool elapsed (`currentToolStartMs`),
- * and retry countdowns (`retryState.startedAtMs`) are omitted. Idle duration and
- * countdown ticking is sacrificed by design; every real transition still changes
- * the signature.
+ * and retry countdowns (`retryState.startedAtMs`) are omitted. The await producer
+ * supplies `nowMs` to include only each live snapshot's idle-threshold state, so the
+ * signature changes when the compact idle count changes without tracking elapsed
+ * time on every heartbeat. Countdown ticking remains excluded by design.
  */
 /** Shared cadence for await progress refreshes and rendered last-activity age. */
 export const SUBAGENT_ACTIVITY_BUCKET_MS = 5_000;
@@ -1141,12 +1143,22 @@ export const SUBAGENT_ACTIVITY_BUCKET_MS = 5_000;
 export function subagentAwaitRenderedStateSignature(
 	subagents: readonly SubagentSnapshot[],
 	receipt?: Pick<SubagentToolDetails, "awaitOutcome" | "interrupted">,
+	/** Producer clock; omitted by renderer/cache callers to avoid time churn. */
+	nowMs?: number,
 ): string {
 	return JSON.stringify({
 		awaitOutcome: receipt?.awaitOutcome ?? null,
 		interrupted: receipt?.interrupted === true,
+		idleStates: nowMs === undefined ? null : subagents.map(snapshot => isSubagentIdleAt(snapshot, nowMs)),
 		subagents: subagents.map(canonicalizeSnapshotForSignature),
 	});
+}
+
+function isSubagentIdleAt(snapshot: SubagentSnapshot, nowMs: number): boolean {
+	if (snapshot.status !== "running" || snapshot.liveProgressAvailable !== true) return false;
+	const lastActivityMs = snapshot.progress?.lastActivityMs;
+	const idleDurationMs = lastActivityMs === undefined ? snapshot.durationMs : Math.max(0, nowMs - lastActivityMs);
+	return idleDurationMs > SUBAGENT_IDLE_THRESHOLD_MS;
 }
 
 function canonicalizeSnapshotForSignature(snapshot: SubagentSnapshot): unknown {

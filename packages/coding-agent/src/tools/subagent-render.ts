@@ -25,6 +25,7 @@ import {
 import {
 	SUBAGENT_ACTIVITY_BUCKET_MS,
 	SUBAGENT_COMPACT_THRESHOLD,
+	SUBAGENT_IDLE_THRESHOLD_MS,
 	type SubagentLiveProgress,
 	type SubagentSnapshot,
 	type SubagentToolDetails,
@@ -36,7 +37,6 @@ export { subagentAwaitRenderedStateSignature } from "./subagent";
 const PREVIEW_LINES_COLLAPSED = 1;
 const PREVIEW_LINES_EXPANDED = 4;
 const PREVIEW_LINE_WIDTH = 80;
-const SUBAGENT_IDLE_THRESHOLD_MS = 30_000;
 
 /**
  * Bounded, content-addressed cache for each subagent's heavy body lines (the

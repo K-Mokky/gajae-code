@@ -558,6 +558,27 @@ describe("subagentAwaitRenderedStateSignature", () => {
 		expect(at(15_000)).not.toBe(at(10_000));
 	});
 
+	it("changes the emitted signature only when a live subagent crosses the idle threshold", () => {
+		const withActivity = makeSnapshot({
+			id: "0-A",
+			liveProgressAvailable: true,
+			progress: { id: "0-A", status: "running", lastActivityMs: 0 },
+		});
+		const at = (nowMs: number) => subagentAwaitRenderedStateSignature([withActivity], undefined, nowMs);
+		expect(at(29_999)).toBe(at(30_000));
+		expect(at(30_001)).not.toBe(at(30_000));
+		expect(at(60_000)).toBe(at(30_001));
+
+		const noActivityYet = makeSnapshot({ id: "0-FirstEvent", liveProgressAvailable: true, durationMs: 30_000 });
+		const firstEventAtThreshold = subagentAwaitRenderedStateSignature([noActivityYet], undefined, 0);
+		const firstEventPastThreshold = subagentAwaitRenderedStateSignature(
+			[{ ...noActivityYet, durationMs: 30_001 }],
+			undefined,
+			0,
+		);
+		expect(firstEventPastThreshold).not.toBe(firstEventAtThreshold);
+	});
+
 	it("changes when only approved fastMode flips", () => {
 		const slow = makeSnapshot({ id: "0-A", progress: { id: "0-A", status: "running", fastMode: false } });
 		const fast = makeSnapshot({ id: "0-A", progress: { id: "0-A", status: "running", fastMode: true } });
@@ -570,6 +591,47 @@ describe("subagent await emit gating", () => {
 	afterEach(() => {
 		vi.useRealTimers();
 		AsyncJobManager.resetForTests();
+	});
+
+	it("emits when a live subagent crosses the idle threshold before the liveness interval", async () => {
+		vi.useFakeTimers();
+		const manager = createManager();
+		const tool = new SubagentTool(createSession());
+		let clock = 29_900;
+		const restore = tool.withLivenessClock(() => clock);
+		const control = Promise.withResolvers<void>();
+		const id = "0-Idle";
+		const jobId = manager.register("task", id, async () => control.promise.then(() => "done"), {
+			id: "job-idle",
+			ownerId: "0-Main",
+			metadata: { subagent: { id, agent: "executor", agentSource: "bundled" } },
+		});
+		manager.registerSubagentRecord(runningRecord(id, jobId));
+		manager.recordSubagentProgress(id, makeProgress({ id, currentTool: "read", lastActivityMs: 0 }));
+
+		const abortController = new AbortController();
+		const updates = vi.fn();
+		const pending = tool.execute(
+			"await-idle-threshold",
+			{ action: "await", ids: [id], heartbeat_ms: 100, timeout_ms: 3_600_000 },
+			abortController.signal,
+			updates,
+		);
+		await Promise.resolve();
+		expect(updates).toHaveBeenCalledTimes(1);
+
+		clock = 30_000;
+		vi.advanceTimersByTime(100);
+		expect(updates).toHaveBeenCalledTimes(1);
+		clock = 30_100;
+		vi.advanceTimersByTime(100);
+		expect(updates).toHaveBeenCalledTimes(2);
+
+		abortController.abort();
+		control.resolve();
+		await pending;
+		restore();
+		await manager.dispose({ timeoutMs: 100 });
 	});
 
 	it("emits only the initial update for idle concurrent awaits, then exactly once per real change", async () => {
