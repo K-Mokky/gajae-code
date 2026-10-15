@@ -2777,6 +2777,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 							conventionalCacheServerNames.size > 0 ? await getOwnedMcpToolCache() : null,
 							{
 								sharedPoolIdleMs: settings.get("mcp.sharedPoolIdleMs"),
+								sessionEnvironment: options.sessionEnvironment,
 								toolCacheServerNames: conventionalCacheServerNames,
 								allowUntrustedProjectStdio: projectMcp.allowProjectStdio,
 							},
@@ -3733,6 +3734,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			const owned = new MCPManager(cwd, null, {
 				toolsOnly: true,
 				sharedPoolIdleMs: settings.get("mcp.sharedPoolIdleMs"),
+				sessionEnvironment: options.sessionEnvironment,
 				...(lifecycleMcpStartupTimeoutMs !== undefined
 					? { maxStartupTimeoutMs: lifecycleMcpStartupTimeoutMs }
 					: {}),
@@ -3851,6 +3853,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 						conventionalCacheServerNames.size > 0 ? await getOwnedMcpToolCache() : null,
 						{
 							sharedPoolIdleMs: settings.get("mcp.sharedPoolIdleMs"),
+							sessionEnvironment: options.sessionEnvironment,
 							toolCacheServerNames: conventionalCacheServerNames,
 							allowUntrustedProjectStdio: projectMcp.allowProjectStdio,
 							...(maxPluginMcpStartupWaitMs === undefined

@@ -13,6 +13,7 @@ import { logger } from "@gajae-code/utils";
 import type { SourceMeta } from "../capability/types";
 import * as configValue from "../config/resolve-config-value";
 import type { CustomTool } from "../extensibility/custom-tools/types";
+import type { SessionLaunchEnvironment } from "../sdk/session-environment";
 import type { AuthStorage, OAuthCredential } from "../session/auth-storage";
 import {
 	getPrompt,
@@ -370,6 +371,8 @@ export interface MCPManagerOptions {
 	pool?: MCPConnectionPool;
 	/** Session identity included in per-session pool keys. */
 	sessionId?: string;
+	/** Session subprocess environment applied to MCP stdio children. */
+	sessionEnvironment?: SessionLaunchEnvironment;
 	/** Idle retention for shared pool entries. */
 	sharedPoolIdleMs?: number;
 	/** Limit tool-cache reads and writes to this manager's conventional servers. */
@@ -444,6 +447,7 @@ export class MCPManager {
 	#connections = new Map<string, MCPServerConnection>();
 	readonly #pool: MCPConnectionPool;
 	readonly #sessionId: string;
+	readonly #sessionEnvironment: SessionLaunchEnvironment | undefined;
 	readonly #leases = new Map<string, MCPPoolLease>();
 	readonly #leaseEventUnsubscribers = new Map<string, () => void>();
 	readonly #leaseByConnection = new WeakMap<MCPServerConnection, MCPPoolLease>();
@@ -660,6 +664,7 @@ export class MCPManager {
 			keyConfig: originalConfig,
 			sharingMode: sharedEligible ? "shared" : "per-session",
 			sessionId: sharedEligible ? undefined : this.#sessionId,
+			sessionEnvironment: this.#sessionEnvironment,
 			signal: connectionAbort.signal,
 			advertiseRoots: !this.#toolsOnly,
 			effectiveCwd: resolvedConfig.type === "stdio" ? (resolvedConfig.cwd ?? this.cwd) : this.cwd,
@@ -1033,6 +1038,7 @@ export class MCPManager {
 		this.cwd = canonicalMCPWorkingDirectory(this.cwd);
 		this.#pool = options.pool ?? new MCPConnectionPool({ sharedPoolIdleMs: options.sharedPoolIdleMs });
 		this.#sessionId = options.sessionId ?? crypto.randomUUID();
+		this.#sessionEnvironment = options.sessionEnvironment;
 	}
 
 	isToolsOnly(): boolean {
@@ -2225,6 +2231,7 @@ export class MCPManager {
 						? "shared"
 						: "per-session",
 				sessionId: config.sharing === "shared" ? undefined : this.#sessionId,
+				sessionEnvironment: this.#sessionEnvironment,
 				signal: abort.signal,
 				advertiseRoots: false,
 				effectiveCwd: resolved.type === "stdio" ? (resolved.cwd ?? this.cwd) : this.cwd,

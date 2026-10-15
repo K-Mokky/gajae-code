@@ -9240,7 +9240,7 @@ test("production broker session.create authenticates a source-workspace v3 nativ
 	}
 }, 30_000);
 
-test("broker isolates per-session env in bash and restores it after resume", async () => {
+test("broker applies session environment overlays to bash and MCP subprocesses across resume", async () => {
 	if (process.platform !== "linux") return;
 	const root = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-sdk-session-environment-"));
 	const agentDir = path.join(root, "agent");
@@ -9250,6 +9250,25 @@ test("broker isolates per-session env in bash and restores it after resume", asy
 	const previousGhToken = process.env.GH_TOKEN;
 	const brokerSecret = "session-environment-broker-secret";
 	const projectEnvSecret = "session-environment-project-dotenv-secret";
+	const projectEnvUser = "session-environment-project-dotenv-user";
+	const mcpEnvironmentReport = path.join(root, "mcp-environment.json");
+	const mcpProbeScript = `
+const fs = require("node:fs");
+const readline = require("node:readline");
+fs.writeFileSync(${JSON.stringify(mcpEnvironmentReport)}, JSON.stringify({ user: process.env.USER ?? null, path: process.env.PATH ?? null }));
+const input = readline.createInterface({ input: process.stdin });
+input.on("line", line => {
+	const message = JSON.parse(line);
+	if (message.method === "initialize") {
+		process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { protocolVersion: "2025-03-26", capabilities: { tools: {} }, serverInfo: { name: "environment-probe", version: "1" } } }) + "\\n");
+	} else if (message.method === "tools/list") {
+		process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { tools: [] } }) + "\\n");
+	} else if (message.id !== undefined) {
+		process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: {} }) + "\\n");
+	}
+});
+setInterval(() => {}, 1000);
+`;
 	process.env.GH_TOKEN = brokerSecret;
 	const broker = new Broker({ agentDir });
 	let isolatedClient: SdkClient | undefined;
@@ -9257,7 +9276,7 @@ test("broker isolates per-session env in bash and restores it after resume", asy
 	let resumedClient: SdkClient | undefined;
 	try {
 		await fs.mkdir(guardedBin, { recursive: true });
-		await fs.writeFile(path.join(root, ".env"), `GH_TOKEN=${projectEnvSecret}\n`, "utf8");
+		await fs.writeFile(path.join(root, ".env"), `GH_TOKEN=${projectEnvSecret}\nUSER=${projectEnvUser}\n`, "utf8");
 		await fs.writeFile(guardedGh, "#!/bin/sh\nprintf 'guarded-gh\\n'\n", "utf8");
 		await fs.chmod(guardedGh, 0o755);
 		await broker.start();
@@ -9294,8 +9313,17 @@ test("broker isolates per-session env in bash and restores it after resume", asy
 			{
 				cwd: root,
 				readinessTimeoutMs: 25_000,
+				mcpServers: [
+					{
+						type: "stdio",
+						name: "environment-probe",
+						command: process.execPath,
+						args: ["--no-env-file", "-e", mcpProbeScript],
+						env: { USER: projectEnvUser },
+					},
+				],
 				env: { PATH: `${guardedBin}:${inheritedPath}` },
-				unsetEnv: ["GH_TOKEN"],
+				unsetEnv: ["GH_TOKEN", "USER"],
 			},
 			"session-environment-isolated-create",
 		);
@@ -9308,6 +9336,13 @@ test("broker isolates per-session env in bash and restores it after resume", asy
 			timeoutMs: 10_000,
 			reconnectAttempts: 0,
 		});
+		const mcpEnvironment = await waitFor(async () => {
+			const report = await Bun.file(mcpEnvironmentReport)
+				.text()
+				.catch(() => "");
+			return report ? (JSON.parse(report) as { user: string | null; path: string | null }) : undefined;
+		}, "MCP child environment report");
+		expect(mcpEnvironment).toEqual({ user: null, path: `${guardedBin}:${inheritedPath}` });
 
 		const siblingCreated = await broker.handleRequest(
 			"session.create",
@@ -9350,7 +9385,7 @@ test("broker isolates per-session env in bash and restores it after resume", asy
 			broker.index.findSessionLaunchEnvironment(isolatedSession.sessionId, path.join(root, ".gjc", "state")),
 		).toEqual({
 			env: { PATH: `${guardedBin}:${inheritedPath}` },
-			unsetEnv: ["GH_TOKEN"],
+			unsetEnv: ["GH_TOKEN", "USER"],
 		});
 		const sessionDir = SessionManager.getDefaultSessionDir(root, agentDir);
 		const savedSession = (await SessionManager.list(root, sessionDir)).find(
@@ -9434,7 +9469,7 @@ test("broker isolates per-session env in bash and restores it after resume", asy
 			() => undefined,
 		);
 		const inspectJson = JSON.stringify(inspected);
-		expect(inspectJson).toContain('"environment":{"set":["PATH"],"unset":["GH_TOKEN"]}');
+		expect(inspectJson).toContain('"environment":{"set":["PATH"],"unset":["GH_TOKEN","USER"]}');
 		expect(inspectJson).not.toContain(guardedBin);
 		expect(inspectJson).not.toContain(brokerSecret);
 	} finally {
