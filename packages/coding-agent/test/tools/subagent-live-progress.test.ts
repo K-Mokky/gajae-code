@@ -634,6 +634,7 @@ describe("subagent await emit gating", () => {
 		const tool = new SubagentTool(createSession());
 		const ids = Array.from({ length: 15 }, (_, index) => `0-Busy${index}`);
 		const controls = ids.map(() => Promise.withResolvers<void>());
+		const records: SubagentRecord[] = [];
 		ids.forEach((id, index) => {
 			const jobId = manager.register(
 				"task",
@@ -648,7 +649,9 @@ describe("subagent await emit gating", () => {
 					metadata: { subagent: { id, agent: "executor", agentSource: "bundled" } },
 				},
 			);
-			manager.registerSubagentRecord(runningRecord(id, jobId));
+			const record = runningRecord(id, jobId);
+			records.push(record);
+			manager.registerSubagentRecord(record);
 			manager.recordSubagentProgress(id, makeProgress({ id, currentTool: "read" }));
 		});
 
@@ -670,6 +673,24 @@ describe("subagent await emit gating", () => {
 		expect(spy).toHaveBeenCalledTimes(2);
 		const emitted = spy.mock.calls.at(-1)?.[0] as { details?: SubagentToolDetails } | undefined;
 		expect(emitted?.details?.subagents?.every(snapshot => snapshot.progress?.currentTool === "bash")).toBe(true);
+
+		// Once six agents finish, the nine remaining agents resume the requested 100 ms cadence.
+		for (const record of records.slice(0, 6)) record.status = "completed";
+		vi.advanceTimersByTime(99);
+		expect(spy).toHaveBeenCalledTimes(2);
+		vi.advanceTimersByTime(1);
+		expect(spy).toHaveBeenCalledTimes(3);
+		const reduced = spy.mock.calls.at(-1)?.[0] as { details?: SubagentToolDetails } | undefined;
+		expect(reduced?.details?.subagents?.filter(snapshot => snapshot.status === "running")).toHaveLength(9);
+		for (const id of ids.slice(6)) manager.recordSubagentProgress(id, makeProgress({ id, currentTool: "edit" }));
+		vi.advanceTimersByTime(100);
+		expect(spy).toHaveBeenCalledTimes(4);
+		const resumed = spy.mock.calls.at(-1)?.[0] as { details?: SubagentToolDetails } | undefined;
+		expect(
+			resumed?.details?.subagents
+				?.filter(snapshot => snapshot.status === "running")
+				.every(snapshot => snapshot.progress?.currentTool === "edit"),
+		).toBe(true);
 
 		ac.abort();
 		for (const control of controls) control.resolve();

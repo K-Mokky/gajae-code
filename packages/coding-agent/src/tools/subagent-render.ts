@@ -404,12 +404,12 @@ export const subagentToolRenderer = {
 			let idleCount = 0;
 			for (const snapshot of subagents) {
 				const lastActivityMs = snapshot.progress?.lastActivityMs;
+				const idleDurationMs =
+					lastActivityMs === undefined ? snapshot.durationMs : Math.max(0, nowMs - lastActivityMs);
 				if (
 					snapshot.status === "running" &&
 					snapshot.liveProgressAvailable !== false &&
-					snapshot.progress?.status === "running" &&
-					lastActivityMs !== undefined &&
-					nowMs - lastActivityMs > SUBAGENT_IDLE_THRESHOLD_MS
+					idleDurationMs > SUBAGENT_IDLE_THRESHOLD_MS
 				) {
 					idleCount++;
 				}

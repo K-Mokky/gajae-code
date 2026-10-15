@@ -514,11 +514,6 @@ export class SubagentTool implements AgentTool<typeof subagentSchema, SubagentTo
 		const watchedJobIds = targets.map(target => target.jobId).filter((jobId): jobId is string => jobId !== null);
 		const watchHandle = manager.watchJobGenerations(watchedJobIds);
 		const heartbeatMs = params.heartbeat_ms === undefined ? 500 : params.heartbeat_ms;
-		const runningCount = records.filter(record => record.status === "running").length;
-		const progressRefreshMs =
-			heartbeatMs > 0 && runningCount >= SUBAGENT_COMPACT_THRESHOLD
-				? Math.max(heartbeatMs, SUBAGENT_COMPACT_MIN_REFRESH_MS)
-				: heartbeatMs;
 		// Liveness interval: force a re-emit even when the rendered-state signature
 		// is stable so a healthy wait never looks like a hung session (#4465). The
 		// `#livenessNowMs` clock is injected for deterministic tests; `Date.now`
@@ -546,9 +541,20 @@ export class SubagentTool implements AgentTool<typeof subagentSchema, SubagentTo
 		const emitIfChanged = (force: boolean): void => {
 			if (!onUpdate || streamingDisabled) return;
 			try {
+				const t = nowMs();
+				const runningCount = records.filter(record => record.status === "running").length;
+				// Re-evaluate the cap every heartbeat so it lifts as agents finish
+				// and the compact group drops below its threshold.
+				if (
+					!force &&
+					heartbeatMs > 0 &&
+					runningCount >= SUBAGENT_COMPACT_THRESHOLD &&
+					t - lastEmitMs < SUBAGENT_COMPACT_MIN_REFRESH_MS
+				) {
+					return;
+				}
 				const result = this.#progressResult(manager, records, true);
 				const signature = subagentAwaitRenderedStateSignature(result.details?.subagents ?? []);
-				const t = nowMs();
 				const livenessDue = force || t - lastEmitMs >= livenessIntervalMs;
 				if (!livenessDue && signature === lastEmittedSignature) return;
 				lastEmittedSignature = signature;
@@ -577,8 +583,7 @@ export class SubagentTool implements AgentTool<typeof subagentSchema, SubagentTo
 		let terminalJobIds: string[] | undefined;
 		const steeringWaitAbort = new AbortController();
 		try {
-			progressTimer =
-				onUpdate && progressRefreshMs > 0 ? setInterval(() => emitIfChanged(false), progressRefreshMs) : undefined;
+			progressTimer = onUpdate && heartbeatMs > 0 ? setInterval(() => emitIfChanged(false), heartbeatMs) : undefined;
 			stopProgressTimer = () => {
 				if (progressTimer) clearInterval(progressTimer);
 				progressTimer = undefined;

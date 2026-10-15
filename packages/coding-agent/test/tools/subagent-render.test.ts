@@ -560,6 +560,23 @@ describe("subagent await renderer body cache (PR2)", () => {
 		}
 	});
 
+	it("counts live agents with no first progress timestamp as idle by job duration", () => {
+		const details: SubagentToolDetails = {
+			subagents: Array.from({ length: 15 }, (_, index) => {
+				const id = `0-NoActivity${index}`;
+				return snapshot({
+					id,
+					durationMs: index === 0 ? 30_000 : 30_001,
+					liveProgressAvailable: true,
+				});
+			}),
+		};
+
+		const lines = renderWith(details, { expanded: false });
+		expect(lines).toHaveLength(1);
+		expect(lines.join("\n")).toContain("14 idle >30s");
+	});
+
 	it("keeps collapsed rendering detailed below the high-concurrency threshold", () => {
 		const details: SubagentToolDetails = {
 			subagents: Array.from({ length: 9 }, (_, index) => {
