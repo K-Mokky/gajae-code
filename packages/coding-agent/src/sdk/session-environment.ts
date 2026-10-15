@@ -9,7 +9,7 @@ export interface SessionEnvironmentNames {
 }
 
 const ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/u;
-const RESERVED_ENV_PREFIX = /^(?:GJC_|PI_|BUN_OPTIONS$|NODE_OPTIONS$)/iu;
+const RESERVED_ENV_PREFIX = /^(?:GJC_|PI_|BUN_OPTIONS$|NODE_OPTIONS$|LD_|DYLD_)/iu;
 const MAX_ENV_ENTRIES = 100;
 const MAX_ENV_VALUE_LENGTH = 32_768;
 const MAX_ENV_BYTES = 256 * 1024;

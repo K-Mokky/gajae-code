@@ -6099,6 +6099,11 @@ async function launchInput(
 		await broker.index.refresh();
 		sessionEnvironment = broker.index.findSessionLaunchEnvironment(requested, resolvedRoot);
 	}
+	if (
+		sessionEnvironment !== undefined &&
+		!isValidSessionLaunchEnvironment(sessionEnvironment.env, sessionEnvironment.unsetEnv)
+	)
+		return fail("invalid_input", "Session launch environment is invalid.");
 	if (input.mcpServers !== undefined && !isSessionLifecycleMcpServers(input.mcpServers))
 		return fail("invalid_input", "mcpServers must contain unique valid stdio, HTTP, or SSE server definitions.");
 	const mcpServers = input.mcpServers as SessionLifecycleMcpServer[] | undefined;

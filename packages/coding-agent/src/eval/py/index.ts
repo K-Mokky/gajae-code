@@ -20,7 +20,13 @@ export default {
 	highlightLang: "python",
 
 	async isAvailable(session: ToolSession): Promise<boolean> {
-		const availability = await checkPythonKernelAvailability(session.cwd, undefined, undefined, session.settings);
+		const availability = await checkPythonKernelAvailability(
+			session.cwd,
+			undefined,
+			undefined,
+			session.settings,
+			session.sessionEnvironment,
+		);
 		return availability.ok;
 	},
 

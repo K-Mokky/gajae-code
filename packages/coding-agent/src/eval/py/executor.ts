@@ -1334,6 +1334,7 @@ async function ensureKernelAvailable(cwd: string, options: PythonExecutorOptions
 			deadlineMs: options.deadlineMs,
 		},
 		options.settings,
+		options.sessionEnvironment,
 	);
 	throwIfExecutionCancelled(options);
 	if (!availability.ok) {

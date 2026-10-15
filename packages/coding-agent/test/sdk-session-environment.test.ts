@@ -41,6 +41,11 @@ test("session launch environment rejects invalid, conflicting, and host-control 
 	expect(isValidSessionLaunchEnvironment(undefined, ["PI_SESSION_FILE"])).toBe(false);
 	expect(isValidSessionLaunchEnvironment({ BUN_OPTIONS: "--preload=./bootstrap.js" }, undefined)).toBe(false);
 	expect(isValidSessionLaunchEnvironment({ NODE_OPTIONS: "--require=./bootstrap.js" }, undefined)).toBe(false);
+	expect(isValidSessionLaunchEnvironment({ LD_PRELOAD: "/tmp/bootstrap.so" }, undefined)).toBe(false);
+	expect(isValidSessionLaunchEnvironment({ LD_LIBRARY_PATH: "/tmp/native-libs" }, undefined)).toBe(false);
+	expect(isValidSessionLaunchEnvironment(undefined, ["LD_AUDIT"])).toBe(false);
+	expect(isValidSessionLaunchEnvironment({ DYLD_INSERT_LIBRARIES: "/tmp/bootstrap.dylib" }, undefined)).toBe(false);
+	expect(isValidSessionLaunchEnvironment({ DYLD_LIBRARY_PATH: "/tmp/native-libs" }, undefined)).toBe(false);
 	expect(isValidSessionLaunchEnvironment({ FOO: "bad\0value" }, undefined)).toBe(false);
 });
 

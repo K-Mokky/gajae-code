@@ -182,6 +182,7 @@ export async function checkPythonKernelAvailability(
 	runtimeOptions?: PythonRuntimeOptions,
 	lifecycle?: PythonRuntimeLifecycleOptions,
 	settingsOverride?: Settings,
+	sessionEnvironment?: SessionLaunchEnvironment,
 ): Promise<PythonKernelAvailability> {
 	if (isBunTestRuntime() || resolvePythonSkipCheck($env)) {
 		return { ok: true };
@@ -196,11 +197,13 @@ export async function checkPythonKernelAvailability(
 			(await waitForLifecycle(Settings.init(), lifecycle, "Python kernel settings initialization"));
 		const { env } = settings.getShellConfig();
 		const baseEnv = filterEnv(env);
+		applySessionLaunchEnvironment(baseEnv, sessionEnvironment);
 		const runtime = await ensurePythonRuntime(cwd, baseEnv, runtimeOptions, lifecycle);
 		const probeEnv: Record<string, string> = {};
 		for (const [key, value] of Object.entries(runtime.env)) {
 			if (typeof value === "string") probeEnv[key] = value;
 		}
+		applySessionLaunchEnvironment(probeEnv, sessionEnvironment);
 		const remainingMs = getRemainingTimeMs(lifecycle?.deadlineMs);
 		if (remainingMs !== undefined && remainingMs <= 0) {
 			throw createAbortError("TimeoutError", "Python kernel availability check timed out");
@@ -293,6 +296,7 @@ export class PythonKernel {
 			options.runtimeOptions,
 			{ signal: options.signal, deadlineMs: options.deadlineMs },
 			options.settings,
+			options.sessionEnvironment,
 		);
 		throwIfLifecycleEnded(options, "Python kernel startup");
 		if (!availability.ok) {

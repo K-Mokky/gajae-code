@@ -9271,6 +9271,13 @@ test("broker isolates per-session env in bash and restores it after resume", asy
 		expect(
 			await broker.handleRequest(
 				"session.create",
+				{ cwd: root, env: { LD_PRELOAD: "/tmp/blocked-session-bootstrap.so" } },
+				"session-environment-loader-control-create",
+			),
+		).toMatchObject({ ok: false, error: { code: "invalid_input" } });
+		expect(
+			await broker.handleRequest(
+				"session.create",
 				{ cwd: root, env: { FIRST: "x".repeat(20_000), SECOND: "y".repeat(20_000) } },
 				"session-environment-oversized-create",
 			),
@@ -9350,6 +9357,27 @@ test("broker isolates per-session env in bash and restores it after resume", asy
 			session => session.id === isolatedSession.sessionId,
 		);
 		if (!savedSession) throw new Error("Expected the isolated session transcript to remain resumable.");
+		const persistedEnvironment = vi
+			.spyOn(broker.index, "findSessionLaunchEnvironment")
+			.mockReturnValue({ env: { LD_PRELOAD: "/tmp/blocked-session-bootstrap.so" } });
+		try {
+			expect(
+				await broker.handleRequest(
+					"session.resume",
+					{
+						cwd: root,
+						sessionId: isolatedSession.sessionId,
+						sessionPath: savedSession.path,
+					},
+					"session-environment-invalid-persisted-resume",
+				),
+			).toMatchObject({
+				ok: false,
+				error: { code: "invalid_input", message: "Session launch environment is invalid." },
+			});
+		} finally {
+			persistedEnvironment.mockRestore();
+		}
 		for (const [index, environmentFields] of [{ env: null }, { unsetEnv: null }].entries()) {
 			expect(
 				await broker.handleRequest(
