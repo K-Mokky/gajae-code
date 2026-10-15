@@ -207,6 +207,8 @@ describe("AgentSession profile resume defaults", () => {
 
 	it("keeps a durable aliased profile active through a startup model override", async () => {
 		const { base } = resolveModels();
+		const profileDefault = modelRegistry.find("openai-codex", "gpt-6.1-sol");
+		if (!profileDefault) throw new Error("Expected the codex-medium profile default model to exist");
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
 			"modelProfile.default": "codex-standard",
@@ -223,6 +225,14 @@ describe("AgentSession profile resume defaults", () => {
 			cause: "startup-override",
 		});
 
+		expect(session.getActiveModelProfile()).toBe("codex-medium");
+		expect(settings.getGlobal("modelProfile.default")).toBe("codex-standard");
+		expect(settings.get("task.agentModelOverrides")).toEqual(activeAgentOverrides);
+
+		await session.setModelTemporary(profileDefault, undefined, { cause: "restore" });
+		await session.newSession();
+
+		expect(session.model).toMatchObject({ provider: profileDefault.provider, id: profileDefault.id });
 		expect(session.getActiveModelProfile()).toBe("codex-medium");
 		expect(settings.getGlobal("modelProfile.default")).toBe("codex-standard");
 		expect(settings.get("task.agentModelOverrides")).toEqual(activeAgentOverrides);

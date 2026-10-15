@@ -18076,9 +18076,10 @@ export class AgentSession {
 		// The successor session must not inherit the predecessor's profile marker
 		// or its runtime role overrides; a durable `modelProfile.default` is
 		// reapplied by the startup policy on a fresh launch instead.
+		const activeProfile = this.getActiveModelProfile();
 		const droppingSessionOnlyProfile =
-			this.getActiveModelProfile() !== undefined &&
-			this.settings.get("modelProfile.default") !== this.getActiveModelProfile();
+			activeProfile !== undefined &&
+			!this.#modelProfileNamesMatch(this.settings.get("modelProfile.default"), activeProfile);
 		const preProfileModel = this.#preProfileModel;
 		this.#resetSessionScopedModelProfileState();
 		// A dropped session-only profile must not leak its concrete model into
