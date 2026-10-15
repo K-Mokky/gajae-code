@@ -318,16 +318,8 @@ function modelRolesForMaterialization(
 	const defaultChain = options.session.getConfiguredModelChainState?.("default");
 	if (defaultChain?.origin !== "startup-override" || !defaultChain.entries[0]) return modelRoles;
 
-	const runtimeDefault = normalizeModelSelectorValue(options.settings.getOverride("modelRoles")?.default);
-	if (
-		runtimeDefault.length !== 1 ||
-		splitSelectorThinkingSuffix(runtimeDefault[0] ?? "")
-			.selector.trim()
-			.toLowerCase() !== splitSelectorThinkingSuffix(defaultChain.entries[0]).selector.trim().toLowerCase()
-	) {
-		return modelRoles;
-	}
-
+	// The merged runtime roles can still contain the CLI model; materialize the
+	// profile's configured default (or the pre-existing global default) instead.
 	const activeProfile = options.session.getActiveModelProfile?.() ?? options.settings.get("modelProfile.default");
 	const profile = activeProfile ? options.session.modelRegistry?.getModelProfile?.(activeProfile) : undefined;
 	const profileDefault = profile ? resolveProfileBindings(profile).defaultSelector : undefined;

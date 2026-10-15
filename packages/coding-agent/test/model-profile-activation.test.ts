@@ -2641,7 +2641,7 @@ describe("model profile activation", () => {
 		const startupModel = model("provider-c", "cli-model");
 		const session = Object.assign(fakeSession(startupModel), { modelRegistry: registry as unknown as ModelRegistry });
 		const settings = Settings.isolated({ "modelProfile.default": "profile-a" });
-		settings.overrideModelRoles({ default: `${startupModel.provider}/${startupModel.id}` });
+		settings.overrideModelRoles({ default: "cli-model-alias" });
 		await activateModelProfile({ session, modelRegistry: registry, settings, profileName: "profile-a" });
 
 		session.model = startupModel;
@@ -2670,7 +2670,7 @@ describe("model profile activation", () => {
 		const startupModel = model("provider-c", "cli-model");
 		const session = Object.assign(fakeSession(startupModel), { modelRegistry: registry as unknown as ModelRegistry });
 		const settings = Settings.isolated({ "modelProfile.default": profile.name });
-		settings.overrideModelRoles({ default: `${startupModel.provider}/${startupModel.id}` });
+		settings.overrideModelRoles({ default: "cli-model-alias" });
 		await activateModelProfile({ session, modelRegistry: registry, settings, profileName: profile.name });
 
 		session.model = startupModel;
