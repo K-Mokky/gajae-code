@@ -642,6 +642,44 @@ describe("subagent await emit gating", () => {
 		await manager.dispose({ timeoutMs: 100 });
 	});
 
+	it("does not add idle-threshold updates to detailed awaits", async () => {
+		vi.useFakeTimers();
+		const manager = createManager();
+		const tool = new SubagentTool(createSession());
+		let clock = 0;
+		const restore = tool.withLivenessClock(() => clock);
+		const control = Promise.withResolvers<void>();
+		const id = "0-DetailedIdle";
+		const jobId = manager.register("task", id, async () => control.promise.then(() => "done"), {
+			id: "job-detailed-idle",
+			ownerId: "0-Main",
+			metadata: { subagent: { id, agent: "executor", agentSource: "bundled" } },
+		});
+		manager.registerSubagentRecord(runningRecord(id, jobId));
+		manager.recordSubagentProgress(id, makeProgress({ id, currentTool: "read", lastActivityMs: 0 }));
+
+		const abortController = new AbortController();
+		const updates = vi.fn();
+		const pending = tool.execute(
+			"await-detailed-idle",
+			{ action: "await", ids: [id], heartbeat_ms: 60_000, timeout_ms: 3_600_000 },
+			abortController.signal,
+			updates,
+		);
+		await Promise.resolve();
+		expect(updates).toHaveBeenCalledTimes(1);
+
+		clock = 60_000;
+		vi.advanceTimersByTime(60_000);
+		expect(updates).toHaveBeenCalledTimes(1);
+
+		abortController.abort();
+		control.resolve();
+		await pending;
+		restore();
+		await manager.dispose({ timeoutMs: 100 });
+	});
+
 	it("emits only the initial update for idle concurrent awaits, then exactly once per real change", async () => {
 		vi.useFakeTimers();
 		const manager = createManager();

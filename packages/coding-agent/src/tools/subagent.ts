@@ -555,7 +555,12 @@ export class SubagentTool implements AgentTool<typeof subagentSchema, SubagentTo
 					return;
 				}
 				const result = this.#progressResult(manager, records, true);
-				const signature = subagentAwaitRenderedStateSignature(result.details?.subagents ?? [], undefined, t);
+				const signatureNowMs = runningCount >= SUBAGENT_COMPACT_THRESHOLD ? t : undefined;
+				const signature = subagentAwaitRenderedStateSignature(
+					result.details?.subagents ?? [],
+					undefined,
+					signatureNowMs,
+				);
 				const livenessDue = force || t - lastEmitMs >= livenessIntervalMs;
 				if (!livenessDue && signature === lastEmittedSignature) return;
 				lastEmittedSignature = signature;
