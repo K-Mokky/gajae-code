@@ -19153,9 +19153,19 @@ export class AgentSession {
 	 * configured `modelBindings` (also installed into these two override slots
 	 * once at startup) are not profile-owned and must survive the transition.
 	 */
+	#modelProfileNamesMatch(left: string | undefined, right: string | undefined): boolean {
+		if (left === undefined || right === undefined) return left === right;
+		const profiles = this.#modelRegistry.getModelProfiles?.() ?? new Map<string, unknown>();
+		return resolveModelProfileName(left, profiles) === resolveModelProfileName(right, profiles);
+	}
+
 	#resetSessionScopedModelProfileState(options?: { preserveDefaultConfiguredChain?: boolean; force?: boolean }): void {
 		const persistedProfile = this.settings.get("modelProfile.default");
-		if (!options?.force && persistedProfile !== undefined && persistedProfile === this.getActiveModelProfile())
+		if (
+			!options?.force &&
+			persistedProfile !== undefined &&
+			this.#modelProfileNamesMatch(persistedProfile, this.getActiveModelProfile())
+		)
 			return;
 		const hadInstalledKeys =
 			this.#activeProfileInstalledRoles.size > 0 || this.#activeProfileInstalledAgentOverrides.size > 0;
@@ -19366,7 +19376,8 @@ export class AgentSession {
 	materializeActiveDefaultModelProfileAssignment(model: Model): boolean {
 		// A merged read could let a project-scoped value authorize durable global writes.
 		const persistedProfile = this.settings.getGlobal("modelProfile.default");
-		if (persistedProfile === undefined || persistedProfile !== this.getActiveModelProfile()) return false;
+		if (persistedProfile === undefined || !this.#modelProfileNamesMatch(persistedProfile, this.getActiveModelProfile()))
+			return false;
 		return materializeActiveModelProfileAssignment({
 			session: this,
 			settings: this.settings,
@@ -19446,7 +19457,7 @@ export class AgentSession {
 		// marker is superseded: the concrete selection is now the durable
 		// default, so the next launch must not reapply the stale profile.
 		const persistedProfile = this.settings.get("modelProfile.default");
-		if (persistedProfile !== undefined && persistedProfile !== this.getActiveModelProfile()) {
+		if (persistedProfile !== undefined && !this.#modelProfileNamesMatch(persistedProfile, this.getActiveModelProfile())) {
 			this.settings.unset("modelProfile.default");
 			this.settings.clearOverride("modelProfile.default");
 		}
@@ -19462,7 +19473,7 @@ export class AgentSession {
 	 */
 	clearSessionOnlyModelProfileState(): void {
 		const persistedProfile = this.settings.get("modelProfile.default");
-		if (persistedProfile !== undefined && persistedProfile !== this.getActiveModelProfile()) {
+		if (persistedProfile !== undefined && !this.#modelProfileNamesMatch(persistedProfile, this.getActiveModelProfile())) {
 			this.settings.unset("modelProfile.default");
 			this.settings.clearOverride("modelProfile.default");
 		}

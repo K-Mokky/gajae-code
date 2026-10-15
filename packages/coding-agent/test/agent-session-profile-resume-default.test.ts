@@ -205,6 +205,29 @@ describe("AgentSession profile resume defaults", () => {
 		}
 	});
 
+	it("keeps a durable aliased profile active through a startup model override", async () => {
+		const { base } = resolveModels();
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"modelProfile.default": "codex-standard",
+		});
+		session = makeSession(base, settings);
+		await activateModelProfile({ session, modelRegistry, settings, profileName: "codex-standard" });
+		const activeAgentOverrides = { ...settings.get("task.agentModelOverrides") };
+
+		expect(session.getActiveModelProfile()).toBe("codex-medium");
+		expect(Object.keys(activeAgentOverrides).length).toBeGreaterThan(0);
+
+		await session.setModelTemporary(base, ThinkingLevel.High, {
+			persistAsSessionDefault: true,
+			cause: "startup-override",
+		});
+
+		expect(session.getActiveModelProfile()).toBe("codex-medium");
+		expect(settings.getGlobal("modelProfile.default")).toBe("codex-standard");
+		expect(settings.get("task.agentModelOverrides")).toEqual(activeAgentOverrides);
+	});
+
 	it("cancels a guarded profile model change after a newer user selection", async () => {
 		const { base, profileMain } = resolveModels();
 		session = makeSession(base);
