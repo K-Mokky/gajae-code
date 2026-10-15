@@ -5,6 +5,7 @@
  */
 
 import type { executeShell as executeShellFn } from "@gajae-code/natives";
+import { getEnvValue } from "@gajae-code/utils";
 
 let executeShellLoad: Promise<typeof executeShellFn> | undefined;
 
@@ -32,6 +33,7 @@ export async function resolveConfigValue(
 	cacheScope?: string,
 	environment?: Record<string, string | undefined>,
 	unsetEnv?: readonly string[],
+	platform: NodeJS.Platform = process.platform,
 ): Promise<string | undefined> {
 	if (config.startsWith("!")) {
 		if (environment !== undefined) {
@@ -40,7 +42,7 @@ export async function resolveConfigValue(
 		}
 		return await executeCommand(config, cacheScope);
 	}
-	const envValue = environment === undefined ? process.env[config] : environment[config];
+	const envValue = environment === undefined ? process.env[config] : getEnvValue(environment, config, platform);
 	return envValue || config;
 }
 

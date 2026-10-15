@@ -1,8 +1,8 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { $which, isEnoent, logger } from "@gajae-code/utils";
+import { isEnoent, logger } from "@gajae-code/utils";
 import { createSessionChildEnvironment, type SessionLaunchEnvironment } from "../../../sdk/session-environment";
-import type { DetectedRunner, RunnerTask, TaskRunner } from "../runner";
+import { type DetectedRunner, type RunnerTask, type TaskRunner, whichWithSessionEnvironment } from "../runner";
 
 export interface CargoMetadataTarget {
 	kind?: string[];
@@ -122,7 +122,7 @@ export const cargoRunner: TaskRunner = {
 	label: "Cargo",
 	async detect(cwd: string, sessionEnvironment?: SessionLaunchEnvironment): Promise<DetectedRunner | null> {
 		try {
-			if (!$which("cargo")) return null;
+			if (!whichWithSessionEnvironment("cargo", sessionEnvironment)) return null;
 			if (!(await hasCargoManifest(cwd))) return null;
 			const metadata = await readCargoMetadata(cwd, sessionEnvironment);
 			if (!metadata) return null;

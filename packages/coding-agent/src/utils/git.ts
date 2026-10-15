@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { $which, hasFsCode, isEnoent, Snowflake } from "@gajae-code/utils";
+import { $which, getEnvValue, hasFsCode, isEnoent, Snowflake } from "@gajae-code/utils";
 import {
 	parseDiffHunks as parseCommitDiffHunks,
 	parseFileDiffs,
@@ -9,7 +9,11 @@ import {
 	parseNumstat,
 } from "../commit/git/diff";
 import type { FileDiff, FileHunks, NumstatEntry } from "../commit/types";
-import { createSessionChildEnvironment, getCurrentSessionLaunchEnvironment } from "../sdk/session-environment";
+import {
+	createSessionChildEnvironment,
+	getCurrentSessionLaunchEnvironment,
+	hasSessionPathOverride,
+} from "../sdk/session-environment";
 import { ToolAbortError, ToolError, throwIfAborted } from "../tools/tool-errors";
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -1584,6 +1588,15 @@ export interface GhCommandOptions {
 	trimOutput?: boolean;
 }
 
+function currentGitHubCli(): { command: string | null; environment: Record<string, string> | undefined } {
+	const launchEnvironment = getCurrentSessionLaunchEnvironment();
+	const environment = createSessionChildEnvironment(launchEnvironment);
+	const command = !hasSessionPathOverride(launchEnvironment)
+		? $which("gh")
+		: $which("gh", { PATH: environment === undefined ? "" : (getEnvValue(environment, "PATH") ?? "") });
+	return { command, environment };
+}
+
 function formatGhFailure(args: readonly string[], stdout: string, stderr: string, options?: GhCommandOptions): string {
 	const message = (stderr || stdout).trim();
 	if (message.includes("gh auth login") || message.includes("not logged into any GitHub hosts")) {
@@ -1604,18 +1617,20 @@ function formatGhFailure(args: readonly string[], stdout: string, stderr: string
 export const github = {
 	/** Check if `gh` CLI is installed. */
 	available(): boolean {
-		return Boolean($which("gh"));
+		return currentGitHubCli().command !== null;
 	},
 
 	/** Run a raw `gh` CLI command. Does not throw on non-zero exit. */
 	async run(cwd: string, args: string[], signal?: AbortSignal, options?: GhCommandOptions): Promise<GhCommandResult> {
 		throwIfAborted(signal);
-		if (!$which("gh")) {
+		const { command, environment } = currentGitHubCli();
+		if (!command) {
 			throw new ToolError("GitHub CLI (gh) is not installed. Install it from https://cli.github.com/.");
 		}
 		try {
-			const child = Bun.spawn(["gh", ...args], {
+			const child = Bun.spawn([command, ...args], {
 				cwd,
+				env: environment,
 				stdin: "ignore",
 				stdout: "pipe",
 				stderr: "pipe",

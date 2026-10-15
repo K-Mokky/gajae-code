@@ -5,6 +5,7 @@ import { SessionIndex } from "../src/sdk/broker/session-index";
 import {
 	applySessionLaunchEnvironment,
 	createSessionChildEnvironment,
+	hasSessionPathOverride,
 	isValidSessionLaunchEnvironment,
 	type SessionLaunchEnvironment,
 	sessionEnvironmentNames,
@@ -97,6 +98,13 @@ test("session launch environment matches Windows keys case-insensitively and POS
 	});
 	expect(isValidSessionLaunchEnvironment({ PATH: "upper", path: "lower" }, undefined, "linux")).toBe(true);
 	expect(isValidSessionLaunchEnvironment({ PATH: "upper", path: "lower" }, undefined, "win32")).toBe(false);
+});
+
+test("session PATH detection follows platform-specific environment names", () => {
+	expect(hasSessionPathOverride({ env: { Path: "/session/bin" } }, "win32")).toBe(true);
+	expect(hasSessionPathOverride({ env: { Path: "/session/bin" } }, "linux")).toBe(false);
+	expect(hasSessionPathOverride({ unsetEnv: ["PATH"] }, "linux")).toBe(true);
+	expect(hasSessionPathOverride(undefined, "win32")).toBe(false);
 });
 
 test("session launch environment survives session-index rotation and is absent from public rows", async () => {

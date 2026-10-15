@@ -1,8 +1,8 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { $which, isEnoent, logger } from "@gajae-code/utils";
+import { isEnoent, logger } from "@gajae-code/utils";
 import { createSessionChildEnvironment, type SessionLaunchEnvironment } from "../../../sdk/session-environment";
-import type { DetectedRunner, RunnerTask, TaskRunner } from "../runner";
+import { type DetectedRunner, type RunnerTask, type TaskRunner, whichWithSessionEnvironment } from "../runner";
 
 interface TaskListEntry {
 	name?: string;
@@ -65,7 +65,7 @@ export const taskRunner: TaskRunner = {
 	label: "Task",
 	async detect(cwd: string, sessionEnvironment?: SessionLaunchEnvironment): Promise<DetectedRunner | null> {
 		try {
-			if (!$which("task")) return null;
+			if (!whichWithSessionEnvironment("task", sessionEnvironment)) return null;
 			if (!(await hasTaskfile(cwd))) return null;
 			const tasks = await listTaskfileTasks(cwd, sessionEnvironment);
 			if (!tasks || tasks.length === 0) return null;

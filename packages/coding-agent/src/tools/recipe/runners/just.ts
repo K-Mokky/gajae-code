@@ -1,8 +1,8 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { $which, isEnoent, logger } from "@gajae-code/utils";
+import { isEnoent, logger } from "@gajae-code/utils";
 import { createSessionChildEnvironment, type SessionLaunchEnvironment } from "../../../sdk/session-environment";
-import type { DetectedRunner, RunnerTask, TaskRunner } from "../runner";
+import { type DetectedRunner, type RunnerTask, type TaskRunner, whichWithSessionEnvironment } from "../runner";
 
 interface JustDumpRecipeRaw {
 	name?: string;
@@ -66,7 +66,7 @@ export const justRunner: TaskRunner = {
 	label: "Just",
 	async detect(cwd: string, sessionEnvironment?: SessionLaunchEnvironment): Promise<DetectedRunner | null> {
 		try {
-			if (!$which("just")) return null;
+			if (!whichWithSessionEnvironment("just", sessionEnvironment)) return null;
 			if (!(await hasJustfile(cwd))) return null;
 			const tasks = await dumpJustTasks(cwd, sessionEnvironment);
 			if (!tasks || tasks.length === 0) return null;

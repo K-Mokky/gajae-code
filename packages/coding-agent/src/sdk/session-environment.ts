@@ -88,6 +88,20 @@ export function getCurrentSessionLaunchEnvironment(): SessionLaunchEnvironment |
 	return currentProcessSessionEnvironment;
 }
 
+export function hasSessionPathOverride(
+	environment: SessionLaunchEnvironment | undefined,
+	platform: NodeJS.Platform = process.platform,
+): boolean {
+	const isPathName = (name: string): boolean =>
+		platform === "win32" ? name.toUpperCase() === "PATH" : name === "PATH";
+	return Object.keys(environment?.env ?? {}).some(isPathName) || (environment?.unsetEnv ?? []).some(isPathName);
+}
+
+/** Creates a child environment from the active session overlay, when one exists. */
+export function createCurrentSessionChildEnvironment(): Record<string, string> | undefined {
+	return createSessionChildEnvironment(currentProcessSessionEnvironment);
+}
+
 /** Creates an isolated child environment with the validated session overlay applied. */
 export function createSessionChildEnvironment(
 	launchEnvironment: SessionLaunchEnvironment | undefined,

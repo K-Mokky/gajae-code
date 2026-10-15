@@ -1,4 +1,9 @@
-import type { SessionLaunchEnvironment } from "../../sdk/session-environment";
+import { $which, getEnvValue } from "@gajae-code/utils";
+import {
+	createSessionChildEnvironment,
+	hasSessionPathOverride,
+	type SessionLaunchEnvironment,
+} from "../../sdk/session-environment";
 import { ToolError } from "../tool-errors";
 
 export interface RunnerTask {
@@ -30,6 +35,15 @@ export interface TaskRunner {
 	 * Returns null when this runner does not apply.
 	 */
 	detect(cwd: string, sessionEnvironment?: SessionLaunchEnvironment): Promise<DetectedRunner | null>;
+}
+
+export function whichWithSessionEnvironment(
+	command: string,
+	sessionEnvironment?: SessionLaunchEnvironment,
+): string | null {
+	if (!hasSessionPathOverride(sessionEnvironment)) return $which(command);
+	const environment = createSessionChildEnvironment(sessionEnvironment);
+	return $which(command, { PATH: environment === undefined ? "" : (getEnvValue(environment, "PATH") ?? "") });
 }
 
 interface ParsedOp {

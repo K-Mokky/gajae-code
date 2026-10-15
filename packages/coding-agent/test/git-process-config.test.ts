@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import type { Subprocess } from "bun";
+import { getCurrentSessionLaunchEnvironment, setCurrentSessionLaunchEnvironment } from "../src/sdk/session-environment";
 import * as git from "../src/utils/git";
 
 type SpawnOptions = Bun.SpawnOptions.SpawnOptions<
@@ -86,5 +90,38 @@ describe("git subprocess config", () => {
 			"--",
 			"tracked.txt",
 		]);
+	});
+
+	it("resolves gh from the session PATH and applies its environment overlay", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-gh-session-env-"));
+		const binDir = path.join(tempDir, "bin");
+		await fs.mkdir(binDir);
+		const ghPath = path.join(binDir, process.platform === "win32" ? "gh.exe" : "gh");
+		await Bun.write(ghPath, "");
+		if (process.platform !== "win32") await fs.chmod(ghPath, 0o755);
+
+		const previousEnvironment = getCurrentSessionLaunchEnvironment();
+		const previousToken = process.env.GH_TOKEN;
+		process.env.GH_TOKEN = "inherited-token";
+		setCurrentSessionLaunchEnvironment({
+			env: { PATH: binDir, SESSION_ENV_MARKER: "session-value" },
+			unsetEnv: ["GH_TOKEN"],
+		});
+		const spawnCalls: SpawnCall[] = [];
+		vi.spyOn(Bun, "spawn").mockImplementation(createSpawnMock(spawnCalls));
+
+		try {
+			expect(git.github.available()).toBe(true);
+			await git.github.run(tempDir, ["--version"]);
+			expect(spawnCalls).toHaveLength(1);
+			expect(spawnCalls[0]?.cmd[0]).toBe(ghPath);
+			expect(spawnCalls[0]?.options.env?.SESSION_ENV_MARKER).toBe("session-value");
+			expect(spawnCalls[0]?.options.env?.GH_TOKEN).toBeUndefined();
+		} finally {
+			setCurrentSessionLaunchEnvironment(previousEnvironment);
+			if (previousToken === undefined) delete process.env.GH_TOKEN;
+			else process.env.GH_TOKEN = previousToken;
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
 	});
 });
