@@ -36,6 +36,7 @@ import { truncateToVisualLines } from "../modes/components/visual-truncate";
 import { highlightCode, type Theme } from "../modes/theme/theme";
 import bashDescription from "../prompts/tools/bash.md" with { type: "text" };
 import { renderSpawnTable, runSdkSpawn, type SdkSpawnArgs } from "../sdk/cli/master-cli";
+import { applySessionLaunchEnvironment, sessionLaunchEnvironmentUnsetNames } from "../sdk/session-environment";
 import type {
 	ClientBridgeTerminalExitStatus,
 	ClientBridgeTerminalHandle,
@@ -1488,7 +1489,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		// still read its OWN id from GJC_SESSION_ID (issue #5374).
 		const masterOwnerSessionId = this.session.getMasterOwnerSessionId?.();
 		const commandEnvOverrides = masterCommandEnvOverrides(expandedEnv, directMasterSpawn);
-		const resolvedEnv = {
+		const resolvedEnv: Record<string, string> = {
 			...buildGjcRuntimeSessionEnv({
 				sessionFile: null,
 				sessionId: this.session.getSessionId?.(),
@@ -1497,13 +1498,19 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			...(sessionAgentDir && (!explicitAgentDirOverride || directMasterSpawn)
 				? { GJC_CODING_AGENT_DIR: sessionAgentDir }
 				: {}),
-			...commandEnvOverrides,
+		};
+		applySessionLaunchEnvironment(resolvedEnv, this.session.sessionEnvironment);
+		applySessionLaunchEnvironment(resolvedEnv, { env: commandEnvOverrides });
+		Object.assign(resolvedEnv, {
 			...(masterCapability ? { [MASTER_CAPABILITY_ENV]: masterCapability } : {}),
 			...(masterOwnerSessionId ? { [MASTER_OWNER_SESSION_ENV]: masterOwnerSessionId } : {}),
 			...(this.session.bashRestrictionProfile === "read-only" ? READ_ONLY_BASH_ENV : {}),
 			...(allowedPrefixes && allowedPrefixes.length > 0 ? { [GJC_RESTRICTED_ROLE_AGENT_BASH_ENV]: "1" } : {}),
-		};
-		const unsetEnv = COORDINATOR_ONLY_BASH_ENV.filter(name => !Object.hasOwn(expandedEnv ?? {}, name));
+		});
+		const unsetEnv = [
+			...sessionLaunchEnvironmentUnsetNames(this.session.sessionEnvironment),
+			...COORDINATOR_ONLY_BASH_ENV.filter(name => !Object.hasOwn(expandedEnv ?? {}, name)),
+		];
 
 		if (cwd?.includes("://") || cwd?.includes("local:/")) {
 			cwd = await expandInternalUrls(cwd, { ...internalUrlOptions, noEscape: true });

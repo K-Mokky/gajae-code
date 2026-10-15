@@ -878,8 +878,9 @@ function isSessionLifecycleMcpServers(value: unknown): value is SessionLifecycle
 	);
 }
 
-// Bound the complete env entry, well below Linux's 128 KiB per-argument limit.
-const MAX_LIFECYCLE_REQUEST_ENV_ENTRY_BYTES = 64 * 1024;
+// Keep the whole entry below Windows' per-variable limit, including its name
+// and terminator. The UTF-8 byte bound also limits Windows UTF-16 code units.
+const MAX_LIFECYCLE_REQUEST_ENV_ENTRY_BYTES = 24 * 1024;
 const LIFECYCLE_REQUEST_ENV_NAME = "GJC_SDK_LIFECYCLE_REQUEST";
 
 function lifecycleRequestEnvironmentValueFits(value: string): boolean {
@@ -6026,15 +6027,16 @@ async function launchInput(
 		typeof input.target === "object" && input.target !== null && !Array.isArray(input.target)
 			? (input.target as Record<string, unknown>)
 			: undefined;
-	const hasTopLevelEnvironment = input.env !== undefined || input.unsetEnv !== undefined;
-	const hasTargetEnvironment = target?.env !== undefined || target?.unsetEnv !== undefined;
+	const hasTopLevelEnvironment = Object.hasOwn(input, "env") || Object.hasOwn(input, "unsetEnv");
+	const hasTargetEnvironment =
+		target !== undefined && (Object.hasOwn(target, "env") || Object.hasOwn(target, "unsetEnv"));
 	if (hasTopLevelEnvironment && hasTargetEnvironment)
 		return fail("invalid_input", "Session launch environment fields must be supplied in one location.");
-	const env = input.env ?? target?.env;
-	const unsetEnv = input.unsetEnv ?? target?.unsetEnv;
+	const env = hasTopLevelEnvironment ? input.env : target?.env;
+	const unsetEnv = hasTopLevelEnvironment ? input.unsetEnv : target?.unsetEnv;
 	if (!isValidSessionLaunchEnvironment(env, unsetEnv))
 		return fail("invalid_input", "Session launch environment is invalid.");
-	const hasRequestedEnvironment = env !== undefined || unsetEnv !== undefined;
+	const hasRequestedEnvironment = hasTopLevelEnvironment || hasTargetEnvironment;
 	let sessionEnvironment = sessionLaunchEnvironment(env, unsetEnv);
 	const requestedCwd = lifecycleCwd(input);
 	if (!requestedCwd) return fail("invalid_input", "A target path is required.");

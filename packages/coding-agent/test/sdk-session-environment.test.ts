@@ -39,6 +39,8 @@ test("session launch environment rejects invalid, conflicting, and host-control 
 	expect(isValidSessionLaunchEnvironment({ "bad=name": "value" }, undefined)).toBe(false);
 	expect(isValidSessionLaunchEnvironment({ GJC_STATE_ROOT: "/outside" }, undefined)).toBe(false);
 	expect(isValidSessionLaunchEnvironment(undefined, ["PI_SESSION_FILE"])).toBe(false);
+	expect(isValidSessionLaunchEnvironment({ BUN_OPTIONS: "--preload=./bootstrap.js" }, undefined)).toBe(false);
+	expect(isValidSessionLaunchEnvironment({ NODE_OPTIONS: "--require=./bootstrap.js" }, undefined)).toBe(false);
 	expect(isValidSessionLaunchEnvironment({ FOO: "bad\0value" }, undefined)).toBe(false);
 });
 
@@ -102,6 +104,52 @@ test("session launch environment survives session-index rotation and is absent f
 			env: { SESSION_SECRET: "stored-secret", PATH: "/guarded/bin" },
 			unsetEnv: ["GH_TOKEN"],
 		});
+	} finally {
+		await fs.rm(agentDir, { recursive: true, force: true });
+	}
+});
+
+test("session deletion purges persisted launch-environment values while retaining registration evidence", async () => {
+	const agentDir = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-session-environment-delete-"));
+	const cwd = path.join(agentDir, "workspace");
+	const stateRoot = path.join(cwd, ".gjc", "state");
+	const locator = { cwd, worktreeRoot: null, stateRoot };
+	const indexDir = path.join(agentDir, "sdk", "sessions");
+	try {
+		const index = await new SessionIndex(agentDir).open();
+		await index.append({
+			type: "host_registered",
+			sessionId: "deleted-environment",
+			locator,
+			endpointGeneration: 1,
+			pid: process.pid,
+			sessionEnvironment: { env: { SESSION_SECRET: "deleted-session-secret" } },
+		});
+		await index.append({
+			type: "session_deleted",
+			sessionId: "deleted-environment",
+			locator,
+			endpointGeneration: 1,
+			pid: process.pid,
+		});
+
+		const snapshotText = await fs.readFile(path.join(indexDir, "index.snapshot.json"), "utf8");
+		const logText = await fs.readFile(path.join(indexDir, "index.jsonl"), "utf8");
+		const snapshot = JSON.parse(snapshotText) as { events: Array<Record<string, unknown>> };
+		const retainedRegistration = snapshot.events.find(event => event.type === "host_registered");
+		expect(retainedRegistration).toMatchObject({ sessionId: "deleted-environment", pid: process.pid });
+		expect(retainedRegistration).not.toHaveProperty("sessionEnvironment");
+		expect(snapshotText).not.toContain("deleted-session-secret");
+		expect(logText).not.toContain("deleted-session-secret");
+		expect(index.findSessionLaunchEnvironment("deleted-environment", stateRoot)).toBeUndefined();
+
+		const reopened = await new SessionIndex(agentDir).open();
+		expect(reopened.findSessionLaunchEnvironment("deleted-environment", stateRoot)).toBeUndefined();
+		expect(reopened.listSessions().sessions).not.toContainEqual(
+			expect.objectContaining({
+				sessionId: "deleted-environment",
+			}),
+		);
 	} finally {
 		await fs.rm(agentDir, { recursive: true, force: true });
 	}

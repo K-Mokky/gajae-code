@@ -9229,6 +9229,7 @@ test("broker isolates per-session env in bash and restores it after resume", asy
 	const inheritedPath = process.env.PATH ?? "/usr/bin:/bin";
 	const previousGhToken = process.env.GH_TOKEN;
 	const brokerSecret = "session-environment-broker-secret";
+	const projectEnvSecret = "session-environment-project-dotenv-secret";
 	process.env.GH_TOKEN = brokerSecret;
 	const broker = new Broker({ agentDir });
 	let isolatedClient: SdkClient | undefined;
@@ -9236,6 +9237,7 @@ test("broker isolates per-session env in bash and restores it after resume", asy
 	let resumedClient: SdkClient | undefined;
 	try {
 		await fs.mkdir(guardedBin, { recursive: true });
+		await fs.writeFile(path.join(root, ".env"), `GH_TOKEN=${projectEnvSecret}\n`, "utf8");
 		await fs.writeFile(guardedGh, "#!/bin/sh\nprintf 'guarded-gh\\n'\n", "utf8");
 		await fs.chmod(guardedGh, 0o755);
 		await broker.start();
@@ -9249,7 +9251,7 @@ test("broker isolates per-session env in bash and restores it after resume", asy
 		expect(
 			await broker.handleRequest(
 				"session.create",
-				{ cwd: root, env: { PAYLOAD: "\n".repeat(32_768) } },
+				{ cwd: root, env: { FIRST: "x".repeat(20_000), SECOND: "y".repeat(20_000) } },
 				"session-environment-oversized-create",
 			),
 		).toMatchObject({
@@ -9299,6 +9301,7 @@ test("broker isolates per-session env in bash and restores it after resume", asy
 		const isolatedOutput = JSON.stringify(await isolatedClient.control("bash.execute", { cmd: command }));
 		const siblingOutput = JSON.stringify(await siblingClient.control("bash.execute", { cmd: command }));
 		expect(isolatedOutput).toContain("GH_TOKEN=unset");
+		expect(isolatedOutput).not.toContain(projectEnvSecret);
 		expect(isolatedOutput).toContain(`PATH=${guardedBin}:`);
 		expect(isolatedOutput).toContain(`GH=${guardedGh}`);
 		expect(isolatedOutput).toContain("LIFECYCLE_REQUEST=unset");
@@ -9327,6 +9330,23 @@ test("broker isolates per-session env in bash and restores it after resume", asy
 			session => session.id === isolatedSession.sessionId,
 		);
 		if (!savedSession) throw new Error("Expected the isolated session transcript to remain resumable.");
+		for (const [index, environmentFields] of [{ env: null }, { unsetEnv: null }].entries()) {
+			expect(
+				await broker.handleRequest(
+					"session.resume",
+					{
+						cwd: root,
+						sessionId: isolatedSession.sessionId,
+						sessionPath: savedSession.path,
+						...environmentFields,
+					},
+					`session-environment-invalid-resume-${index}`,
+				),
+			).toMatchObject({
+				ok: false,
+				error: { code: "invalid_input", message: "Session launch environment is invalid." },
+			});
+		}
 		const resumed = await broker.handleRequest(
 			"session.resume",
 			{

@@ -5391,6 +5391,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			thinkingLevel,
 			sessionManager,
 			settings,
+			sessionEnvironment: options.sessionEnvironment,
 			// The session's REQUESTED agent directory when the caller explicitly
 			// supplied it, independent of the reused global Settings singleton
 			// (which may belong to an earlier session). When the option is

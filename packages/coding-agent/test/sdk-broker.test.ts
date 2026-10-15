@@ -527,6 +527,16 @@ it("SDK lifecycle launch request size includes JSON escaping and all serialized 
 		"GJC_SDK_LIFECYCLE_REQUEST is invalid.",
 	);
 
+	const windowsUnsafeRequest = JSON.stringify({
+		...baseRequest,
+		env: { FIRST: "x".repeat(20_000), SECOND: "y".repeat(20_000) },
+	});
+	expect(Buffer.byteLength(windowsUnsafeRequest, "utf8")).toBeGreaterThan(32 * 1024);
+	expect(Buffer.byteLength(windowsUnsafeRequest, "utf8")).toBeLessThan(64 * 1024);
+	expect(() => readSessionLifecycleLaunchRequest(windowsUnsafeRequest)).toThrow(
+		"GJC_SDK_LIFECYCLE_REQUEST is invalid.",
+	);
+
 	const oversizedOtherFieldRequest = JSON.stringify({ ...baseRequest, modelId: "m".repeat(64 * 1024) });
 	expect(() => readSessionLifecycleLaunchRequest(oversizedOtherFieldRequest)).toThrow(
 		"GJC_SDK_LIFECYCLE_REQUEST is invalid.",

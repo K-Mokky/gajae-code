@@ -928,7 +928,15 @@ function compactEvents(events: SessionIndexEvent[], policy: ResolvedRetentionPol
 	const maxIndexSeq = events[events.length - 1]!.indexSeq;
 	const latestByIdentity = new Map<string, SessionIndexEvent>();
 	const latestHeartbeatByIdentity = new Map<string, number>();
+	const latestDeletionBySession = new Map<string, number>();
+	for (const event of events) {
+		if (event.type !== "session_deleted") continue;
+		const current = latestDeletionBySession.get(event.sessionId);
+		if (current === undefined || event.indexSeq > current)
+			latestDeletionBySession.set(event.sessionId, event.indexSeq);
+	}
 	const latestEnvironmentRegistrationByRoot = new Map<string, number>();
+	const latestLiveEnvironmentRegistrationByRoot = new Map<string, number>();
 	for (const event of events) {
 		const key = identityKey(event);
 		const previous = latestByIdentity.get(key);
@@ -942,9 +950,15 @@ function compactEvents(events: SessionIndexEvent[], policy: ResolvedRetentionPol
 			const current = latestEnvironmentRegistrationByRoot.get(environmentKey);
 			if (current === undefined || event.indexSeq > current)
 				latestEnvironmentRegistrationByRoot.set(environmentKey, event.indexSeq);
+			const deletionSeq = latestDeletionBySession.get(event.sessionId);
+			if (deletionSeq === undefined || event.indexSeq > deletionSeq) {
+				const currentLive = latestLiveEnvironmentRegistrationByRoot.get(environmentKey);
+				if (currentLive === undefined || event.indexSeq > currentLive)
+					latestLiveEnvironmentRegistrationByRoot.set(environmentKey, event.indexSeq);
+			}
 		}
 	}
-	const environmentRegistrationSeqs = new Set(latestEnvironmentRegistrationByRoot.values());
+	const environmentRegistrationSeqs = new Set(latestLiveEnvironmentRegistrationByRoot.values());
 	const now = policy.clock();
 	const sessionLatest = new Map<string, SessionIndexEvent>();
 	for (const event of events) {
@@ -966,13 +980,17 @@ function compactEvents(events: SessionIndexEvent[], policy: ResolvedRetentionPol
 		}
 		if (event.type === "host_heartbeat" && latestHeartbeatByIdentity.get(identityKey(event)) !== event.indexSeq)
 			continue;
-		if (
-			event.type === "host_registered" &&
-			event.sessionEnvironment !== undefined &&
-			!environmentRegistrationSeqs.has(event.indexSeq)
-		)
-			continue;
 		if (expiredSessions.has(event.sessionId)) continue;
+		if (event.type === "host_registered" && event.sessionEnvironment !== undefined) {
+			const deletionSeq = latestDeletionBySession.get(event.sessionId);
+			if (deletionSeq !== undefined && event.indexSeq < deletionSeq) {
+				const environmentKey = `${event.sessionId}\u0000${resolveEquivalentPath(event.locator.stateRoot)}`;
+				if (latestEnvironmentRegistrationByRoot.get(environmentKey) !== event.indexSeq) continue;
+				kept.push(withoutSessionEnvironment(event));
+				continue;
+			}
+			if (!environmentRegistrationSeqs.has(event.indexSeq)) continue;
+		}
 		kept.push(event);
 	}
 	if (policy.maxRows >= 1 && kept.length > policy.maxRows) {
@@ -1000,6 +1018,11 @@ function compactEvents(events: SessionIndexEvent[], policy: ResolvedRetentionPol
 		return kept.filter(event => !evicted.has(event.sessionId));
 	}
 	return kept;
+}
+
+function withoutSessionEnvironment(event: SessionIndexEvent): SessionIndexEvent {
+	const { checksum: _checksum, sessionEnvironment: _sessionEnvironment, ...unsigned } = event;
+	return { ...unsigned, checksum: sessionIndexChecksum(unsigned) };
 }
 
 async function appendSync(file: string, value: string): Promise<void> {
@@ -1778,7 +1801,7 @@ export class SessionIndex {
 				this.#logOffset += Buffer.byteLength(serialized) + 1;
 				if (!hasSessionLocatorV2(event)) this.#warn(legacyLocatorDiagnostic(event));
 				await this.#writeAuditUnderLock();
-				if (this.#logOffset >= ROTATE_BYTES) await this.#rotate();
+				if (event.type === "session_deleted" || this.#logOffset >= ROTATE_BYTES) await this.#rotate();
 				this.#changeStamp = await readIndexChangeStamp(this.#agentDir);
 				return event;
 			});

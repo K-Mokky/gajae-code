@@ -9,7 +9,7 @@ export interface SessionEnvironmentNames {
 }
 
 const ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/u;
-const RESERVED_ENV_PREFIX = /^(?:GJC_|PI_)/iu;
+const RESERVED_ENV_PREFIX = /^(?:GJC_|PI_|BUN_OPTIONS$|NODE_OPTIONS$)/iu;
 const MAX_ENV_ENTRIES = 100;
 const MAX_ENV_VALUE_LENGTH = 32_768;
 const MAX_ENV_BYTES = 256 * 1024;
@@ -99,6 +99,27 @@ export function applySessionLaunchEnvironment(
 		deleteName(name);
 		Object.defineProperty(environment, name, { configurable: true, enumerable: true, value, writable: true });
 	}
+}
+
+/** Names to mask from inherited environments before setting a session overlay. */
+export function sessionLaunchEnvironmentUnsetNames(
+	launchEnvironment: SessionLaunchEnvironment | undefined,
+	inheritedEnvironment: Record<string, string | undefined> = process.env,
+	platform: NodeJS.Platform = process.platform,
+): string[] {
+	if (!launchEnvironment) return [];
+	const names = [...Object.keys(launchEnvironment.env ?? {}), ...(launchEnvironment.unsetEnv ?? [])];
+	if (platform !== "win32") return names;
+
+	const inheritedNames = Object.keys(inheritedEnvironment);
+	return [
+		...new Set(
+			names.flatMap(name => {
+				const aliases = inheritedNames.filter(existingName => existingName.toUpperCase() === name.toUpperCase());
+				return aliases.length > 0 ? aliases : [name];
+			}),
+		),
+	];
 }
 
 export function sessionEnvironmentNames(environment: SessionLaunchEnvironment): SessionEnvironmentNames {
