@@ -650,10 +650,9 @@ describe("subagent await renderer body cache (PR2)", () => {
 
 		const lines = renderWith(details, { expanded: false });
 		expect(lines).toHaveLength(1);
-		expect(lines.join("\n")).toContain("Await timed out");
-		expect(lines.join("\n")).toContain("children continue");
-		expect(lines.join("\n")).toContain("inspect progress before cancelling");
-		expect(lines.join("\n")).toContain("15 subagents running");
+		expect(lines.join("\n")).toContain(
+			"Await timed out · timeout is not failure · children continue · inspect progress before cancelling · 15 subagents running",
+		);
 	});
 
 	it("shows successful any-terminal results in compact final receipts", () => {
@@ -682,8 +681,30 @@ describe("subagent await renderer body cache (PR2)", () => {
 		expect(lines).toHaveLength(1);
 		expect(lines.join("\n")).toContain("Await completed");
 		expect(lines.join("\n")).toContain("1 completed");
-		expect(lines.join("\n")).toContain("10 subagents running");
-		expect(lines.join("\n")).toContain("result: finished successfully");
+		expect(lines.join("\n")).toContain(
+			"Await completed · 1 completed · 10 subagents running · result: finished successfully",
+		);
+	});
+
+	it("identifies cancelled agents in compact any-terminal receipts", () => {
+		const cancelledId = "0-Cancelled";
+		const details: SubagentToolDetails = {
+			awaitOutcome: "completed",
+			waitOutcome: "completed",
+			condition: "any_terminal",
+			terminalIds: [cancelledId],
+			subagents: [
+				snapshot({ id: cancelledId, status: "cancelled" }),
+				...Array.from({ length: 10 }, (_, index) => {
+					const id = `0-StillRunning${index}`;
+					return snapshot({ id, liveProgressAvailable: true });
+				}),
+			],
+		};
+
+		const lines = renderWith(details, { expanded: false });
+		expect(lines).toHaveLength(1);
+		expect(lines.join("\n")).toContain("Await completed · 1 cancelled · 10 subagents running");
 	});
 
 	it("refreshes nested retry age and countdown on await-body updates", () => {

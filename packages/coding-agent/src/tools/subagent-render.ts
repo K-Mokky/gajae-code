@@ -395,6 +395,7 @@ export const subagentToolRenderer = {
 		let runningCount = 0;
 		let failedCount = 0;
 		let completedCount = 0;
+		let cancelledCount = 0;
 		let firstCompletedSnapshot: SubagentSnapshot | undefined;
 		const anyTerminalReceipt =
 			result.details?.awaitOutcome === "completed" && result.details.condition === "any_terminal";
@@ -402,12 +403,10 @@ export const subagentToolRenderer = {
 		for (const snapshot of subagents) {
 			if (snapshot.status === "running") runningCount++;
 			else if (snapshot.status === "failed" || snapshot.status === "not_found") failedCount++;
-			else if (
-				snapshot.status === "completed" &&
-				(terminalIds?.has(snapshot.id) || terminalIds?.has(snapshot.jobId))
-			) {
+			else if (snapshot.status === "cancelled") cancelledCount++;
+			else if (snapshot.status === "completed") {
 				completedCount++;
-				firstCompletedSnapshot ??= snapshot;
+				if (terminalIds?.has(snapshot.id) || terminalIds?.has(snapshot.jobId)) firstCompletedSnapshot ??= snapshot;
 			}
 		}
 		const interrupted = result.details?.interrupted === true || result.details?.awaitOutcome === "interrupted";
@@ -428,29 +427,37 @@ export const subagentToolRenderer = {
 				}
 			}
 			const expandKey = getKeybindings().getKeys("app.tools.expand")[0];
-			const idleSummary = idleCount > 0 ? ` · ${idleCount} idle >30s` : "";
-			const failedSummary = failedCount > 0 ? ` · ${failedCount} failed` : "";
-			const completedSummary = completedCount > 0 ? ` · ${completedCount} completed` : "";
 			const expandHint = expandKey ? `${expandKey} to expand` : "expand tools";
-			const outcomeSummary = timedOut
-				? "Await timed out · children continue · inspect progress before cancelling · "
-				: interrupted
-					? "Subagent await interrupted · child subagents continue · "
-					: anyTerminalReceipt
-						? "Await completed · "
-						: "";
+			const summarySegments: string[] = [];
+			if (timedOut) {
+				summarySegments.push(
+					"Await timed out",
+					"timeout is not failure",
+					"children continue",
+					"inspect progress before cancelling",
+				);
+			} else if (interrupted) {
+				summarySegments.push("Subagent await interrupted", "child subagents continue");
+			} else if (anyTerminalReceipt) {
+				summarySegments.push("Await completed");
+			}
+			if (completedCount > 0) summarySegments.push(`${completedCount} completed`);
+			if (failedCount > 0) summarySegments.push(`${failedCount} failed`);
+			if (cancelledCount > 0) summarySegments.push(`${cancelledCount} cancelled`);
+			summarySegments.push(`${runningCount} subagents running`);
+			if (idleCount > 0) summarySegments.push(`${idleCount} idle >30s`);
 			const terminalResult = firstCompletedSnapshot?.resultPreview ?? firstCompletedSnapshot?.outputRef;
-			const resultSummary = terminalResult
-				? ` · result: ${truncateToWidth(replaceTabs(terminalResult).replace(/\s+/g, " "), 48, Ellipsis.Omit)}`
-				: firstCompletedSnapshot
-					? ` · result: ${firstCompletedSnapshot.id}`
-					: "";
+			if (terminalResult) {
+				summarySegments.push(
+					`result: ${truncateToWidth(replaceTabs(terminalResult).replace(/\s+/g, " "), 48, Ellipsis.Omit)}`,
+				);
+			} else if (firstCompletedSnapshot) {
+				summarySegments.push(`result: ${firstCompletedSnapshot.id}`);
+			}
+			summarySegments.push(expandHint);
 			const summaryTone =
 				timedOut || interrupted ? "warning" : failedCount > 0 ? "error" : anyTerminalReceipt ? "success" : "muted";
-			const summary = theme.fg(
-				summaryTone,
-				`${outcomeSummary}${completedSummary}${runningCount} subagents running${idleSummary}${failedSummary}${resultSummary} · ${expandHint}`,
-			);
+			const summary = theme.fg(summaryTone, summarySegments.join(" · "));
 			return {
 				render(width: number): string[] {
 					return [truncateToWidth(replaceTabs(summary), width, Ellipsis.Omit)];
