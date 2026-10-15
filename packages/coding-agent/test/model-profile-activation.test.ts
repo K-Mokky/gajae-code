@@ -2635,9 +2635,22 @@ describe("model profile activation", () => {
 		expect(settings.get("modelRoles").default).toBe("provider-b/executor");
 	});
 
-	test("materializing a profile role preserves the profile default over a startup model override", async () => {
-		const baseRegistry = fakeRegistry();
-		const registry = { ...baseRegistry, getAvailable: () => baseRegistry.getAll() };
+	test("role materialization keeps the activated alternative provider after a CLI override", async () => {
+		const profile: ModelProfileDefinition = {
+			name: "alternative-provider-profile",
+			requiredProviders: [],
+			alternativeProviderGroups: [["provider-a", "provider-b"]],
+			modelMapping: { default: "provider-a/default", executor: "provider-a/executor" },
+			source: "user",
+		};
+		const baseRegistry = fakeRegistry({ profiles: [profile], missingProviders: ["provider-a"] });
+		const defaultAlternative = model("provider-b", "default");
+		const executorAlternative = model("provider-b", "executor");
+		const registry = {
+			...baseRegistry,
+			getAll: () => [...baseRegistry.getAll(), defaultAlternative, executorAlternative],
+			getAvailable: () => [...baseRegistry.getAll(), defaultAlternative, executorAlternative],
+		};
 		const startupModel = model("provider-c", "cli-model");
 		let profileState: AgentSessionProfileInstalledOverrideState = {
 			modelRoles: new Map(),
@@ -2649,17 +2662,25 @@ describe("model profile activation", () => {
 			configuredAgentModelOverrides: new Set(),
 			preProfileModel: undefined,
 		};
-		const session = Object.assign(fakeSession(startupModel), {
+		const baseSession = fakeSession(model("provider-a", "default"));
+		const session = Object.assign(baseSession, {
 			modelRegistry: registry as unknown as ModelRegistry,
 			getProfileInstalledOverrideState: () => profileState,
+			noteProfileInstalledOverrides: () => {
+				const chain = baseSession.getConfiguredModelChainState("default");
+				profileState = {
+					...profileState,
+					configuredDefaultChain: chain?.origin === "profile-activation" ? [...chain.entries] : undefined,
+				};
+			},
 		});
-		const settings = Settings.isolated({ "modelProfile.default": "profile-a" });
+		const settings = Settings.isolated({ "modelProfile.default": profile.name });
 		settings.overrideModelRoles({ default: "cli-model-alias" });
-		await activateModelProfile({ session, modelRegistry: registry, settings, profileName: "profile-a" });
-		profileState = {
-			...profileState,
-			configuredDefaultChain: ["provider-c/default:low", "provider-a/default:high"],
-		};
+		expect(await registry.getApiKeyForProvider("provider-a")).toBeUndefined();
+		expect(await registry.getApiKeyForProvider("provider-b")).toBe("key-provider-b");
+		await activateModelProfile({ session, modelRegistry: registry, settings, profileName: profile.name });
+		expect(session.getConfiguredModelChain("default")).toEqual(["provider-b/default"]);
+		expect(profileState.configuredDefaultChain).toEqual(["provider-b/default"]);
 
 		session.model = startupModel;
 		session.setConfiguredModelChain("default", [`${startupModel.provider}/${startupModel.id}`], "startup-override");
@@ -2671,8 +2692,14 @@ describe("model profile activation", () => {
 			selector: "provider-c/executor",
 		});
 
-		expect(settings.getGlobal("modelRoles")?.default).toEqual(["provider-c/default:low", "provider-a/default:high"]);
-		expect(settings.getGlobal("modelProfile.default")).toBeUndefined();
+		const reloadedSettings = Settings.isolated({
+			modelRoles: settings.getGlobal("modelRoles"),
+			"task.agentModelOverrides": settings.getGlobal("task.agentModelOverrides"),
+			"modelProfile.default": settings.getGlobal("modelProfile.default"),
+		});
+		expect(settings.getGlobal("modelRoles")?.default).toBe("provider-b/default");
+		expect(reloadedSettings.getModelRole("default")).toBe("provider-b/default");
+		expect(reloadedSettings.getGlobal("modelProfile.default")).toBeUndefined();
 	});
 
 	test("materializing a role-only profile does not promote a startup model to the global default", async () => {
