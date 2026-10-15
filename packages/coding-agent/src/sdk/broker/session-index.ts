@@ -928,12 +928,13 @@ function compactEvents(events: SessionIndexEvent[], policy: ResolvedRetentionPol
 	const maxIndexSeq = events[events.length - 1]!.indexSeq;
 	const latestByIdentity = new Map<string, SessionIndexEvent>();
 	const latestHeartbeatByIdentity = new Map<string, number>();
-	const latestDeletionBySession = new Map<string, number>();
+	const latestDeletionBySessionRoot = new Map<string, number>();
 	for (const event of events) {
 		if (event.type !== "session_deleted") continue;
-		const current = latestDeletionBySession.get(event.sessionId);
+		const sessionRootKey = `${event.sessionId}\u0000${resolveEquivalentPath(event.locator.stateRoot)}`;
+		const current = latestDeletionBySessionRoot.get(sessionRootKey);
 		if (current === undefined || event.indexSeq > current)
-			latestDeletionBySession.set(event.sessionId, event.indexSeq);
+			latestDeletionBySessionRoot.set(sessionRootKey, event.indexSeq);
 	}
 	const latestEnvironmentRegistrationByRoot = new Map<string, number>();
 	const latestLiveEnvironmentRegistrationByRoot = new Map<string, number>();
@@ -950,7 +951,7 @@ function compactEvents(events: SessionIndexEvent[], policy: ResolvedRetentionPol
 			const current = latestEnvironmentRegistrationByRoot.get(environmentKey);
 			if (current === undefined || event.indexSeq > current)
 				latestEnvironmentRegistrationByRoot.set(environmentKey, event.indexSeq);
-			const deletionSeq = latestDeletionBySession.get(event.sessionId);
+			const deletionSeq = latestDeletionBySessionRoot.get(environmentKey);
 			if (deletionSeq === undefined || event.indexSeq > deletionSeq) {
 				const currentLive = latestLiveEnvironmentRegistrationByRoot.get(environmentKey);
 				if (currentLive === undefined || event.indexSeq > currentLive)
@@ -982,9 +983,9 @@ function compactEvents(events: SessionIndexEvent[], policy: ResolvedRetentionPol
 			continue;
 		if (expiredSessions.has(event.sessionId)) continue;
 		if (event.type === "host_registered" && event.sessionEnvironment !== undefined) {
-			const deletionSeq = latestDeletionBySession.get(event.sessionId);
+			const environmentKey = `${event.sessionId}\u0000${resolveEquivalentPath(event.locator.stateRoot)}`;
+			const deletionSeq = latestDeletionBySessionRoot.get(environmentKey);
 			if (deletionSeq !== undefined && event.indexSeq < deletionSeq) {
-				const environmentKey = `${event.sessionId}\u0000${resolveEquivalentPath(event.locator.stateRoot)}`;
 				if (latestEnvironmentRegistrationByRoot.get(environmentKey) !== event.indexSeq) continue;
 				kept.push(withoutSessionEnvironment(event));
 				continue;

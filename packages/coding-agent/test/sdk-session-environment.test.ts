@@ -143,14 +143,28 @@ test("session launch environment survives session-index rotation and is absent f
 	}
 });
 
-test("session deletion purges persisted launch-environment values while retaining registration evidence", async () => {
+test("session deletion purges only its state-root environment while retaining registration evidence", async () => {
 	const agentDir = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-session-environment-delete-"));
 	const cwd = path.join(agentDir, "workspace");
 	const stateRoot = path.join(cwd, ".gjc", "state");
 	const locator = { cwd, worktreeRoot: null, stateRoot };
+	const survivingCwd = path.join(agentDir, "surviving-workspace");
+	const survivingStateRoot = path.join(survivingCwd, ".gjc", "state");
+	const survivingLocator = { cwd: survivingCwd, worktreeRoot: null, stateRoot: survivingStateRoot };
 	const indexDir = path.join(agentDir, "sdk", "sessions");
 	try {
 		const index = await new SessionIndex(agentDir).open();
+		await index.append({
+			type: "host_registered",
+			sessionId: "deleted-environment",
+			locator: survivingLocator,
+			endpointGeneration: 1,
+			pid: process.pid,
+			sessionEnvironment: {
+				env: { SURVIVING_SECRET: "surviving-session-secret" },
+				unsetEnv: ["SURVIVING_UNSET"],
+			},
+		});
 		await index.append({
 			type: "host_registered",
 			sessionId: "deleted-environment",
@@ -170,15 +184,37 @@ test("session deletion purges persisted launch-environment values while retainin
 		const snapshotText = await fs.readFile(path.join(indexDir, "index.snapshot.json"), "utf8");
 		const logText = await fs.readFile(path.join(indexDir, "index.jsonl"), "utf8");
 		const snapshot = JSON.parse(snapshotText) as { events: Array<Record<string, unknown>> };
-		const retainedRegistration = snapshot.events.find(event => event.type === "host_registered");
+		const retainedRegistration = snapshot.events.find(
+			event =>
+				event.type === "host_registered" &&
+				(event.locator as { stateRoot?: string } | undefined)?.stateRoot === stateRoot,
+		);
+		const survivingRegistration = snapshot.events.find(
+			event =>
+				event.type === "host_registered" &&
+				(event.locator as { stateRoot?: string } | undefined)?.stateRoot === survivingStateRoot,
+		);
 		expect(retainedRegistration).toMatchObject({ sessionId: "deleted-environment", pid: process.pid });
 		expect(retainedRegistration).not.toHaveProperty("sessionEnvironment");
+		expect(survivingRegistration).toHaveProperty("sessionEnvironment", {
+			env: { SURVIVING_SECRET: "surviving-session-secret" },
+			unsetEnv: ["SURVIVING_UNSET"],
+		});
 		expect(snapshotText).not.toContain("deleted-session-secret");
+		expect(snapshotText).toContain("surviving-session-secret");
 		expect(logText).not.toContain("deleted-session-secret");
 		expect(index.findSessionLaunchEnvironment("deleted-environment", stateRoot)).toBeUndefined();
+		expect(index.findSessionLaunchEnvironment("deleted-environment", survivingStateRoot)).toEqual({
+			env: { SURVIVING_SECRET: "surviving-session-secret" },
+			unsetEnv: ["SURVIVING_UNSET"],
+		});
 
 		const reopened = await new SessionIndex(agentDir).open();
 		expect(reopened.findSessionLaunchEnvironment("deleted-environment", stateRoot)).toBeUndefined();
+		expect(reopened.findSessionLaunchEnvironment("deleted-environment", survivingStateRoot)).toEqual({
+			env: { SURVIVING_SECRET: "surviving-session-secret" },
+			unsetEnv: ["SURVIVING_UNSET"],
+		});
 		expect(reopened.listSessions().sessions).not.toContainEqual(
 			expect.objectContaining({
 				sessionId: "deleted-environment",
