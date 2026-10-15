@@ -69,6 +69,7 @@ type ModelProfileActivationSession = Pick<
 			agentModelOverrides: Readonly<Record<string, ModelSelectorValue>>;
 		},
 		manual?: { modelRoles: readonly string[]; agentModelOverrides: readonly string[] },
+		configuredDefaultChain?: readonly string[],
 	) => void;
 	/** Drop the recorded profile-installed override keys (e.g. after materialization). */
 	clearProfileInstalledOverrides?: () => void;
@@ -2007,6 +2008,7 @@ export function publishPreparedModelProfileActivation(
 			modelRoles: [...prepared.manualModelRoleOverrides],
 			agentModelOverrides: [...prepared.manualAgentModelOverrides],
 		},
+		prepared.defaultChain,
 	);
 	prepared.publishedState = capturePublishedModelProfileActivationState(prepared);
 }
@@ -2145,6 +2147,7 @@ export async function applyPreparedModelProfileActivation(
 					modelRoles: [...prepared.manualModelRoleOverrides],
 					agentModelOverrides: [...prepared.manualAgentModelOverrides],
 				},
+				prepared.defaultChain,
 			);
 			activatedProfileInstalledOverrideState = prepared.session.getProfileInstalledOverrideState?.();
 		}
@@ -2961,6 +2964,7 @@ export async function applyModelProfileRuntimeBindings(
 				modelRoles: [...prepared.manualModelRoleOverrides],
 				agentModelOverrides: [...prepared.manualAgentModelOverrides],
 			},
+			prepared.defaultChain,
 		);
 	} finally {
 		if (isCurrent && !isCurrent()) {

@@ -19232,6 +19232,7 @@ export class AgentSession {
 			agentModelOverrides: Readonly<Record<string, ModelSelectorValue>>;
 		},
 		manual?: { modelRoles: readonly string[]; agentModelOverrides: readonly string[] },
+		configuredDefaultChain?: readonly string[],
 	): void {
 		const bindings = this.#modelRegistry.getConfiguredModelBindings?.();
 		if (this.#preProfileModel === undefined) this.#preProfileModel = preProfileModel;
@@ -19288,12 +19289,16 @@ export class AgentSession {
 		}
 		this.#activeProfileManualModelRoles = new Set(manual?.modelRoles ?? []);
 		this.#activeProfileManualAgentModelOverrides = new Set(manual?.agentModelOverrides ?? []);
-		const configuredDefaultChain = this.getConfiguredModelChainState("default");
-		this.#activeProfileConfiguredDefaultChain =
-			configuredDefaultChain?.origin === "profile-activation" &&
-			configuredDefaultChain.identity === this.getActiveModelProfile()
-				? [...configuredDefaultChain.entries]
-				: undefined;
+		const activeDefaultChain = this.getConfiguredModelChainState("default");
+		const effectiveDefaultChain =
+			configuredDefaultChain ??
+			(activeDefaultChain?.origin === "profile-activation" &&
+			activeDefaultChain.identity === this.getActiveModelProfile()
+				? activeDefaultChain.entries
+				: undefined);
+		this.#activeProfileConfiguredDefaultChain = effectiveDefaultChain?.length
+			? [...effectiveDefaultChain]
+			: undefined;
 	}
 
 	getProfileInstalledOverrideState(): AgentSessionProfileInstalledOverrideState {

@@ -553,6 +553,7 @@ describe("model profile activation", () => {
 				},
 			},
 			{ modelRoles: [], agentModelOverrides: [] },
+			["provider-a/default:high"],
 		);
 	});
 
@@ -2666,11 +2667,17 @@ describe("model profile activation", () => {
 		const session = Object.assign(baseSession, {
 			modelRegistry: registry as unknown as ModelRegistry,
 			getProfileInstalledOverrideState: () => profileState,
-			noteProfileInstalledOverrides: () => {
-				const chain = baseSession.getConfiguredModelChainState("default");
+			noteProfileInstalledOverrides: (...args: Parameters<AgentSession["noteProfileInstalledOverrides"]>) => {
+				const currentChain = baseSession.getConfiguredModelChainState("default");
+				const chain =
+					args[6] ??
+					(currentChain?.origin === "profile-activation" &&
+					currentChain.identity === baseSession.getActiveModelProfile()
+						? currentChain.entries
+						: undefined);
 				profileState = {
 					...profileState,
-					configuredDefaultChain: chain?.origin === "profile-activation" ? [...chain.entries] : undefined,
+					configuredDefaultChain: chain ? [...chain] : undefined,
 				};
 			},
 		});
@@ -2684,6 +2691,9 @@ describe("model profile activation", () => {
 
 		session.model = startupModel;
 		session.setConfiguredModelChain("default", [`${startupModel.provider}/${startupModel.id}`], "startup-override");
+		await applyModelProfileRuntimeBindings({ session, modelRegistry: registry, settings, profileName: profile.name });
+		expect(session.getConfiguredModelChainState("default")?.origin).toBe("startup-override");
+		expect(profileState.configuredDefaultChain).toEqual(["provider-b/default"]);
 
 		materializeActiveModelProfileAssignment({
 			session,
