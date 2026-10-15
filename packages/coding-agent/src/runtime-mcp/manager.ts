@@ -3322,7 +3322,7 @@ export class MCPManager {
 					configResolutionEnvironment,
 					this.#sessionEnvironment?.unsetEnv,
 				);
-				if (this.#toolsOnly && !resolvedValue) throw new MCPExpectedFailure();
+				if (this.#toolsOnly && resolvedValue === undefined) throw new MCPExpectedFailure();
 				return resolvedValue;
 			} catch (error) {
 				if (this.#toolsOnly && isExpectedConfigResolutionFailure(error)) {
@@ -3337,7 +3337,7 @@ export class MCPManager {
 				const nextEnv: Record<string, string> = {};
 				for (const [key, value] of Object.entries(resolved.env)) {
 					const resolvedValue = await resolveValue(value);
-					if (resolvedValue) nextEnv[key] = resolvedValue;
+					if (resolvedValue !== undefined) nextEnv[key] = resolvedValue;
 				}
 				resolved = { ...resolved, env: nextEnv };
 			}

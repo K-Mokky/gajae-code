@@ -43,6 +43,7 @@ export async function resolveConfigValue(
 		return await executeCommand(config, cacheScope);
 	}
 	const envValue = environment === undefined ? process.env[config] : getEnvValue(environment, config, platform);
+	if (environment !== undefined) return envValue ?? config;
 	return envValue || config;
 }
 

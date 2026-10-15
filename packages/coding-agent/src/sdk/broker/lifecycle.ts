@@ -87,7 +87,6 @@ import {
 	resolveManagedSessionScope,
 } from "../session-directory";
 import {
-	applySessionLaunchEnvironment,
 	isValidSessionLaunchEnvironment,
 	type SessionLaunchEnvironment,
 	sessionLaunchEnvironment,
@@ -7310,7 +7309,6 @@ async function executeLifecycleResponse(
 							entry[0] !== "GJC_MASTER_CAPABILITY" && typeof entry[1] === "string",
 					),
 				);
-				applySessionLaunchEnvironment(childEnvironment, launch.sessionEnvironment);
 				return spawn(cmd.file, cmd.args, {
 					cwd: launch.cwd,
 					detached: true,

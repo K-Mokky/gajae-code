@@ -5548,6 +5548,64 @@ test("broker fails closed when a lifecycle ready sibling is swapped after marker
 		await fs.rm(root, { recursive: true, force: true });
 	}
 }, 30_000);
+test("broker forwards session overlays in the request without changing host startup env", async () => {
+	const root = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-broker-host-startup-env-"));
+	const agentDir = path.join(root, "agent");
+	const stateRoot = path.join(root, ".gjc", "state");
+	const reportPath = path.join(root, "host-environment.json");
+	const setName = "SESSION_HOST_OVERLAY_SET";
+	const unsetName = "SESSION_HOST_OVERLAY_UNSET";
+	const previousSet = process.env[setName];
+	const previousUnset = process.env[unsetName];
+	const broker = new Broker({ agentDir });
+	const childScript = `
+		const fs = require("node:fs");
+		const request = JSON.parse(process.env.GJC_SDK_LIFECYCLE_REQUEST ?? "{}");
+		fs.writeFileSync(${JSON.stringify(reportPath)}, JSON.stringify({
+			setValue: process.env.${setName} ?? null,
+			unsetValue: process.env.${unsetName} ?? null,
+			requestEnv: request.env,
+			requestUnset: request.unsetEnv,
+		}));
+		process.exit(23);
+	`;
+	try {
+		process.env[setName] = "broker-value";
+		process.env[unsetName] = "broker-secret";
+		setLifecycleCommandResolverForTest(broker, () => ({ file: process.execPath, args: ["-e", childScript] }));
+		await broker.start();
+		expect(
+			await broker.handleRequest(
+				"session.create",
+				{
+					cwd: root,
+					stateRoot,
+					readinessTimeoutMs: 4_000,
+					env: { [setName]: "session-value" },
+					unsetEnv: [unsetName],
+				},
+				"host-startup-environment-overlay",
+			),
+		).toMatchObject({
+			ok: false,
+			error: { code: "spawn_failed", message: expect.stringContaining("exit=23") },
+		});
+		expect(JSON.parse(await fs.readFile(reportPath, "utf8"))).toEqual({
+			setValue: "broker-value",
+			unsetValue: "broker-secret",
+			requestEnv: { [setName]: "session-value" },
+			requestUnset: [unsetName],
+		});
+	} finally {
+		setLifecycleCommandResolverForTest(broker, undefined);
+		if (previousSet === undefined) delete process.env[setName];
+		else process.env[setName] = previousSet;
+		if (previousUnset === undefined) delete process.env[unsetName];
+		else process.env[unsetName] = previousUnset;
+		await broker.stop();
+		await fs.rm(root, { recursive: true, force: true });
+	}
+});
 test("broker terminalizes default command resolver failures", async () => {
 	const root = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-broker-resolver-failure-"));
 	const agentDir = path.join(root, "agent");

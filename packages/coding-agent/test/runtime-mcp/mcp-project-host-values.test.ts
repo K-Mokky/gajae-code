@@ -19,6 +19,7 @@ import type { MCPServerConfig } from "../../src/runtime-mcp/types";
 const SECRET_NAME = "GJC_CANARY_SECRET";
 const PUBLIC_NAME = "GJC_CANARY_PUBLIC";
 const OTHER_NAME = "GJC_OTHER_SECRET";
+const SESSION_EMPTY_NAME = "SESSION_EMPTY_VALUE";
 const SECRET = "canary-secret-value";
 const PUBLIC = "canary-public-value";
 const OTHER = "canary-other-secret";
@@ -75,7 +76,7 @@ describe("project MCP host values", () => {
 		await fs.mkdir(agentDir, { recursive: true });
 		setAgentDir(agentDir);
 		vi.spyOn(os, "homedir").mockReturnValue(tempHome);
-		restoreEnv = [SECRET_NAME, PUBLIC_NAME, OTHER_NAME].map(name => {
+		restoreEnv = [SECRET_NAME, PUBLIC_NAME, OTHER_NAME, SESSION_EMPTY_NAME].map(name => {
 			const previous = process.env[name];
 			return () => {
 				if (previous === undefined) delete process.env[name];
@@ -85,6 +86,7 @@ describe("project MCP host values", () => {
 		process.env[SECRET_NAME] = SECRET;
 		process.env[PUBLIC_NAME] = PUBLIC;
 		process.env[OTHER_NAME] = OTHER;
+		process.env[SESSION_EMPTY_NAME] = "inherited-value";
 	});
 
 	afterEach(async () => {
@@ -270,6 +272,17 @@ describe("project MCP host values", () => {
 				"",
 			].join("\n"),
 		);
+		const emptyReportPath = path.join(projectDir, "empty-env-report.json");
+		const emptyScriptPath = path.join(projectDir, "report-empty-env.mjs");
+		await fs.writeFile(
+			emptyScriptPath,
+			[
+				"import fs from 'node:fs';",
+				"fs.writeFileSync(process.env.MOCK_EMPTY_REPORT, JSON.stringify({ token: process.env.SESSION_EMPTY_TOKEN ?? null }));",
+				"process.exit(0);",
+				"",
+			].join("\n"),
+		);
 		const seen: Array<Record<string, string>> = [];
 		const server = Bun.serve({
 			hostname: "127.0.0.1",
@@ -283,7 +296,9 @@ describe("project MCP host values", () => {
 				return new Response("no", { status: 404 });
 			},
 		});
-		const manager = new MCPManager(projectDir, null, {});
+		const manager = new MCPManager(projectDir, null, {
+			sessionEnvironment: { env: { [SESSION_EMPTY_NAME]: "" } },
+		});
 		try {
 			await writeJson(".gjc/mcp.json", {
 				mcpServers: {
@@ -310,6 +325,21 @@ describe("project MCP host values", () => {
 							EXPLICIT_LEAK: SECRET_REF,
 							EXPLICIT_PUBLIC: PUBLIC_REF,
 							EXPLICIT_LITERAL: "literal-ok",
+						},
+					},
+				},
+			});
+			await writeJson(path.join(agentDir, "mcp.json"), {
+				mcpServers: {
+					"stdio-empty": {
+						type: "stdio",
+						command: process.execPath,
+						args: [emptyScriptPath],
+						noInheritEnv: true,
+						timeout: 3000,
+						env: {
+							MOCK_EMPTY_REPORT: emptyReportPath,
+							SESSION_EMPTY_TOKEN: SESSION_EMPTY_NAME,
 						},
 					},
 				},
@@ -348,6 +378,8 @@ describe("project MCP host values", () => {
 			expect(report.EXPLICIT_LITERAL).toBe("literal-ok");
 			expect(report.GJC_CANARY_SECRET).toBeNull();
 			expect(report.GJC_OTHER_SECRET).toBeNull();
+			expect(await waitUntil(async () => exists(emptyReportPath), 2000)).toBe(true);
+			expect(JSON.parse(await fs.readFile(emptyReportPath, "utf8"))).toEqual({ token: "" });
 		} finally {
 			await manager.disconnectAll().catch(() => {});
 			server.stop(true);

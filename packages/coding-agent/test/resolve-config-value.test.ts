@@ -26,3 +26,7 @@ test("resolves environment names case-insensitively for Windows session maps", a
 		resolveConfigValue("SESSION_TOKEN", undefined, { session_token: "session-value" }, undefined, "win32"),
 	).resolves.toBe("session-value");
 });
+
+test("preserves explicitly empty environment values", async () => {
+	await expect(resolveConfigValue("SESSION_EMPTY_VALUE", undefined, { SESSION_EMPTY_VALUE: "" })).resolves.toBe("");
+});
