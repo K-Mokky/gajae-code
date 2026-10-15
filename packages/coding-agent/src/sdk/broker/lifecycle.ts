@@ -6019,7 +6019,41 @@ function deadlineFieldsPresent(input: Input): boolean {
 	].some(value => value !== undefined);
 }
 
-function rejectLiveResumeEnvironment(input: Input): BrokerResponse | undefined {
+function normalizeSessionLaunchEnvironment(environment: SessionLaunchEnvironment | undefined): {
+	set: [string, string][];
+	unset: string[];
+} {
+	const normalizeName = (name: string): string => (process.platform === "win32" ? name.toUpperCase() : name);
+	const compareNames = (left: string, right: string): number => (left < right ? -1 : left > right ? 1 : 0);
+	const set = Object.entries(environment?.env ?? {})
+		.map(([name, value]): [string, string] => [normalizeName(name), value])
+		.sort(([left], [right]) => compareNames(left, right));
+	const unset = (environment?.unsetEnv ?? []).map(normalizeName).sort(compareNames);
+	return { set, unset };
+}
+
+function sameSessionLaunchEnvironment(
+	left: SessionLaunchEnvironment | undefined,
+	right: SessionLaunchEnvironment | undefined,
+): boolean {
+	const normalizedLeft = normalizeSessionLaunchEnvironment(left);
+	const normalizedRight = normalizeSessionLaunchEnvironment(right);
+	return (
+		normalizedLeft.set.length === normalizedRight.set.length &&
+		normalizedLeft.unset.length === normalizedRight.unset.length &&
+		normalizedLeft.set.every(
+			([name, value], index) =>
+				name === normalizedRight.set[index]?.[0] && value === normalizedRight.set[index]?.[1],
+		) &&
+		normalizedLeft.unset.every((name, index) => name === normalizedRight.unset[index])
+	);
+}
+
+function rejectLiveResumeEnvironment(
+	broker: Broker,
+	input: Input,
+	existing: LiveResumeRecord,
+): BrokerResponse | undefined {
 	const target =
 		typeof input.target === "object" && input.target !== null && !Array.isArray(input.target)
 			? (input.target as Record<string, unknown>)
@@ -6034,6 +6068,12 @@ function rejectLiveResumeEnvironment(input: Input): BrokerResponse | undefined {
 	const unsetEnv = hasTopLevelEnvironment ? input.unsetEnv : target?.unsetEnv;
 	if (!isValidSessionLaunchEnvironment(env, unsetEnv))
 		return fail("invalid_input", "Session launch environment is invalid.");
+	const requestedEnvironment = sessionLaunchEnvironment(env, unsetEnv);
+	const persistedEnvironment = broker.index.findSessionLaunchEnvironment(
+		existing.sessionId,
+		existing.locator.stateRoot,
+	);
+	if (sameSessionLaunchEnvironment(requestedEnvironment, persistedEnvironment)) return undefined;
 	return fail("live_session", "Session launch environment cannot be changed while a session is live; close it first.");
 }
 
@@ -6923,7 +6963,7 @@ async function executeLifecycleResponse(
 				return fail("endpoint_stale", "Session authority is ambiguous and cannot be resumed safely.");
 			const existing = authority.kind === "live" ? authority.record : undefined;
 			if (existing?.live) {
-				const environmentRejection = rejectLiveResumeEnvironment(input);
+				const environmentRejection = rejectLiveResumeEnvironment(broker, input, existing);
 				if (environmentRejection) return environmentRejection;
 				const initialScope = await validateLiveResumeScope(broker, input, requestedSessionId!, existing);
 				if ("ok" in initialScope) return initialScope;

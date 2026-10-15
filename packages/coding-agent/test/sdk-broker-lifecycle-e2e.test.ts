@@ -7163,6 +7163,21 @@ test("broker atomically reuses the indexed live owner for distinct resume keys",
 		expect(
 			await broker.handleRequest(
 				"session.resume",
+				{ sessionId, sessionPath, cwd: root, env: {} },
+				"resume-live-empty-environment",
+			),
+		).toMatchObject({
+			ok: true,
+			result: {
+				sessionId,
+				endpointGeneration: 17,
+				reused: true,
+				endpoint: { token: "live-owner-token" },
+			},
+		});
+		expect(
+			await broker.handleRequest(
+				"session.resume",
 				{ sessionId, sessionPath, cwd: root, unsetEnv: ["GH_TOKEN"] },
 				"resume-live-environment-change",
 			),
@@ -7176,6 +7191,80 @@ test("broker atomically reuses the indexed live owner for distinct resume keys",
 		expect(await broker.handleRequest("session.list", {})).toMatchObject({
 			ok: true,
 			result: { sessions: [expect.objectContaining({ sessionId, endpointGeneration: 17 })] },
+		});
+	} finally {
+		await broker.stop();
+		await fs.rm(root, { recursive: true, force: true });
+	}
+});
+test("broker reuses live sessions when a resume supplies the persisted environment", async () => {
+	const root = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-broker-resume-live-env-"));
+	const agentDir = path.join(root, "agent");
+	const stateRoot = path.join(root, ".gjc", "state");
+	const savedSession = SessionManager.create(root, SessionManager.managedDestination(root, agentDir));
+	await savedSession.ensureOnDisk();
+	const sessionId = savedSession.getSessionId();
+	const sessionPath = savedSession.getSessionFile();
+	if (!sessionPath) throw new Error("Expected saved session path.");
+	const endpointPath = path.join(stateRoot, "sdk", `${sessionId}.json`);
+	const sessionEnvironment = { env: { SESSION_RESUME_VALUE: "stable" }, unsetEnv: ["GH_TOKEN"] };
+	const broker = new Broker({ agentDir });
+	const host = spawnDisposableHost();
+	try {
+		await broker.start();
+		await fs.mkdir(path.dirname(endpointPath), { recursive: true });
+		await fs.writeFile(
+			endpointPath,
+			JSON.stringify({ sessionId, pid: host.pid, url: "ws://127.0.0.1:1", token: "live-owner-token" }),
+		);
+		const hostIncarnation = await incarnation(host.pid);
+		await broker.index.append({
+			type: "host_registered",
+			sessionId,
+			locator: { cwd: root, worktreeRoot: null, stateRoot },
+			endpointGeneration: 17,
+			pid: host.pid,
+			endpointMtimeMs: (await fs.stat(endpointPath)).mtimeMs,
+			processIncarnation: hostIncarnation,
+			hostIncarnation,
+			sessionEnvironment,
+		});
+		await broker.index.append({
+			type: "host_heartbeat",
+			sessionId,
+			locator: { cwd: root, worktreeRoot: null, stateRoot },
+			endpointGeneration: 17,
+			pid: host.pid,
+			processIncarnation: hostIncarnation,
+			hostIncarnation,
+		});
+
+		const matching = await broker.handleRequest(
+			"session.resume",
+			{ sessionId, sessionPath, cwd: root, env: sessionEnvironment.env, unsetEnv: sessionEnvironment.unsetEnv },
+			"resume-live-matching-environment",
+		);
+		expect(matching).toMatchObject({
+			ok: true,
+			result: {
+				sessionId,
+				endpointGeneration: 17,
+				reused: true,
+				endpoint: { token: "live-owner-token" },
+			},
+		});
+		expect(
+			await broker.handleRequest(
+				"session.resume",
+				{ sessionId, sessionPath, cwd: root, env: { SESSION_RESUME_VALUE: "changed" }, unsetEnv: ["GH_TOKEN"] },
+				"resume-live-changed-environment",
+			),
+		).toMatchObject({
+			ok: false,
+			error: {
+				code: "live_session",
+				message: "Session launch environment cannot be changed while a session is live; close it first.",
+			},
 		});
 	} finally {
 		await broker.stop();

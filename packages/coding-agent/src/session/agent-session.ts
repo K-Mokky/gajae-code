@@ -26621,6 +26621,7 @@ export class AgentSession {
 				cwd,
 				timeout: clampTimeout("bash") * 1000,
 				env,
+				sessionEnvironment: this.#sessionEnvironment,
 				unsetEnv: sessionLaunchEnvironmentUnsetNames(this.#sessionEnvironment),
 				onMinimizedSave: originalText => saveAgentBashOriginalArtifact(publishArtifact, originalText),
 			});
