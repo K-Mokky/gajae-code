@@ -1,8 +1,12 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent, logger } from "@gajae-code/utils";
-import { createSessionChildEnvironment, type SessionLaunchEnvironment } from "../../../sdk/session-environment";
-import { type DetectedRunner, type RunnerTask, type TaskRunner, whichWithSessionEnvironment } from "../runner";
+import {
+	createSessionChildEnvironment,
+	type SessionLaunchEnvironment,
+	whichWithSessionEnvironment,
+} from "../../../sdk/session-environment";
+import type { DetectedRunner, RunnerTask, TaskRunner } from "../runner";
 
 export interface CargoMetadataTarget {
 	kind?: string[];

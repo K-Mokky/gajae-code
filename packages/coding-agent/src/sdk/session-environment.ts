@@ -1,3 +1,5 @@
+import { $which, getEnvValue } from "@gajae-code/utils";
+
 export interface SessionLaunchEnvironment {
 	readonly env?: Readonly<Record<string, string>>;
 	readonly unsetEnv?: readonly string[];
@@ -95,6 +97,15 @@ export function hasSessionPathOverride(
 	const isPathName = (name: string): boolean =>
 		platform === "win32" ? name.toUpperCase() === "PATH" : name === "PATH";
 	return Object.keys(environment?.env ?? {}).some(isPathName) || (environment?.unsetEnv ?? []).some(isPathName);
+}
+
+export function whichWithSessionEnvironment(
+	command: string,
+	launchEnvironment?: SessionLaunchEnvironment,
+): string | null {
+	if (!hasSessionPathOverride(launchEnvironment)) return $which(command);
+	const environment = createSessionChildEnvironment(launchEnvironment);
+	return $which(command, { PATH: environment === undefined ? "" : (getEnvValue(environment, "PATH") ?? "") });
 }
 
 /** Creates a child environment from the active session overlay, when one exists. */

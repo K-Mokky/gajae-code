@@ -13,8 +13,7 @@ import {
 	tasksFromCargoMetadata,
 	titleFromOp,
 } from "@gajae-code/coding-agent/tools/implementations";
-import type { SessionLaunchEnvironment } from "../../src/sdk/session-environment";
-import { whichWithSessionEnvironment } from "../../src/tools/recipe/runner";
+import { type SessionLaunchEnvironment, whichWithSessionEnvironment } from "../../src/sdk/session-environment";
 
 const detectedRunners: DetectedRunner[] = [
 	{

@@ -1,8 +1,8 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent, logger } from "@gajae-code/utils";
-import type { SessionLaunchEnvironment } from "../../../sdk/session-environment";
-import { type DetectedRunner, type RunnerTask, type TaskRunner, whichWithSessionEnvironment } from "../runner";
+import { type SessionLaunchEnvironment, whichWithSessionEnvironment } from "../../../sdk/session-environment";
+import type { DetectedRunner, RunnerTask, TaskRunner } from "../runner";
 
 const MAKEFILE_NAMES = ["Makefile", "makefile", "GNUmakefile"] as const;
 const TARGET_PATTERN = /^(?<name>[A-Za-z_][A-Za-z0-9_-]*)\s*:(?!=).*?(?:##\s*(?<doc>.+))?$/u;
