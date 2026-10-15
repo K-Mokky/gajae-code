@@ -209,6 +209,15 @@ function captureTaskExecutionScope(session: ToolSession): ToolSession {
 	}) as ToolSession;
 }
 
+/** Approval policy copied into a task child. A missing mode stays `allow`, the child default. */
+function inheritedSubagentApproval(session: ToolSession) {
+	const mode = session.getSdkPermissionMode?.();
+	return {
+		sdkPermissionMode: mode === "deny" || mode === "prompt" ? mode : ("allow" as const),
+		clientBridge: session.getClientBridge?.(),
+	};
+}
+
 function renderTaskAssignment(assignment: string, simpleMode: TaskSimpleMode): string {
 	return renderSubagentUserPrompt(assignment, simpleMode === "independent");
 }
@@ -2499,6 +2508,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						agentDir: session.getSessionAgentDir?.() ?? session.settings.getAgentDir(),
 						profileAuthority: session.profileAuthority,
 						inheritedServiceTier: session.serviceTier,
+						...inheritedSubagentApproval(session),
 						contextFiles,
 						skills: availableSkills,
 						autoloadSkills: resolvedAutoloadSkills,
@@ -2589,6 +2599,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						agentDir: session.getSessionAgentDir?.() ?? session.settings.getAgentDir(),
 						profileAuthority: session.profileAuthority,
 						inheritedServiceTier: session.serviceTier,
+						...inheritedSubagentApproval(session),
 						contextFiles,
 						skills: availableSkills,
 						autoloadSkills: resolvedAutoloadSkills,

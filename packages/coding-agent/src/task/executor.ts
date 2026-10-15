@@ -60,6 +60,7 @@ import type { SessionLaunchEnvironment } from "../sdk/session-environment";
 import type { AgentSession, AgentSessionEvent, ForkContextSeed } from "../session/agent-session";
 import { ArtifactManager } from "../session/artifacts";
 import type { AuthStorage } from "../session/auth-storage";
+import type { ClientBridge } from "../session/client-bridge";
 import { SKILL_PROMPT_MESSAGE_TYPE } from "../session/messages";
 import { SessionManager, type SessionMemoryMode } from "../session/session-manager";
 import { FileSessionStorage } from "../session/session-storage";
@@ -302,6 +303,16 @@ export interface ExecutorOptions {
 	 * the same immutable child settings snapshot.
 	 */
 	inheritedServiceTier?: ServiceTier;
+	/**
+	 * Parent ACP/SDK approval mode. `deny` and `prompt` replace the child
+	 * default (`allow`) before the first prompt. `allow` is that default.
+	 */
+	sdkPermissionMode?: "prompt" | "allow" | "deny";
+	/**
+	 * Parent client bridge. Only `requestPermission` is copied onto the child.
+	 * Terminal, filesystem, and deferAgentInitiatedTurns stay on the parent.
+	 */
+	clientBridge?: ClientBridge;
 	/** Override local:// protocol options so subagent shares parent's local:// root */
 	localProtocolOptions?: LocalProtocolOptions;
 	/**
@@ -1016,6 +1027,16 @@ function autoroutingAttemptDisposition(failure: AutoroutingPreflightFailure): {
 	if (failure.kind === "local" && (!failure.transient || failure.op === "preflight_validation"))
 		return { code: "config_invalid_terminal", advance: false };
 	return { code: "unclassified_terminal", advance: false };
+}
+
+/** Permission callback only. Terminal, filesystem, and defer flags stay on the parent. */
+function permissionOnlyBridge(bridge: ClientBridge | undefined): ClientBridge | undefined {
+	if (!bridge?.requestPermission || bridge.capabilities.requestPermission !== true) return undefined;
+	const requestPermission = bridge.requestPermission.bind(bridge);
+	return {
+		capabilities: { requestPermission: true },
+		requestPermission: (toolCall, options, signal) => requestPermission(toolCall, options, signal),
+	};
 }
 
 export async function runSubprocessOnce(options: ExecutorOptions): Promise<SingleResult> {
@@ -2119,6 +2140,12 @@ export async function runSubprocessOnce(options: ExecutorOptions): Promise<Singl
 			);
 
 			activeSession = session;
+			// `allow` is the child default. deny/prompt must be copied before the first prompt.
+			if (options.sdkPermissionMode === "deny" || options.sdkPermissionMode === "prompt") {
+				session.setSdkPermissionMode(options.sdkPermissionMode);
+			}
+			const approvalBridge = permissionOnlyBridge(options.clientBridge);
+			if (approvalBridge) session.setClientBridge(approvalBridge);
 			const configuredChildChain = parentFallbackSelector ? [parentFallbackSelector] : modelPatterns;
 			session.setConfiguredModelChain("default", configuredChildChain, "subagent", agent.name, true);
 			if (!parentFallbackSelector) {
