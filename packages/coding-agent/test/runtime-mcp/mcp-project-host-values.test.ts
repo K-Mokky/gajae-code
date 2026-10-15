@@ -149,6 +149,60 @@ describe("project MCP host values", () => {
 		expect(httpHeaders(loaded.configs.user)["X-Api-Secret"]).toBe(SECRET);
 	});
 
+	it("uses session environment for stdio references without changing HTTP resolution", async () => {
+		await writeJson(".gjc/mcp.json", {
+			mcpServers: {
+				project: {
+					type: "stdio",
+					command: "unused",
+					env: {
+						DIRECT: PUBLIC_REF,
+						DEFAULTED: `\${${PUBLIC_NAME}:-session-fallback}`,
+					},
+				},
+				remote: {
+					type: "http",
+					url: "http://127.0.0.1:9/remote",
+					headers: { "X-Public": PUBLIC_REF },
+				},
+			},
+		});
+		await writeJson("mcp.json", {
+			mcpServers: {
+				standalone: {
+					type: "stdio",
+					command: "unused",
+					env: {
+						DIRECT: PUBLIC_REF,
+						DEFAULTED: `\${${PUBLIC_NAME}:-session-fallback}`,
+					},
+				},
+			},
+		});
+		const environment = Object.fromEntries(
+			Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined),
+		);
+		delete environment[PUBLIC_NAME];
+
+		const loaded = await loadAllMCPConfigs(projectDir, {
+			agentDir,
+			filterExa: false,
+			autoloadOnly: true,
+			environment,
+		});
+
+		expect(stdioEnv(loaded.configs.project)).toEqual({
+			DIRECT: PUBLIC_REF,
+			DEFAULTED: "session-fallback",
+		});
+		expect(stdioEnv(loaded.configs.standalone)).toEqual({
+			DIRECT: PUBLIC_REF,
+			DEFAULTED: "session-fallback",
+		});
+		expect(httpHeaders(loaded.configs.remote)["X-Public"]).toBe(PUBLIC);
+		expect(JSON.stringify(loaded.configs.project)).not.toContain(PUBLIC);
+	});
+
 	it("does not copy secret env names from a repo-root mcp.json", async () => {
 		await writeJson("mcp.json", {
 			mcpServers: {

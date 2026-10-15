@@ -379,6 +379,8 @@ export function resolveSystemChromeForProfile(): string | undefined {
 export interface LaunchHeadlessOptions {
 	headless: boolean;
 	viewport?: { width: number; height: number; deviceScaleFactor?: number };
+	/** Effective child environment after applying the lifecycle session overlay. */
+	environment?: Record<string, string>;
 	/**
 	 * Optional isolated warm-up profile directory (see profile-reuse.ts). When
 	 * set, the headless browser launches against this isolated copy of the user's
@@ -436,7 +438,11 @@ export async function launchHeadlessBrowser(opts: LaunchHeadlessOptions): Promis
 	if (browserLaunchFlagEnabled("PUPPETEER_PROXY_IGNORE_CERT_ERRORS")) {
 		launchArgs.push("--ignore-certificate-errors");
 	}
-	const launchEnv = opts.geo?.timezone ? { ...process.env, TZ: opts.geo.timezone } : undefined;
+	const launchEnv =
+		opts.environment === undefined && opts.geo?.timezone === undefined
+			? undefined
+			: { ...(opts.environment ?? process.env) };
+	if (launchEnv && opts.geo?.timezone) launchEnv.TZ = opts.geo.timezone;
 	return await puppeteer.launch({
 		headless: opts.headless,
 		defaultViewport: opts.headless ? initialViewport : null,

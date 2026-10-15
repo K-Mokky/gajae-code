@@ -9,6 +9,7 @@ import {
 	parseNumstat,
 } from "../commit/git/diff";
 import type { FileDiff, FileHunks, NumstatEntry } from "../commit/types";
+import { createSessionChildEnvironment, getCurrentSessionLaunchEnvironment } from "../sdk/session-environment";
 import { ToolAbortError, ToolError, throwIfAborted } from "../tools/tool-errors";
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -196,9 +197,15 @@ async function runCommand(
 	options: CommandOptions = {},
 ): Promise<GitCommandResult> {
 	const commandArgs = withShortLivedGitConfig(options.readOnly ? withNoOptionalLocks(args) : [...args]);
+	const baseEnvironment = options.env ? { ...process.env, GIT_OPTIONAL_LOCKS: "0", ...options.env } : undefined;
+	const sessionEnvironment = getCurrentSessionLaunchEnvironment();
+	const environment =
+		sessionEnvironment === undefined
+			? baseEnvironment
+			: createSessionChildEnvironment(sessionEnvironment, baseEnvironment ?? process.env);
 	const child = Bun.spawn(["git", ...commandArgs], {
 		cwd,
-		env: options.env ? { ...process.env, GIT_OPTIONAL_LOCKS: "0", ...options.env } : undefined,
+		env: environment,
 		signal: options.signal,
 		stdin: normalizeStdin(options.stdin),
 		stdout: "pipe",

@@ -36,7 +36,11 @@ import { truncateToVisualLines } from "../modes/components/visual-truncate";
 import { highlightCode, type Theme } from "../modes/theme/theme";
 import bashDescription from "../prompts/tools/bash.md" with { type: "text" };
 import { renderSpawnTable, runSdkSpawn, type SdkSpawnArgs } from "../sdk/cli/master-cli";
-import { applySessionLaunchEnvironment, sessionLaunchEnvironmentUnsetNames } from "../sdk/session-environment";
+import {
+	applySessionLaunchEnvironment,
+	createSessionChildEnvironment,
+	sessionLaunchEnvironmentUnsetNames,
+} from "../sdk/session-environment";
 import type {
 	ClientBridgeTerminalExitStatus,
 	ClientBridgeTerminalHandle,
@@ -1380,12 +1384,14 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		}
 		if (allowedPrefixes && allowedPrefixes.length > 0) {
 			const commandsToCheck = rawCommand === command ? [command] : [rawCommand, command];
+			const restrictionEnvironment = createSessionChildEnvironment(this.session.sessionEnvironment);
 			const invocationCwd =
 				cwd && !cwd.includes("://") && !cwd.includes("local:/")
 					? resolveToCwd(cwd, this.session.cwd)
 					: this.session.cwd;
 			for (const commandToCheck of commandsToCheck) {
 				const allowlist = checkBashAllowedPrefixes(commandToCheck, allowedPrefixes, {
+					...(restrictionEnvironment === undefined ? {} : { env: restrictionEnvironment }),
 					profile: this.session.bashRestrictionProfile,
 					...(this.session.bashRestrictionProfile === "read-only"
 						? {}
@@ -1453,8 +1459,9 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		// transcript. This is after command expansion but before any spawn, so
 		// blocked attempts inject no bytes and create no transcript turn.
 		if (this.session.bashRestrictionProfile !== "read-only") {
+			const environment = createSessionChildEnvironment(this.session.sessionEnvironment);
 			const injection = await checkTmuxSelfInjection(command, {
-				env: process.env,
+				env: environment ?? process.env,
 				cwd: this.session.cwd,
 			});
 			if (injection.block) {

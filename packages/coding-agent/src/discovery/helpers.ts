@@ -1061,12 +1061,20 @@ export function isSensitiveEnvName(name: string): boolean {
 	return SENSITIVE_ENV_NAME.test(name);
 }
 
+export function isStdioMcpTransportConfig(value: unknown): boolean {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return true;
+	const config = value as Record<string, unknown>;
+	if (config.type === "http" || config.type === "sse") return false;
+	if (config.type !== undefined) return true;
+	return Boolean(config.command) || !config.url;
+}
+
 function expandEnvVars(value: string, extraEnv?: Record<string, string>, skipSensitiveNames = false): string {
 	return value.replace(/\$\{([^}:]+)(?::-([^}]*))?\}/g, (_, varName: string, defaultValue?: string) => {
 		if (skipSensitiveNames && isSensitiveEnvName(varName)) {
 			return defaultValue !== undefined ? defaultValue : `\${${varName}}`;
 		}
-		const envValue = extraEnv?.[varName] ?? Bun.env[varName];
+		const envValue = extraEnv === undefined ? Bun.env[varName] : extraEnv[varName];
 		if (envValue !== undefined) return envValue;
 		if (defaultValue !== undefined) return defaultValue;
 		return `\${${varName}}`;

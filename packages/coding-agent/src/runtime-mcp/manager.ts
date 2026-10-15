@@ -13,7 +13,7 @@ import { logger } from "@gajae-code/utils";
 import type { SourceMeta } from "../capability/types";
 import * as configValue from "../config/resolve-config-value";
 import type { CustomTool } from "../extensibility/custom-tools/types";
-import type { SessionLaunchEnvironment } from "../sdk/session-environment";
+import { applySessionLaunchEnvironment, type SessionLaunchEnvironment } from "../sdk/session-environment";
 import type { AuthStorage, OAuthCredential } from "../session/auth-storage";
 import {
 	getPrompt,
@@ -234,6 +234,17 @@ function canonicalMCPWorkingDirectory(candidate: string): string {
 	} catch {
 		return absolute;
 	}
+}
+
+function createSessionConfigEnvironment(
+	sessionEnvironment: SessionLaunchEnvironment | undefined,
+): Record<string, string> | undefined {
+	if (sessionEnvironment === undefined) return undefined;
+	const environment = Object.fromEntries(
+		Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined),
+	);
+	applySessionLaunchEnvironment(environment, sessionEnvironment);
+	return environment;
 }
 
 export class MCPManagerLifecycleError extends Error {
@@ -1214,6 +1225,7 @@ export class MCPManager {
 			throw new Error("Tools-only MCP manager already loaded an explicit config");
 		}
 		if (this.#toolsOnly) this.#toolsOnlyConfigLoaded = true;
+		const configEnvironment = createSessionConfigEnvironment(this.#sessionEnvironment);
 		const { configs, exaApiKeys, sources, configurationWarning } = await loadAllMCPConfigs(this.cwd, {
 			enableProjectConfig: options?.enableProjectConfig,
 			filterExa: options?.filterExa,
@@ -1221,6 +1233,7 @@ export class MCPManager {
 			autoloadOnly: options?.autoloadOnly,
 			nativeOnly: options?.nativeOnly,
 			configPath: options?.configPath,
+			environment: configEnvironment,
 		});
 		omitUnapprovedProjectStdio(configs, sources, this.#allowUntrustedProjectStdio, this.#toolsOnly);
 		if (this.#toolCacheServerNames !== undefined) {
@@ -3294,12 +3307,21 @@ export class MCPManager {
 		}
 
 		const untrustedProject = isUntrustedProjectMcpSource(source, this.#toolsOnly);
+		const configResolutionEnvironment =
+			resolved.type !== "http" && resolved.type !== "sse"
+				? createSessionConfigEnvironment(this.#sessionEnvironment)
+				: undefined;
 		const resolveValue = async (value: string): Promise<string | undefined> => {
 			const decision = decideUntrustedProjectConfigValue(value, untrustedProject);
 			if (decision.action === "drop") return undefined;
 			if (decision.action === "literal") return decision.value;
 			try {
-				const resolvedValue = await configValue.resolveConfigValue(value);
+				const resolvedValue = await configValue.resolveConfigValue(
+					value,
+					undefined,
+					configResolutionEnvironment,
+					this.#sessionEnvironment?.unsetEnv,
+				);
 				if (this.#toolsOnly && !resolvedValue) throw new MCPExpectedFailure();
 				return resolvedValue;
 			} catch (error) {

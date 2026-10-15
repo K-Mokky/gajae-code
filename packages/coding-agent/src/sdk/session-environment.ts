@@ -77,7 +77,31 @@ export function sessionLaunchEnvironment(env: unknown, unsetEnv: unknown): Sessi
 	};
 }
 
-/** Applies the validated launch overlay to an isolated session host's child environment. */
+let currentProcessSessionEnvironment: SessionLaunchEnvironment | undefined;
+
+export function setCurrentSessionLaunchEnvironment(environment: SessionLaunchEnvironment | undefined): void {
+	currentProcessSessionEnvironment =
+		environment === undefined ? undefined : sessionLaunchEnvironment(environment.env, environment.unsetEnv);
+}
+
+export function getCurrentSessionLaunchEnvironment(): SessionLaunchEnvironment | undefined {
+	return currentProcessSessionEnvironment;
+}
+
+/** Creates an isolated child environment with the validated session overlay applied. */
+export function createSessionChildEnvironment(
+	launchEnvironment: SessionLaunchEnvironment | undefined,
+	inheritedEnvironment: Record<string, string | undefined> = process.env,
+): Record<string, string> | undefined {
+	if (launchEnvironment === undefined) return undefined;
+	const environment = Object.fromEntries(
+		Object.entries(inheritedEnvironment).filter((entry): entry is [string, string] => entry[1] !== undefined),
+	);
+	applySessionLaunchEnvironment(environment, launchEnvironment);
+	return environment;
+}
+
+/** Applies the validated launch overlay to an isolated session environment map. */
 export function applySessionLaunchEnvironment(
 	environment: Record<string, string | undefined>,
 	launchEnvironment: SessionLaunchEnvironment | undefined,

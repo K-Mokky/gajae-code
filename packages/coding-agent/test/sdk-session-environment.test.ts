@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { SessionIndex } from "../src/sdk/broker/session-index";
 import {
 	applySessionLaunchEnvironment,
+	createSessionChildEnvironment,
 	isValidSessionLaunchEnvironment,
 	type SessionLaunchEnvironment,
 	sessionEnvironmentNames,
@@ -31,6 +32,26 @@ test("session launch environment overlays a child environment without mutating i
 	applySessionLaunchEnvironment(specialNameChild, { env: specialNameEnv });
 	expect(Object.hasOwn(specialNameChild, "__proto__")).toBe(true);
 	expect(Object.getOwnPropertyDescriptor(specialNameChild, "__proto__")?.value).toBe("literal-value");
+});
+
+test("session child environments apply set and unset values without mutating inherited values", () => {
+	const inheritedEnvironment = {
+		SESSION_VALUE: "host-value",
+		SESSION_UNSET: "host-secret",
+		SESSION_KEEP: "preserved",
+	};
+	const childEnvironment = createSessionChildEnvironment(
+		{ env: { SESSION_VALUE: "session-value" }, unsetEnv: ["SESSION_UNSET"] },
+		inheritedEnvironment,
+	);
+
+	expect(childEnvironment).toEqual({ SESSION_VALUE: "session-value", SESSION_KEEP: "preserved" });
+	expect(inheritedEnvironment).toEqual({
+		SESSION_VALUE: "host-value",
+		SESSION_UNSET: "host-secret",
+		SESSION_KEEP: "preserved",
+	});
+	expect(createSessionChildEnvironment(undefined, inheritedEnvironment)).toBeUndefined();
 });
 
 test("session launch environment rejects invalid, conflicting, and host-control variables", () => {

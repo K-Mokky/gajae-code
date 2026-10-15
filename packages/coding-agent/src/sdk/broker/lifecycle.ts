@@ -6018,6 +6018,25 @@ function deadlineFieldsPresent(input: Input): boolean {
 		input.lifecycleCleanupDeadlineAt,
 	].some(value => value !== undefined);
 }
+
+function rejectLiveResumeEnvironment(input: Input): BrokerResponse | undefined {
+	const target =
+		typeof input.target === "object" && input.target !== null && !Array.isArray(input.target)
+			? (input.target as Record<string, unknown>)
+			: undefined;
+	const hasTopLevelEnvironment = Object.hasOwn(input, "env") || Object.hasOwn(input, "unsetEnv");
+	const hasTargetEnvironment =
+		target !== undefined && (Object.hasOwn(target, "env") || Object.hasOwn(target, "unsetEnv"));
+	if (!hasTopLevelEnvironment && !hasTargetEnvironment) return undefined;
+	if (hasTopLevelEnvironment && hasTargetEnvironment)
+		return fail("invalid_input", "Session launch environment fields must be supplied in one location.");
+	const env = hasTopLevelEnvironment ? input.env : target?.env;
+	const unsetEnv = hasTopLevelEnvironment ? input.unsetEnv : target?.unsetEnv;
+	if (!isValidSessionLaunchEnvironment(env, unsetEnv))
+		return fail("invalid_input", "Session launch environment is invalid.");
+	return fail("live_session", "Session launch environment cannot be changed while a session is live; close it first.");
+}
+
 async function launchInput(
 	broker: Broker,
 	operation: "session.create" | "session.fork" | "session.resume",
@@ -6097,7 +6116,8 @@ async function launchInput(
 		return fail("invalid_input", "sessionId must be a canonical safe identifier.");
 	if (operation === "session.resume" && requested && !hasRequestedEnvironment) {
 		await broker.index.refresh();
-		sessionEnvironment = broker.index.findSessionLaunchEnvironment(requested, resolvedRoot);
+		// The target worktree root is new; persisted overlays belong to the original source scope.
+		sessionEnvironment = broker.index.findSessionLaunchEnvironment(requested, suppliedRoot);
 	}
 	if (
 		sessionEnvironment !== undefined &&
@@ -6169,12 +6189,20 @@ async function launchInput(
 		if (!requested) return fail("invalid_input", "sessionId is required to resume a saved session.");
 		const savedPath = text(input.sessionPath);
 		if (!savedPath) return fail("invalid_input", "sessionPath is required to resume a saved session.");
-		const saved = await validateSavedTranscript(broker, cwd, savedPath, requested, "Saved", input.sessionIdentity);
+		const saved = await validateSavedTranscript(
+			broker,
+			sourceCwd,
+			savedPath,
+			requested,
+			"Saved",
+			input.sessionIdentity,
+		);
 		if ("ok" in saved) return saved;
 		return {
 			id: requested,
 			cwd,
 			root: resolvedRoot,
+			...(worktreePlan ? { sourceCwd } : {}),
 			sessionPath: saved.path,
 			modelId,
 			sessionIdentity: saved.identity,
@@ -6895,6 +6923,8 @@ async function executeLifecycleResponse(
 				return fail("endpoint_stale", "Session authority is ambiguous and cannot be resumed safely.");
 			const existing = authority.kind === "live" ? authority.record : undefined;
 			if (existing?.live) {
+				const environmentRejection = rejectLiveResumeEnvironment(input);
+				if (environmentRejection) return environmentRejection;
 				const initialScope = await validateLiveResumeScope(broker, input, requestedSessionId!, existing);
 				if ("ok" in initialScope) return initialScope;
 				const initialIncarnation = endpointIncarnation(existing, requestedSessionId!);
