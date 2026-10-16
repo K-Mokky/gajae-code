@@ -228,6 +228,7 @@ function modelResolutionCwd(input: Record<string, unknown>): string | undefined 
 
 export type BrokerErrorCode =
 	| "idempotency_conflict"
+	| "legacy_lifecycle_ambiguous"
 	| "terminal_uncertain"
 	| "broker_restarting"
 	| "unavailable"
@@ -5366,7 +5367,7 @@ export class Broker {
 						},
 					)
 				) {
-					return error("idempotency_conflict", "legacy lifecycle request has an ambiguous target");
+					return error("legacy_lifecycle_ambiguous", "legacy lifecycle request has an ambiguous target");
 				}
 			}
 		}

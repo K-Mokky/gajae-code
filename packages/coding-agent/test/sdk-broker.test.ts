@@ -3131,7 +3131,10 @@ describe("SDK broker identity and discovery", () => {
 			const assertLegacyIdentityFenced = async (key: string): Promise<void> => {
 				await expect(broker.handleRequest("session.create", { cwd: root }, key)).resolves.toEqual({
 					ok: false,
-					error: { code: "idempotency_conflict", message: "legacy lifecycle request has an ambiguous target" },
+					error: {
+						code: "legacy_lifecycle_ambiguous",
+						message: "legacy lifecycle request has an ambiguous target",
+					},
 				});
 				expect(launchAttempts).toBe(1);
 			};
@@ -3170,7 +3173,7 @@ describe("SDK broker identity and discovery", () => {
 	describe("non-create lifecycle requests past final legacy rows", () => {
 		const ambiguousTarget = {
 			ok: false,
-			error: { code: "idempotency_conflict", message: "legacy lifecycle request has an ambiguous target" },
+			error: { code: "legacy_lifecycle_ambiguous", message: "legacy lifecycle request has an ambiguous target" },
 		} as const;
 		const withLegacyLedger = async (
 			seed: (ledger: LifecycleLedger, agentDir: string) => Promise<void>,
@@ -3512,7 +3515,10 @@ describe("SDK broker identity and discovery", () => {
 					),
 				).resolves.toEqual({
 					ok: false,
-					error: { code: "idempotency_conflict", message: "legacy lifecycle request has an ambiguous target" },
+					error: {
+						code: "legacy_lifecycle_ambiguous",
+						message: "legacy lifecycle request has an ambiguous target",
+					},
 				});
 			} finally {
 				await broker.stop();
