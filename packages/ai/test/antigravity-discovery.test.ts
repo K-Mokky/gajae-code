@@ -230,6 +230,7 @@ describe("Antigravity model discovery", () => {
 		Object.assign(console, { error: spyConsoleError });
 
 		const models: Record<string, unknown> = {};
+		const requestUserAgents: Array<string | null> = [];
 		models["gemini-3.1-pro-low"] = {
 			displayName: "Gemini 3.1 Pro (Low)",
 			maxTokens: 1_048_576,
@@ -245,10 +246,12 @@ describe("Antigravity model discovery", () => {
 			agentModelSorts: [{ groups: [{ modelIds: ["gemini-3.1-pro-low"] }] }],
 		};
 
-		const fetcher = (async () =>
-			new Response(JSON.stringify(payload), {
+		const fetcher = (async (_input: string | URL | Request, init?: RequestInit) => {
+			requestUserAgents.push(new Headers(init?.headers).get("User-Agent"));
+			return new Response(JSON.stringify(payload), {
 				headers: { "content-type": "application/json" },
-			})) as unknown as typeof fetch;
+			});
+		}) as unknown as typeof fetch;
 
 		try {
 			await fetchAntigravityDiscoveryModels({
@@ -260,7 +263,9 @@ describe("Antigravity model discovery", () => {
 			expect(consoleErrorSpyData).toContain("[GJC_DEBUG_ANTIGRAVITY_DISCOVERY]");
 			const output = consoleErrorSpyData.join("\n");
 			expect(output).toContain("HTTP Status:");
-			expect(output).toContain("User-Agent:");
+			expect(requestUserAgents).toEqual([expect.any(String)]);
+			expect(output).toContain(`User-Agent: ${requestUserAgents[0]}`);
+			expect(output).not.toContain("(using default getAntigravityUserAgent())");
 			expect(output).toContain("Endpoint:");
 			expect(output).toContain("Total raw models from response:");
 			expect(output).toContain("=== KEPT MODELS ===");

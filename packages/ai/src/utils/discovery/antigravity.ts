@@ -199,6 +199,7 @@ export async function fetchAntigravityDiscoveryModels(
 	const fetcher = options.fetcher ?? fetch;
 	const signal = options.signal ?? AbortSignal.timeout(5_000);
 	const targetProvider = options.targetProvider ?? "google-antigravity";
+	const userAgent = options.userAgent ?? getAntigravityUserAgent();
 	const endpoints = options.endpoint
 		? [trimTrailingSlashes(options.endpoint)]
 		: DEFAULT_ANTIGRAVITY_DISCOVERY_ENDPOINTS.map(trimTrailingSlashes);
@@ -211,7 +212,7 @@ export async function fetchAntigravityDiscoveryModels(
 				headers: {
 					Authorization: `Bearer ${options.token}`,
 					"Content-Type": "application/json",
-					"User-Agent": options.userAgent ?? getAntigravityUserAgent(),
+					"User-Agent": userAgent,
 				},
 				body: JSON.stringify({}),
 				signal,
@@ -320,10 +321,9 @@ export async function fetchAntigravityDiscoveryModels(
 
 		if (debugEnabled) {
 			const allRawModelIds = Object.keys(parsed.models ?? {}).sort();
-			const ua = options.userAgent ?? "(using default getAntigravityUserAgent())";
 			console.error("[GJC_DEBUG_ANTIGRAVITY_DISCOVERY]");
 			console.error(`  HTTP Status: ${response.status}`);
-			console.error(`  User-Agent: ${ua}`);
+			console.error(`  User-Agent: ${userAgent}`);
 			console.error(`  Endpoint: ${endpoint}`);
 			console.error(`  Total raw models from response: ${allRawModelIds.length}`);
 			console.error("\n  === KEPT MODELS ===");

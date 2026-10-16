@@ -131,11 +131,12 @@ describe("Code Assist Standard/Enterprise tier (business accounts with user-prov
 		expect(models?.map(m => m.id)).not.toContain("gemini-4-argon-disabled");
 	});
 
-	it("cache invalidates correctly for business-tier with UA change", async () => {
-		// First: old UA (hypothetically)
+	it("sends the configured User-Agent for business-tier discovery", async () => {
 		const oldUA = "antigravity-ide";
-		const oldFetcher = (async () =>
-			new Response(
+		const oldRequestUserAgents: Array<string | null> = [];
+		const oldFetcher = (async (_input: string | URL | Request, init?: RequestInit) => {
+			oldRequestUserAgents.push(new Headers(init?.headers).get("User-Agent"));
+			return new Response(
 				JSON.stringify({
 					models: {
 						"gemini-2.5-flash": {
@@ -156,9 +157,10 @@ describe("Code Assist Standard/Enterprise tier (business accounts with user-prov
 					],
 				}),
 				{ headers: { "content-type": "application/json" } },
-			)) as unknown as typeof fetch;
+			);
+		}) as unknown as typeof fetch;
 
-		const oldModels = await fetchAntigravityDiscoveryModels({
+		await fetchAntigravityDiscoveryModels({
 			token: "business-token",
 			endpoint: "https://cloudcode-pa.googleapis.com",
 			userAgent: oldUA,
@@ -166,13 +168,14 @@ describe("Code Assist Standard/Enterprise tier (business accounts with user-prov
 			targetProvider: "google-gemini-cli",
 		});
 
-		expect(oldModels).not.toBeNull();
+		expect(oldRequestUserAgents).toEqual([oldUA]);
 
-		// Second: new UA
 		const newUA = "antigravity/cli/1.3.4 (os_type=darwin; arch=arm64; aidev_client; auth_method=oauth)";
 		let fetchCallCount = 0;
-		const newFetcher = (async () => {
+		const newRequestUserAgents: Array<string | null> = [];
+		const newFetcher = (async (_input: string | URL | Request, init?: RequestInit) => {
 			fetchCallCount++;
+			newRequestUserAgents.push(new Headers(init?.headers).get("User-Agent"));
 			return new Response(
 				JSON.stringify({
 					models: {
@@ -205,11 +208,10 @@ describe("Code Assist Standard/Enterprise tier (business accounts with user-prov
 			targetProvider: "google-gemini-cli",
 		});
 
-		// Fetcher should have been called
 		expect(fetchCallCount).toBe(1);
-		// Both should return models
 		expect(newModels).not.toBeNull();
 		expect(newModels?.length).toBeGreaterThan(0);
+		expect(newRequestUserAgents).toEqual([newUA]);
 	});
 
 	it("Code Assist discovery with target provider mapping", async () => {
