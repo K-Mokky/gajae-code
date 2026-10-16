@@ -23,6 +23,7 @@ import { Broker, type BrokerCleanupEvidence, type BrokerResponse } from "../src/
 import { endpointIncarnation } from "../src/sdk/broker/endpoint-authority";
 import {
 	brokerOwnerForTest,
+	ensureBroker,
 	SDK_BROKER_AUTOSTART_ENV,
 	startFixtureBrokerWithLeaseForTest,
 } from "../src/sdk/broker/ensure";
@@ -10023,6 +10024,7 @@ test("ACP, MCP, and daemon global requests bootstrap a broker with zero sessions
 		expect(await readSdkBrokerDiscovery(agentDirs[2])).not.toBeNull();
 	} finally {
 		restoreBrokerAutostart();
+		for (const agentDir of agentDirs) await brokerOwnerForTest(agentDir)?.stop();
 		await fs.rm(root, { recursive: true, force: true });
 	}
 }, 30_000);
@@ -10324,6 +10326,25 @@ test("session/list does not grant a second ACP connection destructive lifecycle 
 		).resolves.toEqual([{}, {}]);
 	} finally {
 		restoreBrokerAutostart();
+		await brokerOwnerForTest(agentDir)?.stop();
 		await fs.rm(root, { recursive: true, force: true });
 	}
 }, 30_000);
+
+test("broker owner shuts down through its retained endpoint after agent directory removal", async () => {
+	const root = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-broker-owner-dir-removed-"));
+	const agentDir = path.join(root, "agent");
+	const discovery = await ensureBroker({ agentDir });
+	const owner = brokerOwnerForTest(agentDir);
+	if (!owner) throw new Error("expected a locally owned SDK broker");
+	try {
+		expect(discovery.pid).not.toBe(process.pid);
+		await fs.rm(root, { recursive: true, force: true });
+		const stoppedAt = Date.now();
+		await owner.stop();
+		expect(Date.now() - stoppedAt).toBeLessThan(5_000);
+	} finally {
+		await owner.stop().catch(() => undefined);
+		await fs.rm(root, { recursive: true, force: true });
+	}
+});

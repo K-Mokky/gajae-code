@@ -4232,6 +4232,10 @@ export class Broker {
 			this.discovery?.ownerId === this.#owner
 		);
 	}
+	/** Whether this broker completed its initial retained discovery publication. */
+	get hasPublishedDiscovery(): boolean {
+		return this.#publishedAt !== null;
+	}
 	get completion(): Promise<void> {
 		return this.#completion;
 	}
