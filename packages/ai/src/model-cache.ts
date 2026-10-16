@@ -130,7 +130,7 @@ export function readModelCache<TApi extends Api>(
 			return null;
 		}
 		// Invalidate cache if discovery User-Agent has changed
-		if (expectedDiscoveryUserAgent && row.discovery_user_agent !== expectedDiscoveryUserAgent) {
+		if (expectedDiscoveryUserAgent !== undefined && row.discovery_user_agent !== expectedDiscoveryUserAgent) {
 			return null;
 		}
 		const models = JSON.parse(row.models) as Model<TApi>[];
@@ -224,6 +224,7 @@ export function updateModelCacheIfUnchanged<TApi extends Api>(
 	expectedDynamicModelIds: readonly string[] | undefined,
 	expectedDynamicModelProvenance: string | undefined,
 	expectedModels: readonly Model<TApi>[],
+	expectedDiscoveryUserAgent: string | undefined,
 	updatedAt: number,
 	models: Model<TApi>[],
 	authoritative: boolean,
@@ -236,6 +237,7 @@ export function updateModelCacheIfUnchanged<TApi extends Api>(
 	try {
 		const expectedIds = expectedDynamicModelIds === undefined ? null : JSON.stringify(expectedDynamicModelIds);
 		const provenance = expectedDynamicModelProvenance ?? null;
+		const expectedUserAgent = expectedDiscoveryUserAgent ?? null;
 		const nextIds = dynamicModelIds === undefined ? null : JSON.stringify(dynamicModelIds);
 		const nextProvenance = dynamicModelProvenance ?? null;
 		const expectedModelsJson = JSON.stringify(expectedModels);
@@ -244,7 +246,8 @@ export function updateModelCacheIfUnchanged<TApi extends Api>(
 			 SET updated_at = ?, authoritative = ?, static_fingerprint = ?, dynamic_model_ids = ?,
 			     dynamic_model_provenance = ?, discovery_user_agent = ?, models = ?
 			 WHERE provider_id = ? AND updated_at = ?
-			   AND dynamic_model_ids IS ? AND dynamic_model_provenance IS ? AND models = ?`,
+			   AND dynamic_model_ids IS ? AND dynamic_model_provenance IS ?
+			   AND discovery_user_agent IS ? AND models = ?`,
 			[
 				updatedAt,
 				authoritative ? 1 : 0,
@@ -257,6 +260,7 @@ export function updateModelCacheIfUnchanged<TApi extends Api>(
 				expectedUpdatedAt,
 				expectedIds,
 				provenance,
+				expectedUserAgent,
 				expectedModelsJson,
 			],
 		);
