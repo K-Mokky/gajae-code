@@ -9,7 +9,7 @@ import type {
 	KernelShutdownResult,
 } from "@gajae-code/coding-agent/eval/py/kernel";
 import { checkPythonKernelAvailability, PythonKernel } from "@gajae-code/coding-agent/eval/py/kernel";
-import { TempDir } from "@gajae-code/utils";
+import { $which, TempDir, WhichCachePolicy } from "@gajae-code/utils";
 import { resolvePythonRuntime, resolveVenvPath } from "../../src/eval/py/runtime";
 import { applySessionLaunchEnvironment } from "../../src/sdk/session-environment";
 
@@ -128,6 +128,52 @@ describe("python eval lifecycle", () => {
 		} finally {
 			restoreEnv(envKeys, previousEnv);
 		}
+	});
+
+	it("resolves Python from the session PATH and bypasses a cached miss", async () => {
+		using tempDir = TempDir.createSync("@gjc-python-session-path-");
+		const binDir = path.join(tempDir.path(), "session-bin");
+		const pythonPath = path.join(binDir, process.platform === "win32" ? "python.exe" : "python");
+		const python3Path = path.join(binDir, process.platform === "win32" ? "python3.exe" : "python3");
+		await fs.mkdir(binDir, { recursive: true });
+		expect($which("python", { PATH: binDir, cache: WhichCachePolicy.Fresh })).toBeNull();
+		await fs.writeFile(pythonPath, "#!/bin/sh\nexit 0\n");
+		await fs.writeFile(python3Path, "#!/bin/sh\nexit 0\n");
+		if (process.platform !== "win32") {
+			await fs.chmod(pythonPath, 0o755);
+			await fs.chmod(python3Path, 0o755);
+		}
+
+		const effectiveEnv: Record<string, string | undefined> = { PATH: Bun.env.PATH };
+		applySessionLaunchEnvironment(effectiveEnv, { env: { PATH: binDir } });
+		const runtime = resolvePythonRuntime(tempDir.path(), effectiveEnv, { managedWorkspaceVenv: true });
+		expect(runtime.pythonPath).toBe(pythonPath);
+
+		await fs.rm(pythonPath);
+		const python3Runtime = resolvePythonRuntime(tempDir.path(), effectiveEnv, { managedWorkspaceVenv: true });
+		expect(python3Runtime.pythonPath).toBe(python3Path);
+	});
+
+	it("resolves mixed-case virtual environment names on Windows", async () => {
+		if (process.platform !== "win32") return;
+		using tempDir = TempDir.createSync("@gjc-python-session-windows-venv-");
+		const venvPath = path.join(tempDir.path(), "session-venv");
+		const pythonPath = path.join(venvPath, "Scripts", "python.exe");
+		await fs.mkdir(path.dirname(pythonPath), { recursive: true });
+		await fs.writeFile(pythonPath, "fixture interpreter");
+
+		const effectiveEnv: Record<string, string | undefined> = {
+			PATH: "",
+			VIRTUAL_ENV: path.join(tempDir.path(), "inherited-venv"),
+		};
+		applySessionLaunchEnvironment(effectiveEnv, { env: { Virtual_Env: venvPath } });
+
+		const runtime = resolvePythonRuntime(tempDir.path(), effectiveEnv, { managedWorkspaceVenv: true });
+		expect(runtime.venvPath).toBe(venvPath);
+		expect(runtime.pythonPath).toBe(pythonPath);
+		expect(runtime.env.Virtual_Env).toBe(venvPath);
+		expect(runtime.env.VIRTUAL_ENV).toBeUndefined();
+		expect(resolveVenvPath(tempDir.path(), { Conda_Prefix: venvPath })).toBe(venvPath);
 	});
 
 	it("coalesces concurrent first acquires for the same session into one kernel", async () => {
