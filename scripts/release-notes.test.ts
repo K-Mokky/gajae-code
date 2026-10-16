@@ -8,6 +8,7 @@ import {
 	earliestMergedPullRequest,
 	isExplicitEmptyGhResult,
 	isRateLimitedGhResult,
+	isTransientGhResult,
 	isUnknownCommitGhResult,
 	rateLimitWaitMs,
 	normalizeSubject,
@@ -395,5 +396,25 @@ describe("search quota pacing", () => {
 		// A far-future stamp cannot park the release indefinitely.
 		expect(rateLimitWaitMs(now / 1000 + 86_400, now)).toBe(90_000);
 		expect(rateLimitWaitMs(Number.NaN, now)).toBe(15_000);
+	});
+});
+
+describe("transient gh failures", () => {
+	test("retries only dropped responses, never refusals or explicit answers", () => {
+		expect(
+			isTransientGhResult(
+				1,
+				"gh api --paginate repos/Yeachan-Heo/gajae-code/commits/2ce24e0d/pulls?per_page=100 --jq ... failed (exit 1): unexpected end of JSON input",
+			),
+		).toBe(true);
+		expect(isTransientGhResult(1, "HTTP 502: Bad Gateway")).toBe(true);
+		expect(isTransientGhResult(1, "HTTP 500: Internal Server Error")).toBe(true);
+		expect(isTransientGhResult(1, "read tcp 10.0.0.1:443: connection reset by peer")).toBe(true);
+		// A success, a permission refusal, an unknown OID, and "no PR" are answers, not drops.
+		expect(isTransientGhResult(0, "unexpected end of JSON input")).toBe(false);
+		expect(isTransientGhResult(1, "HTTP 403: Resource not accessible by integration")).toBe(false);
+		expect(isTransientGhResult(1, "HTTP 501: Not Implemented")).toBe(false);
+		expect(isTransientGhResult(1, "HTTP 422: No commit found for SHA: abc")).toBe(false);
+		expect(isTransientGhResult(1, "could not resolve to a PullRequest")).toBe(false);
 	});
 });
