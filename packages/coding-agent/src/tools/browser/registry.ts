@@ -191,6 +191,7 @@ async function openBrowserHandle(
 	key: string,
 ): Promise<BrowserHandle> {
 	if (kind.kind === "headless") {
+		const environment = createSessionChildEnvironment(opts.sessionEnvironment);
 		let profileWarmupDir: string | undefined;
 		if (opts.profileReuse) {
 			const reuse = resolveProfileReuse({
@@ -199,7 +200,7 @@ async function openBrowserHandle(
 			});
 			if (reuse.warning) logger.warn(reuse.warning);
 			if (reuse.mode === "real" && reuse.warmupDir && reuse.discovered) {
-				const executablePath = headlessExecutableForProfileReuse();
+				const executablePath = headlessExecutableForProfileReuse(opts.sessionEnvironment, environment);
 				if (!canDecryptProfileCookies(executablePath, reuse.discovered.userDataDir)) {
 					try {
 						fs.rmSync(reuse.warmupDir, { recursive: true, force: true });
@@ -217,12 +218,12 @@ async function openBrowserHandle(
 		}
 		let browser: Browser;
 		try {
-			const environment = createSessionChildEnvironment(opts.sessionEnvironment);
 			browser = await launchHeadlessBrowser({
 				headless: kind.headless,
 				viewport: opts.viewport,
 				profileWarmupDir,
 				...(environment === undefined ? {} : { environment }),
+				sessionEnvironment: opts.sessionEnvironment,
 				...(geo ? { geo } : {}),
 			});
 		} catch (error) {
