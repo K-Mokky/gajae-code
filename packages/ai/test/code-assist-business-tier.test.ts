@@ -2,9 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { resolveProviderModels } from "../src/model-manager";
 import { fetchAntigravityDiscoveryModels } from "../src/utils/discovery/antigravity";
-import type { Api } from "../src/types";
 
 const cacheDirs: string[] = [];
 
@@ -34,14 +32,18 @@ describe("Code Assist Standard/Enterprise tier (business accounts with user-prov
 							maxOutputTokens: 65_535,
 						},
 					},
-					agentModelSorts: [{
-						groups: [{
-							modelIds: ["gemini-2.5-flash"],
-						}],
-					}],
+					agentModelSorts: [
+						{
+							groups: [
+								{
+									modelIds: ["gemini-2.5-flash"],
+								},
+							],
+						},
+					],
 				}),
 				{ headers: { "content-type": "application/json" } },
-	)) as unknown as typeof fetch;
+			)) as unknown as typeof fetch;
 
 		const models = await fetchAntigravityDiscoveryModels({
 			token: "code-assist-oauth-token",
@@ -57,7 +59,6 @@ describe("Code Assist Standard/Enterprise tier (business accounts with user-prov
 	it("handles business-tier credentials without projectId (backwards compat)", async () => {
 		const cacheDir = mkdtempSync(join(tmpdir(), "pi-ai-code-assist-"));
 		cacheDirs.push(cacheDir);
-		const cacheDbPath = join(cacheDir, "models.db");
 
 		// Mock response for business user (project-less fallback path)
 		const fetcher = (async () =>
@@ -73,7 +74,7 @@ describe("Code Assist Standard/Enterprise tier (business accounts with user-prov
 					},
 				}),
 				{ headers: { "content-type": "application/json" } },
-		)) as unknown as typeof fetch;
+			)) as unknown as typeof fetch;
 
 		const models = await fetchAntigravityDiscoveryModels({
 			token: "legacy-code-assist-token",
@@ -104,14 +105,18 @@ describe("Code Assist Standard/Enterprise tier (business accounts with user-prov
 							supportsImages: true,
 						},
 					},
-					agentModelSorts: [{
-						groups: [{
-							modelIds: ["gemini-2.5-flash"],
-						}],
-					}],
+					agentModelSorts: [
+						{
+							groups: [
+								{
+									modelIds: ["gemini-2.5-flash"],
+								},
+							],
+						},
+					],
 				}),
 				{ headers: { "content-type": "application/json" } },
-	)) as unknown as typeof fetch;
+			)) as unknown as typeof fetch;
 
 		const models = await fetchAntigravityDiscoveryModels({
 			token: "standard-tier-token",
@@ -140,14 +145,18 @@ describe("Code Assist Standard/Enterprise tier (business accounts with user-prov
 							maxOutputTokens: 65_535,
 						},
 					},
-					agentModelSorts: [{
-						groups: [{
-							modelIds: ["gemini-2.5-flash"],
-						}],
-					}],
+					agentModelSorts: [
+						{
+							groups: [
+								{
+									modelIds: ["gemini-2.5-flash"],
+								},
+							],
+						},
+					],
 				}),
 				{ headers: { "content-type": "application/json" } },
-	)) as unknown as typeof fetch;
+			)) as unknown as typeof fetch;
 
 		const oldModels = await fetchAntigravityDiscoveryModels({
 			token: "business-token",
@@ -174,14 +183,18 @@ describe("Code Assist Standard/Enterprise tier (business accounts with user-prov
 							maxOutputTokens: 65_535,
 						},
 					},
-					agentModelSorts: [{
-						groups: [{
-							modelIds: ["gemini-2.5-flash"],
-						}],
-					}],
+					agentModelSorts: [
+						{
+							groups: [
+								{
+									modelIds: ["gemini-2.5-flash"],
+								},
+							],
+						},
+					],
 				}),
 				{ headers: { "content-type": "application/json" } },
-	);
+			);
 		}) as unknown as typeof fetch;
 
 		const newModels = await fetchAntigravityDiscoveryModels({
@@ -206,7 +219,6 @@ describe("Code Assist Standard/Enterprise tier (business accounts with user-prov
 		 */
 		const cacheDir = mkdtempSync(join(tmpdir(), "pi-ai-code-assist-"));
 		cacheDirs.push(cacheDir);
-		const cacheDbPath = join(cacheDir, "models.db");
 
 		const fetcher = (async () =>
 			new Response(
@@ -220,14 +232,18 @@ describe("Code Assist Standard/Enterprise tier (business accounts with user-prov
 							maxOutputTokens: 65_535,
 						},
 					},
-					agentModelSorts: [{
-						groups: [{
-							modelIds: ["gemini-2.5-pro"],
-						}],
-					}],
+					agentModelSorts: [
+						{
+							groups: [
+								{
+									modelIds: ["gemini-2.5-pro"],
+								},
+							],
+						},
+					],
 				}),
 				{ headers: { "content-type": "application/json" } },
-	)) as unknown as typeof fetch;
+			)) as unknown as typeof fetch;
 
 		const models = await fetchAntigravityDiscoveryModels({
 			token: "business-token",

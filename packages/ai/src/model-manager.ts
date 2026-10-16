@@ -148,7 +148,13 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	const provenance = options.cacheDynamicModelProvenance;
 	const now = options.now ?? Date.now;
 	const ttlMs = options.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS;
-	const legacyCache = readModelCache<TApi>(options.providerId, ttlMs, now, options.cacheDbPath, options.discoveryUserAgent);
+	const legacyCache = readModelCache<TApi>(
+		options.providerId,
+		ttlMs,
+		now,
+		options.cacheDbPath,
+		options.discoveryUserAgent,
+	);
 	if (
 		strategy !== "online-if-uncached" ||
 		typeof options.fetchDynamicModels !== "function" ||
