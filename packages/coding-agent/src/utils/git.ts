@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { $which, getEnvValue, hasFsCode, isEnoent, Snowflake } from "@gajae-code/utils";
+import { $which, getEnvValue, hasFsCode, isEnoent, Snowflake, WhichCachePolicy } from "@gajae-code/utils";
 import {
 	parseDiffHunks as parseCommitDiffHunks,
 	parseFileDiffs,
@@ -178,8 +178,27 @@ function normalizeStdin(input: CommandOptions["stdin"]): "ignore" | Uint8Array {
 	return new Uint8Array(input);
 }
 
-function ensureAvailable(): void {
-	if (!$which("git")) {
+function createGitCommandEnvironment(options: CommandOptions = {}): Record<string, string | undefined> | undefined {
+	const baseEnvironment = options.env ? { ...process.env, GIT_OPTIONAL_LOCKS: "0", ...options.env } : undefined;
+	const sessionEnvironment = getCurrentSessionLaunchEnvironment();
+	return sessionEnvironment === undefined
+		? baseEnvironment
+		: createSessionChildEnvironment(sessionEnvironment, baseEnvironment ?? process.env);
+}
+
+function hasCommandPathOverride(options: CommandOptions): boolean {
+	const optionPathOverride = Object.keys(options.env ?? {}).some(name =>
+		process.platform === "win32" ? name.toUpperCase() === "PATH" : name === "PATH",
+	);
+	return optionPathOverride || hasSessionPathOverride(getCurrentSessionLaunchEnvironment());
+}
+
+function ensureAvailable(options: CommandOptions = {}): void {
+	const environment = createGitCommandEnvironment(options);
+	const lookupOptions = hasCommandPathOverride(options)
+		? { PATH: getEnvValue(environment ?? process.env, "PATH") ?? "", cache: WhichCachePolicy.Bypass }
+		: undefined;
+	if (!$which("git", lookupOptions)) {
 		throw new Error("git is not installed.");
 	}
 }
@@ -201,12 +220,7 @@ async function runCommand(
 	options: CommandOptions = {},
 ): Promise<GitCommandResult> {
 	const commandArgs = withShortLivedGitConfig(options.readOnly ? withNoOptionalLocks(args) : [...args]);
-	const baseEnvironment = options.env ? { ...process.env, GIT_OPTIONAL_LOCKS: "0", ...options.env } : undefined;
-	const sessionEnvironment = getCurrentSessionLaunchEnvironment();
-	const environment =
-		sessionEnvironment === undefined
-			? baseEnvironment
-			: createSessionChildEnvironment(sessionEnvironment, baseEnvironment ?? process.env);
+	const environment = createGitCommandEnvironment(options);
 	const child = Bun.spawn(["git", ...commandArgs], {
 		cwd,
 		env: environment,
@@ -259,7 +273,7 @@ async function runChecked(
 	args: readonly string[],
 	options: CommandOptions = {},
 ): Promise<GitCommandResult> {
-	ensureAvailable();
+	ensureAvailable(options);
 	const result = await runCommand(cwd, args, options);
 	if (result.exitCode !== 0) {
 		throw new GitCommandError(args, result);
@@ -280,7 +294,7 @@ async function tryText(
 	args: readonly string[],
 	options: CommandOptions = {},
 ): Promise<string | undefined> {
-	ensureAvailable();
+	ensureAvailable(options);
 	const result = await runCommand(cwd, args, options);
 	if (result.exitCode !== 0) return undefined;
 	return result.stdout;

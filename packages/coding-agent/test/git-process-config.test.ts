@@ -124,4 +124,45 @@ describe("git subprocess config", () => {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}
 	});
+
+	it("checks Git availability against the session PATH", async () => {
+		if (process.platform !== "linux") return;
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-git-session-path-"));
+		try {
+			const hostBinDir = path.join(tempDir, "host-bin");
+			const sessionBinDir = path.join(tempDir, "session-bin");
+			await fs.mkdir(hostBinDir);
+			await fs.mkdir(sessionBinDir);
+			const gitPath = path.join(sessionBinDir, "git");
+			await Bun.write(gitPath, '#!/bin/sh\n[ "$PATH" = "$GJC_TEST_SESSION_BIN" ] || exit 90\nexit 0\n');
+			await fs.chmod(gitPath, 0o755);
+			const probePath = path.join(tempDir, "session-git-probe.ts");
+			const gitModule = new URL("../src/utils/git.ts", import.meta.url).href;
+			const environmentModule = new URL("../src/sdk/session-environment.ts", import.meta.url).href;
+			await Bun.write(
+				probePath,
+				`import { setCurrentSessionLaunchEnvironment } from ${JSON.stringify(environmentModule)};\n` +
+					`import * as git from ${JSON.stringify(gitModule)};\n` +
+					'setCurrentSessionLaunchEnvironment({ env: { PATH: process.env.GJC_TEST_SESSION_BIN ?? "" } });\n' +
+					'await git.status.summary(process.env.GJC_TEST_REPO ?? "");\n',
+			);
+
+			const child = Bun.spawn([process.execPath, "run", probePath], {
+				cwd: path.resolve(import.meta.dir, ".."),
+				env: {
+					...process.env,
+					PATH: hostBinDir,
+					GJC_TEST_REPO: tempDir,
+					GJC_TEST_SESSION_BIN: sessionBinDir,
+				},
+				stdout: "pipe",
+				stderr: "pipe",
+			});
+			const [exitCode, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
+			expect(exitCode).toBe(0);
+			expect(stderr).toBe("");
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	}, 10_000);
 });
