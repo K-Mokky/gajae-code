@@ -44,6 +44,7 @@ import {
 	runPostUpdateRecoveryForTest,
 	runUpdateCommand,
 	sanitizeVerificationOutputForTest,
+	smokeTestPinnedCandidate,
 	verifyInstalledVersionForTest,
 	verifyMigrationTargetAdapterForTest,
 	verifyMigrationTargetForTest,
@@ -2832,12 +2833,95 @@ describe("update-cli binary update flow", () => {
 		expect(calls.some(call => call.startsWith("removeTemp "))).toBe(false);
 	});
 
+	it("reclaims staging and exact-replace placeholders while retaining only the verified rollback baseline", async () => {
+		const home = await makeTempDir();
+		const bin = path.join(home, ".local", "bin");
+		await fs.mkdir(bin, { recursive: true });
+		const targetPath = path.join(bin, "gjc");
+		const fixture = (version: string) =>
+			`#!/bin/sh\nif [ "$1" = "--version" ]; then printf 'gjc/${version}\\n'; exit 0; fi\nexit 0\n`;
+		await writeFixtureFile(targetPath, fixture("1.0.0"));
+		const oldStagingPath = path.join(bin, "gjc.new.00000000-0000-4000-8000-000000000001");
+		const oldBackupPath = path.join(bin, "gjc.bak.00000000-0000-4000-8000-000000000002");
+		const oldVersionedBackupPath = path.join(bin, "gjc-0.17.1.bak.20260929T123456Z");
+		await writeFixtureFile(oldStagingPath, "partial stage");
+		await writeFixtureFile(oldBackupPath, "unreferenced backup");
+		await writeFixtureFile(oldVersionedBackupPath, "legacy unreferenced backup");
+		const placeholderSeed = path.join(bin, "placeholder-seed");
+		await writeFixtureFile(placeholderSeed, "", 0o600);
+		const placeholderInode = (await fs.stat(placeholderSeed, { bigint: true })).ino.toString(16);
+		const oldPlaceholderPath = path.join(bin, `.gjc-exact-replace-destination-${placeholderInode}-0`);
+		await fs.rename(placeholderSeed, oldPlaceholderPath);
+		const oldTime = new Date(Date.now() - 60 * 60 * 1000);
+		await fs.utimes(oldPlaceholderPath, oldTime, oldTime);
+
+		for (const version of ["1.0.1", "1.0.2"]) {
+			await runBinaryUpdateFlow(targetPath, "unused", version, {
+				download: async (_url, tempPath) => writeFixtureFile(tempPath, fixture(version)),
+				fsync: fsyncFileForTest,
+				replace: replaceBinaryForUpdate,
+				verifyInstalledVersion: async expected => {
+					await smokeTestPinnedCandidate({ version: expected }, targetPath);
+					return { ok: true, actual: expected, path: targetPath };
+				},
+			});
+
+			const activation = await readActivationRecord(targetPath);
+			expect(activation.status).toBe("valid");
+			if (activation.status !== "valid") throw new Error("expected verified activation record");
+			expect(activation.record.phase).toBe("verified");
+			const names = await fs.readdir(bin);
+			expect(names.filter(name => name.startsWith("gjc.new."))).toEqual([]);
+			expect(names.filter(name => name.startsWith(".gjc-exact-replace-destination-"))).toEqual([]);
+			expect(names).not.toContain(path.basename(oldBackupPath));
+			expect(names).not.toContain(path.basename(oldVersionedBackupPath));
+			const backups = names.filter(name => /^gjc\.bak\./u.test(name));
+			expect(backups).toEqual([activation.record.backupName]);
+			expect(await Bun.file(path.join(bin, activation.record.backupName)).exists()).toBe(true);
+		}
+	});
+
+	it("preserves a journal-owned stage when a denied promotion remains pending", async () => {
+		const home = await makeTempDir();
+		const bin = path.join(home, ".local", "bin");
+		await fs.mkdir(bin, { recursive: true });
+		const targetPath = path.join(bin, "gjc.exe");
+		const fixture = (version: string) =>
+			`#!/bin/sh\nif [ "$1" = "--version" ]; then printf 'gjc/${version}\\n'; exit 0; fi\nexit 0\n`;
+		await writeFixtureFile(targetPath, fixture("1.0.0"));
+		const replaceSpy = vi.spyOn(native, "exactReplaceRetained").mockImplementation(() => {
+			return { ok: false, code: "access_denied", windowsErrorCode: "0xC0000022" };
+		});
+		try {
+			await expect(
+				runBinaryUpdateFlow(targetPath, "unused", "1.0.1", {
+					download: async (_url, tempPath) => writeFixtureFile(tempPath, fixture("1.0.1")),
+					fsync: fsyncFileForTest,
+					replace: replaceBinaryForUpdate,
+					verifyInstalledVersion: async expected => ({ ok: true, actual: expected, path: targetPath }),
+				}),
+			).rejects.toThrow("access_denied");
+
+			const activation = await readActivationRecord(targetPath);
+			expect(activation.status).toBe("valid");
+			if (activation.status !== "valid") throw new Error("expected pending activation record");
+			expect(activation.record.phase).toBe("pending_activation");
+			expect(await Bun.file(activation.record.stagingPath).exists()).toBe(true);
+			expect(replaceSpy).toHaveBeenCalled();
+		} finally {
+			replaceSpy.mockRestore();
+		}
+	});
+
 	it("aborts before replacement/verification when fsync fails", async () => {
 		const calls: string[] = [];
 		const targetPath = path.join(await makeTempDir(), "gjc");
+		let stagingPath: string | undefined;
 		const flow: BinaryUpdateFlow = {
 			download: async (_url, tempPath) => {
+				stagingPath = tempPath;
 				calls.push(`download ${tempPath}`);
+				await writeFixtureFile(tempPath, "partial candidate");
 			},
 			fsync: async () => {
 				calls.push("fsync");
@@ -2862,6 +2946,8 @@ describe("update-cli binary update flow", () => {
 		expect(calls).toHaveLength(2);
 		expect(calls).not.toContain("replace");
 		expect(calls).not.toContain("verify");
+		expect(stagingPath).toBeDefined();
+		expect(await Bun.file(stagingPath!).exists()).toBe(false);
 	});
 });
 
