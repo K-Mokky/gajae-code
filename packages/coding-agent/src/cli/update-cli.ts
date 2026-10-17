@@ -1381,6 +1381,14 @@ function isUpdateBackupName(targetPath: string, name: string): boolean {
 	);
 }
 
+export function isUpdateStagingNameForTest(targetPath: string, name: string): boolean {
+	return isUpdateStagingName(targetPath, name);
+}
+
+export function isUpdateBackupNameForTest(targetPath: string, name: string): boolean {
+	return isUpdateBackupName(targetPath, name);
+}
+
 async function removeExactUpdateArtifact(filePath: string, parent: DirectoryIdentity): Promise<string | undefined> {
 	try {
 		const snapshot = await snapshotRegularFile(filePath);
@@ -1412,6 +1420,7 @@ async function removeExactUpdateArtifact(filePath: string, parent: DirectoryIden
 async function cleanupBinaryUpdateArtifacts(
 	targetPath: string,
 	originalParent: DirectoryIdentity,
+	retainedRetryCandidatePath?: string,
 ): Promise<string | undefined> {
 	const parentPath = path.dirname(path.resolve(targetPath));
 	const warnings: string[] = [];
@@ -1425,11 +1434,13 @@ async function cleanupBinaryUpdateArtifacts(
 		} else {
 			const record = activation.status === "valid" ? activation.record : undefined;
 			const terminal = record?.phase === "verified" || record?.phase === "rolled_back";
-			const pinnedStage = record && !terminal ? path.resolve(record.stagingPath) : undefined;
+			const pinnedStages = new Set<string>();
+			if (record && !terminal) pinnedStages.add(path.resolve(record.stagingPath));
+			if (retainedRetryCandidatePath) pinnedStages.add(path.resolve(retainedRetryCandidatePath));
 			for (const entry of entries) {
 				if (!isUpdateStagingName(targetPath, entry.name)) continue;
 				const stagingPath = path.join(parentPath, entry.name);
-				if (stagingPath === pinnedStage) continue;
+				if (pinnedStages.has(stagingPath)) continue;
 				const warning = await removeExactUpdateArtifact(stagingPath, originalParent);
 				if (warning) warnings.push(warning);
 			}
@@ -1549,7 +1560,11 @@ export async function runBinaryUpdateFlow(
 		failed = true;
 		failure = error;
 	}
-	const cleanupWarning = originalParent ? await cleanupBinaryUpdateArtifacts(targetPath, originalParent) : undefined;
+	const retainedRetryCandidatePath =
+		failure instanceof ActivationRetryCandidateRepointError ? failure.candidatePath : undefined;
+	const cleanupWarning = originalParent
+		? await cleanupBinaryUpdateArtifacts(targetPath, originalParent, retainedRetryCandidatePath)
+		: undefined;
 	try {
 		await releaseLock();
 	} catch (error) {
