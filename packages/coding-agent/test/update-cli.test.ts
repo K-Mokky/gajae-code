@@ -2889,6 +2889,7 @@ describe("update-cli binary update flow", () => {
 		const fixture = (version: string) =>
 			`#!/bin/sh\nif [ "$1" = "--version" ]; then printf 'gjc/${version}\\n'; exit 0; fi\nexit 0\n`;
 		await writeFixtureFile(targetPath, fixture("1.0.0"));
+		await writeFixtureFile(path.join(bin, "gjc.exe.bak.00000000-0000-4000-8000-000000000003"), "old backup");
 		const replaceSpy = vi.spyOn(native, "exactReplaceRetained").mockImplementation(() => {
 			return { ok: false, code: "access_denied", windowsErrorCode: "0xC0000022" };
 		});
@@ -2907,6 +2908,7 @@ describe("update-cli binary update flow", () => {
 			if (activation.status !== "valid") throw new Error("expected pending activation record");
 			expect(activation.record.phase).toBe("pending_activation");
 			expect(await Bun.file(activation.record.stagingPath).exists()).toBe(true);
+			expect((await fs.readdir(bin)).filter(name => name.startsWith("gjc.exe.bak."))).toEqual([]);
 			expect(replaceSpy).toHaveBeenCalled();
 		} finally {
 			replaceSpy.mockRestore();

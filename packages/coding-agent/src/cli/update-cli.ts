@@ -1406,8 +1406,8 @@ async function removeExactUpdateArtifact(filePath: string, parent: DirectoryIden
 
 /**
  * Reclaim only generated update artifacts while holding the install lock.
- * A pending activation keeps its journal-owned stage; a verified journal keeps
- * exactly its referenced rollback baseline (one backup maximum).
+ * Keep a stage only while an active activation record owns it, and retain at
+ * most the rollback backup the record can still need.
  */
 async function cleanupBinaryUpdateArtifacts(
 	targetPath: string,
@@ -1434,31 +1434,43 @@ async function cleanupBinaryUpdateArtifacts(
 				if (warning) warnings.push(warning);
 			}
 
-			// Keep at most the one backup referenced by a verified activation record.
-			// Pending records are left untouched because they may still need rollback.
-			if (record && (record.phase === "verified" || record.phase === "rolled_back")) {
-				const recognizedBackup = isUpdateBackupName(targetPath, record.backupName);
-				let preserveBackup: string | undefined;
-				let mayPruneBackups = recognizedBackup;
-				if (record.phase === "verified" && record.baseline.exists) {
-					if (!recognizedBackup || !record.backupIdentity) {
-						mayPruneBackups = false;
-					} else {
-						const baselinePath = path.join(parentPath, record.backupName);
-						const baseline = await snapshotRegularFile(baselinePath);
-						if (!baseline || !sameFileIdentity(record.backupIdentity, baseline.identity)) {
-							mayPruneBackups = false;
-						} else {
+			const recognizedBackup = record && isUpdateBackupName(targetPath, record.backupName);
+			let preserveBackup: string | undefined;
+			let mayPruneBackups = activation.status === "missing";
+			if (record && recognizedBackup) {
+				if (record.phase === "rolled_back" || !record.baseline.exists) {
+					mayPruneBackups = true;
+				} else if (record.phase === "verified" || record.phase === "published" || record.phase === "uncertain") {
+					if (record.backupIdentity) {
+						const baseline = await snapshotRegularFile(path.join(parentPath, record.backupName));
+						if (baseline && sameFileIdentity(record.backupIdentity, baseline.identity)) {
 							preserveBackup = record.backupName;
+							mayPruneBackups = true;
+						}
+					}
+				} else if (record.phase === "staged" || record.phase === "pending_activation") {
+					const current = await snapshotRegularFile(targetPath);
+					const baselineUnchanged = record.baseline.exists
+						? !!current && !!record.targetIdentity && sameFileIdentity(record.targetIdentity, current.identity)
+						: current === undefined;
+					if (baselineUnchanged) {
+						const transactionBackup = await snapshotRegularFile(path.join(parentPath, record.backupName));
+						if (!transactionBackup) mayPruneBackups = true;
+						else if (
+							record.backupIdentity &&
+							sameFileIdentity(record.backupIdentity, transactionBackup.identity)
+						) {
+							preserveBackup = record.backupName;
+							mayPruneBackups = true;
 						}
 					}
 				}
-				if (mayPruneBackups) {
-					for (const entry of entries) {
-						if (!isUpdateBackupName(targetPath, entry.name) || entry.name === preserveBackup) continue;
-						const warning = await removeExactUpdateArtifact(path.join(parentPath, entry.name), originalParent);
-						if (warning) warnings.push(warning);
-					}
+			}
+			if (mayPruneBackups) {
+				for (const entry of entries) {
+					if (!isUpdateBackupName(targetPath, entry.name) || entry.name === preserveBackup) continue;
+					const warning = await removeExactUpdateArtifact(path.join(parentPath, entry.name), originalParent);
+					if (warning) warnings.push(warning);
 				}
 			}
 		}
