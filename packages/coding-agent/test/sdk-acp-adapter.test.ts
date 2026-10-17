@@ -590,7 +590,6 @@ test("ACP lifecycle stops after one uncertain replay and preserves the original 
 	});
 	sdk.global = async (operation, input, options) => {
 		sdk.frames.push({ type: "broker_request", operation, input, ...options });
-		// Spend at least 1ms before replay so identical timeout budgets cannot hide the regression.
 		if (sdk.frames.length === 1) elapsedMs += 1;
 		throw sdk.frames.length === 1
 			? original
@@ -732,7 +731,6 @@ test("ACP lifecycle teardown during recovery preserves the original uncertainty"
 	};
 	const adapter = new AcpSdkAdapter({ client: sdk as never });
 	await adapter.start();
-	// Keep real time advancing so waitFor retains its bounded timeout.
 	const clock = spyOn(Date, "now").mockImplementation(() => realNow() + elapsedMs);
 	const recovery = adapter.lifecycle("session.create", { cwd: "/workspace" }, "teardown-key");
 	// Observe the rejection before closing the transport to avoid an unhandled rejection.
