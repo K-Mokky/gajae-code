@@ -2898,7 +2898,8 @@ test("SDK host text-only stop/restart isolates late predecessor progress and ter
 	const settings = {
 		get: (key: string) =>
 			key === "sdk.promptDeadlineMs" ? deadlineMs : key === "sdk.promptMaxRuntimeMs" ? 5_000 : undefined,
-		getAgentDir: () => cwd,
+		// No agent directory: this transport/ownership fixture must not spawn or
+		// register with a real broker across its three runtime incarnations.
 	} as unknown as Settings;
 	const abortHandles: string[] = [];
 	const abortAttempts: Array<{ handle: string; activeHandle: string; hasLiveDomain: boolean }> = [];
@@ -3187,13 +3188,10 @@ test("SDK host text-only stop/restart isolates late predecessor progress and ter
 			result: { status: "failed", error: { code: "prompt_deadline_exceeded" } },
 		});
 	} finally {
-		try {
-			predecessorDispatchReady.resolve();
-			settleSubmissions();
-			await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, sessionContext);
-		} finally {
-			leaseClock.mockRestore();
-		}
+		leaseClock.mockRestore();
+		predecessorDispatchReady.resolve();
+		settleSubmissions();
+		await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, sessionContext);
 	}
 });
 
