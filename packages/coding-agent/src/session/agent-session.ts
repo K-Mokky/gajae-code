@@ -21854,7 +21854,6 @@ export class AgentSession {
 					fromExtension,
 					preserveData,
 				);
-				this.#commitSessionTransition();
 				this.#recordAdaptiveCompactionReset(tokensBefore);
 				await this.#applyCompactionPostAppend(compactionEntryId, firstKeptEntryId, fromExtension);
 
@@ -28802,8 +28801,8 @@ export class AgentSession {
 				if (exactRetirement && !exactRetirement.canCommit())
 					throw new Error("Exact MCP control retirement changed before session adoption");
 				this.sessionManager.commitPreparedNewSession(prepared);
-				await exactRetirement?.commit();
 				this.#commitSessionTransition();
+				await exactRetirement?.commit();
 			} catch (error) {
 				await exactRetirement?.abort();
 				throw await discardPreparedNewSessionAfterFailure(this.sessionManager, prepared, error);

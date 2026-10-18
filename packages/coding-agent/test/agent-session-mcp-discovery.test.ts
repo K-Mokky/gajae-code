@@ -836,6 +836,139 @@ describe("AgentSession MCP discovery", () => {
 		expect(toolContextStore.getContext().toolNames).toEqual(["read"]);
 	});
 
+	it("fences activation when exact MCP retirement fails after branch adoption", async () => {
+		const readTool = createBasicTool("read", "Read");
+		const docsSearchTool = createMcpCustomTool("mcp__docs_search", "docs", "search", "Search internal docs", [
+			"query",
+		]);
+		const sessionManager = SessionManager.inMemory();
+		const userEntryId = sessionManager.appendMessage({
+			role: "user",
+			content: "start",
+			timestamp: Date.now(),
+		});
+		const rebuildStarted = Promise.withResolvers<void>();
+		const releaseRebuild = Promise.withResolvers<void>();
+		let blockFirstSearchRebuild = true;
+		const ownedMcpManager = {
+			releaseLeases: async () => {},
+			prepareExactServerControlReset: async () => ({
+				canCommit: () => true,
+				tools: [],
+				commit: async () => {
+					throw new Error("MCP retirement commit failed");
+				},
+				abort: async () => {},
+			}),
+		} as never;
+		const session = new AgentSession({
+			agent: new Agent({
+				initialState: {
+					model: createModel(),
+					systemPrompt: ["initial"],
+					tools: [readTool],
+					messages: sessionManager.buildSessionContext().messages,
+				},
+			}),
+			sessionManager,
+			settings: Settings.isolated({ "mcp.discoveryMode": true }),
+			modelRegistry: {
+				withConsumerLease: async <T>(body: () => T | Promise<T>): Promise<T> => await body(),
+			} as never,
+			toolRegistry: new Map([[readTool.name, readTool]]),
+			ownedMcpManager,
+			mcpDiscoveryEnabled: true,
+			rebuildSystemPrompt: async toolNames => {
+				if (blockFirstSearchRebuild && toolNames.includes("mcp__docs_search")) {
+					blockFirstSearchRebuild = false;
+					rebuildStarted.resolve();
+					await releaseRebuild.promise;
+				}
+				return { systemPrompt: [`tools:${toolNames.join(",")}`] };
+			},
+		});
+		sessions.push(session);
+		attachExactMcpControls(session, {
+			grantSource: "root-interactive-exact-config",
+			configPath: "/tmp/exact-mcp.json",
+		});
+		await session.refreshMCPTools([docsSearchTool], { selectedMCPToolNames: [], activeMCPToolNames: [] });
+		const originalSessionId = session.sessionId;
+
+		const activation = session.activateDiscoveredTools(["mcp__docs_search"]);
+		await rebuildStarted.promise;
+		await expect(session.branch(userEntryId)).rejects.toThrow("MCP retirement commit failed");
+		expect(session.sessionId).not.toBe(originalSessionId);
+		releaseRebuild.resolve();
+
+		expect(await activation).toEqual([]);
+		expect(session.getActiveToolNames()).toEqual(["read"]);
+		expect(session.getSelectedMCPToolNames()).toEqual([]);
+	});
+
+	it("preserves pending discovery activation through compaction", async () => {
+		const readTool = createBasicTool("read", "Read");
+		const docsSearchTool = createMcpTool("mcp__docs_search", "docs", "search", "Search internal docs", ["query"]);
+		const sessionManager = SessionManager.inMemory();
+		for (const content of ["older conversation", "recent conversation"]) {
+			sessionManager.appendMessage({ role: "user", content, timestamp: Date.now() });
+		}
+		const compactionStarted = Promise.withResolvers<void>();
+		const releaseCompaction = Promise.withResolvers<void>();
+		const extensionRunner = {
+			hasHandlers: (event: string) => event === "session_before_compact",
+			emit: async (event: { type: string; preparation?: { firstKeptEntryId: string; tokensBefore: number } }) => {
+				if (event.type !== "session_before_compact" || !event.preparation) return undefined;
+				compactionStarted.resolve();
+				await releaseCompaction.promise;
+				return {
+					compaction: {
+						summary: "compacted summary",
+						shortSummary: undefined,
+						firstKeptEntryId: event.preparation.firstKeptEntryId,
+						tokensBefore: event.preparation.tokensBefore,
+						details: {},
+					},
+				};
+			},
+		} as never;
+		const session = new AgentSession({
+			agent: new Agent({
+				initialState: {
+					model: createModel(),
+					systemPrompt: ["initial"],
+					tools: [readTool],
+					messages: sessionManager.buildSessionContext().messages,
+				},
+			}),
+			sessionManager,
+			settings: Settings.isolated({ "mcp.discoveryMode": true, "compaction.keepRecentTokens": 1 }),
+			modelRegistry: {
+				withConsumerLease: async <T>(body: () => T | Promise<T>): Promise<T> => await body(),
+			} as never,
+			toolRegistry: new Map([
+				[readTool.name, readTool],
+				[docsSearchTool.name, docsSearchTool],
+			]),
+			mcpDiscoveryEnabled: true,
+			extensionRunner,
+			rebuildSystemPrompt: async toolNames => ({
+				systemPrompt: [`tools:${toolNames.join(",")}`],
+			}),
+		});
+		sessions.push(session);
+
+		const compaction = session.compact();
+		await compactionStarted.promise;
+		const activation = session.activateDiscoveredTools(["mcp__docs_search"]);
+		releaseCompaction.resolve();
+
+		await compaction;
+		expect(await activation).toEqual(["mcp__docs_search"]);
+		expect(session.getActiveToolNames()).toEqual(["read", "mcp__docs_search"]);
+		expect(session.getSelectedMCPToolNames()).toEqual(["mcp__docs_search"]);
+	});
+
 	it("revalidates activation against a replaced MCP catalog after prompt rebuild", async () => {
 		const readTool = createBasicTool("read", "Read");
 		const oldSearchTool = createMcpCustomTool("mcp__docs_search", "docs", "search", "Old docs search", ["query"]);
