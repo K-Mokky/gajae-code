@@ -4126,6 +4126,7 @@ export class AgentSession {
 	// Generic tool discovery (covers built-in + MCP + extension when tools.discoveryMode === "all")
 	#discoverableToolSearchIndex: DiscoverableToolSearchIndex | null = null;
 	#selectedDiscoveredToolNames = new Set<string>();
+	#discoveredToolActivationChain: Promise<void> = Promise.resolve();
 	#baselineDiscoveredBuiltinToolNames = new Set<string>();
 	#discoverableToolAllowedNames: ReadonlySet<string> | undefined;
 	#gjcSubskillToolNames = new Set<string>();
@@ -12226,7 +12227,19 @@ export class AgentSession {
 		return [...new Set([...mcpSelected, ...this.#getSelectedDiscoveredBuiltinToolNames()])];
 	}
 
-	async activateDiscoveredTools(toolNames: string[]): Promise<string[]> {
+	activateDiscoveredTools(toolNames: string[]): Promise<string[]> {
+		const requestedToolNames = [...toolNames];
+		const activation = this.#discoveredToolActivationChain.then(() =>
+			this.#activateDiscoveredTools(requestedToolNames),
+		);
+		this.#discoveredToolActivationChain = activation.then(
+			() => undefined,
+			() => undefined,
+		);
+		return activation;
+	}
+
+	async #activateDiscoveredTools(toolNames: string[]): Promise<string[]> {
 		const previousSelectedMCPToolNames = this.getSelectedMCPToolNames();
 		const previousSelectedDiscoveredBuiltinToolNames = this.#getSelectedDiscoveredBuiltinToolNames();
 		const nextActiveToolNames = this.getActiveToolNames();
