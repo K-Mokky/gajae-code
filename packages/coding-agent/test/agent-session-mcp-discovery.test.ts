@@ -900,6 +900,58 @@ describe("AgentSession MCP discovery", () => {
 		);
 	});
 
+	it("revalidates discoverable activation when an SSH registry entry is replaced", async () => {
+		const readTool = createBasicTool("read", "Read");
+		const oldSshTool = createBasicTool("ssh", "Old SSH");
+		oldSshTool.loadMode = "discoverable";
+		const refreshedSshTool = createBasicTool("ssh", "Refreshed SSH");
+		refreshedSshTool.loadMode = "discoverable";
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-ssh-activation-race-"));
+		tempDirs.push(tempDir);
+		const rebuildStarted = Promise.withResolvers<void>();
+		const releaseRebuild = Promise.withResolvers<void>();
+		let blockFirstSshRebuild = true;
+		const session = new AgentSession({
+			agent: new Agent({
+				initialState: {
+					model: createModel(),
+					systemPrompt: ["initial"],
+					tools: [readTool],
+					messages: [],
+				},
+			}),
+			sessionManager: SessionManager.inMemory(tempDir),
+			settings: Settings.isolated(),
+			modelRegistry: {
+				withConsumerLease: async <T>(body: () => T | Promise<T>): Promise<T> => await body(),
+			} as never,
+			toolRegistry: new Map([
+				[readTool.name, readTool],
+				[oldSshTool.name, oldSshTool],
+			]),
+			reloadSshTool: async () => refreshedSshTool,
+			rebuildSystemPrompt: async (toolNames, tools) => {
+				if (blockFirstSshRebuild && toolNames.includes("ssh")) {
+					blockFirstSshRebuild = false;
+					rebuildStarted.resolve();
+					await releaseRebuild.promise;
+				}
+				return { systemPrompt: toolNames.map(name => `${name}:${tools.get(name)?.description ?? ""}`) };
+			},
+		});
+		sessions.push(session);
+
+		const activation = session.activateDiscoveredTools(["ssh"]);
+		await rebuildStarted.promise;
+		await session.refreshSshTool();
+		releaseRebuild.resolve();
+
+		expect(await activation).toEqual(["ssh"]);
+		expect(session.getActiveToolNames()).toEqual(["read", "ssh"]);
+		expect(session.agent.state.tools.find(tool => tool.name === "ssh")?.description).toBe("Refreshed SSH tool");
+		expect(session.systemPrompt).toEqual(["read:Read tool", "ssh:Refreshed SSH tool"]);
+	});
+
 	for (const outcome of ["cancel", "commit"] as const) {
 		it(`queues activation requested during transition preflight until ${outcome}`, async () => {
 			const readTool = createBasicTool("read", "Read");

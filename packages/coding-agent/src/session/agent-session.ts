@@ -12290,6 +12290,7 @@ export class AgentSession {
 					activated.push(name);
 				}
 			}
+			const candidateToolEntries = nextActiveToolNames.map(name => this.#toolRegistry.get(name));
 			if (activated.length > 0) {
 				await this.#applyActiveToolsByName(nextActiveToolNames, {
 					previousSelectedMCPToolNames,
@@ -12299,7 +12300,12 @@ export class AgentSession {
 				});
 			}
 			if (sessionTransitionGeneration !== this.#sessionTransitionGeneration) return [];
-			if (mcpCatalogGeneration !== this.#mcpCatalogGeneration) continue;
+			if (
+				mcpCatalogGeneration !== this.#mcpCatalogGeneration ||
+				nextActiveToolNames.some((name, index) => this.#toolRegistry.get(name) !== candidateToolEntries[index])
+			) {
+				continue;
+			}
 			return activated;
 		}
 	}
@@ -12609,7 +12615,10 @@ export class AgentSession {
 						return;
 					}
 				}
-				if (mcpCatalogGeneration !== this.#mcpCatalogGeneration) {
+				if (
+					mcpCatalogGeneration !== this.#mcpCatalogGeneration ||
+					validToolNames.some((name, index) => this.#toolRegistry.get(name) !== tools[index])
+				) {
 					if (generation === this.#baseSystemPromptGeneration) {
 						this.#pendingAppliedToolSignature = undefined;
 					}
