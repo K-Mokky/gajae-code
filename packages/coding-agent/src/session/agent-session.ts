@@ -4442,6 +4442,7 @@ export class AgentSession {
 	#sessionTransitionKind: string | undefined;
 	// Detects transitions that begin and finish while an async preflight is staging.
 	#sessionTransitionGeneration = 0;
+	#sessionTransitionCommitted = false;
 	#sessionTransitionCompletion: Promise<void> = Promise.resolve();
 	#resolveSessionTransitionCompletion: (() => void) | undefined;
 	#queuedDeliveryPendingWhileTransition = false;
@@ -4524,14 +4525,20 @@ export class AgentSession {
 		if (["new-session", "switch-session", "clear-context", "fork", "branch", "navigate-tree"].includes(kind)) {
 			for (const controller of this.#configurationReloadControllers) controller.abort();
 		}
-		this.#sessionTransitionGeneration += 1;
-		this.#discoveredToolActivationChain = Promise.resolve();
+		this.#sessionTransitionCommitted = false;
 		this.#sessionTransitionKind = kind;
 		const completion = Promise.withResolvers<void>();
 		this.#sessionTransitionCompletion = completion.promise;
 		this.#resolveSessionTransitionCompletion = completion.resolve;
 		this.#coordinatorPersistGeneration += 1;
 		this.#wakeFollowUpReservationTransitionWaiters();
+	}
+
+	#commitSessionTransition(): void {
+		if (this.#sessionTransitionCommitted) return;
+		this.#sessionTransitionCommitted = true;
+		this.#sessionTransitionGeneration += 1;
+		this.#discoveredToolActivationChain = Promise.resolve();
 	}
 
 	async #waitForSessionTransitionEnd(signal: AbortSignal): Promise<void> {
@@ -4560,6 +4567,7 @@ export class AgentSession {
 
 	#endSessionTransition(): void {
 		this.#sessionTransitionKind = undefined;
+		this.#sessionTransitionCommitted = false;
 		const resolveCompletion = this.#resolveSessionTransitionCompletion;
 		this.#resolveSessionTransitionCompletion = undefined;
 		this.#sessionTransitionCompletion = Promise.resolve();
@@ -11896,7 +11904,9 @@ export class AgentSession {
 		return this.#withSessionAdmission("mcp-control", async () => {
 			this.#beginSessionTransition("mcp-control");
 			try {
-				return await body();
+				const result = await body();
+				this.#commitSessionTransition();
+				return result;
 			} finally {
 				this.#endSessionTransition();
 			}
@@ -12236,13 +12246,11 @@ export class AgentSession {
 		const requestedToolNames = [...toolNames];
 		const sessionTransitionGeneration = this.#sessionTransitionGeneration;
 		if (this.#sessionTransitionKind !== undefined) return Promise.resolve([]);
-		const activation = this.#discoveredToolActivationChain.then(() => {
-			if (
-				sessionTransitionGeneration !== this.#sessionTransitionGeneration ||
-				this.#sessionTransitionKind !== undefined
-			) {
-				return [];
+		const activation = this.#discoveredToolActivationChain.then(async () => {
+			while (this.#sessionTransitionKind !== undefined) {
+				await this.#waitForSessionTransitionEnd(this.#disposeAbortController.signal);
 			}
+			if (sessionTransitionGeneration !== this.#sessionTransitionGeneration) return [];
 			return this.#activateDiscoveredTools(requestedToolNames, sessionTransitionGeneration);
 		});
 		this.#discoveredToolActivationChain = activation.then(
@@ -12582,14 +12590,16 @@ export class AgentSession {
 					}
 					return;
 				}
-				if (
-					options?.sessionTransitionGeneration !== undefined &&
-					options.sessionTransitionGeneration !== this.#sessionTransitionGeneration
-				) {
-					if (generation === this.#baseSystemPromptGeneration) {
-						this.#pendingAppliedToolSignature = undefined;
+				if (options?.sessionTransitionGeneration !== undefined) {
+					while (this.#sessionTransitionKind !== undefined) {
+						await this.#waitForSessionTransitionEnd(this.#disposeAbortController.signal);
 					}
-					return;
+					if (options.sessionTransitionGeneration !== this.#sessionTransitionGeneration) {
+						if (generation === this.#baseSystemPromptGeneration) {
+							this.#pendingAppliedToolSignature = undefined;
+						}
+						return;
+					}
 				}
 				if (generation === this.#baseSystemPromptGeneration) {
 					this.#baseSystemPrompt = built.systemPrompt;
@@ -18304,6 +18314,7 @@ export class AgentSession {
 					throw new Error("Exact MCP control retirement changed before session adoption");
 				this.sessionManager.commitPreparedNewSession(prepared);
 				await exactRetirement?.commit();
+				this.#commitSessionTransition();
 				// Endpoint identity committed to the successor: re-register the
 				// manager so post-transition lineage bindings resolve and owned
 				// aborts classify in the successor session (review thread P1).
@@ -18386,6 +18397,7 @@ export class AgentSession {
 					throw new Error("Exact MCP control retirement changed before session adoption");
 				this.sessionManager.commitPreparedNewSession(prepared);
 				await exactRetirement?.commit();
+				this.#commitSessionTransition();
 				// Endpoint identity committed to the successor: re-register the
 				// manager so post-transition lineage bindings resolve and owned
 				// aborts classify in the successor session (review thread P1).
@@ -18529,6 +18541,7 @@ export class AgentSession {
 			this.#closeAllProviderSessions("context clear");
 			this.#terminalizeQueuedSdkWorkForSessionTransition(this.#queuedMessagesForSessionTransition());
 			this.#resetActiveSdkRunOwnership();
+			this.#commitSessionTransition();
 			this.agent.reset();
 			await this.sessionManager.flush();
 			this.sessionManager.appendContextClearEntry({ sessionId });
@@ -18635,6 +18648,7 @@ export class AgentSession {
 					this.sessionManager = forkedManager;
 					adopted = true;
 					await exactRetirement?.commit();
+					this.#commitSessionTransition();
 				} catch (error) {
 					await exactRetirement?.abort();
 					if (adopted) this.sessionManager = previousManager;
@@ -18691,6 +18705,7 @@ export class AgentSession {
 						throw new Error("Exact MCP control retirement changed before session adoption");
 					this.sessionManager.commitPreparedNewSession(prepared);
 					await exactRetirement?.commit();
+					this.#commitSessionTransition();
 					// Fork commits a successor endpoint identity; re-register the
 					// manager under it (review thread P1).
 					this.#rekeyJobManagerForSessionIdentity(previousSessionIdentity, previousSessionFile);
@@ -21816,6 +21831,7 @@ export class AgentSession {
 					fromExtension,
 					preserveData,
 				);
+				this.#commitSessionTransition();
 				this.#recordAdaptiveCompactionReset(tokensBefore);
 				await this.#applyCompactionPostAppend(compactionEntryId, firstKeptEntryId, fromExtension);
 
@@ -22119,6 +22135,7 @@ export class AgentSession {
 				// --- Commit boundary: synchronous adoption is the sole identity publication.
 				this.sessionManager.commitPreparedNewSession(prepared);
 				await exactRetirement?.commit();
+				this.#commitSessionTransition();
 				// Handoff commits a successor endpoint identity; re-register the
 				// manager under it (review thread P1).
 				this.#rekeyJobManagerForSessionIdentity(rollbackSessionState.sessionId, rollbackSessionState.sessionFile);
@@ -24499,6 +24516,7 @@ export class AgentSession {
 				fromExtension,
 				preserveData,
 			);
+			this.#commitSessionTransition();
 			this.#recordAdaptiveCompactionReset(tokensBefore);
 			await this.#applyCompactionPostAppend(compactionEntryId, firstKeptEntryId, fromExtension);
 			if (autoCompactionSignal.aborted) return await emitAborted();
@@ -28499,6 +28517,7 @@ export class AgentSession {
 					);
 					// Different files may intentionally carry the same copied session id; pathname transition is the commit signal.
 					ownerShutdownTransitionCommitted = true;
+					this.#commitSessionTransition();
 					if (ownerShutdownSettled) {
 						// Every predecessor job/delivery has settled. Only now can its
 						// tuple evidence be retired; doing this immediately after rekey
@@ -28543,6 +28562,7 @@ export class AgentSession {
 				);
 				if (recoveredDefaultChainMessage) this.#emitResolutionFallbackSwitch(this.#defaultFallbackChain(false));
 				if (recoveredDefaultChainMessage) this.emitNotice("warning", recoveredDefaultChainMessage, "fallback");
+				this.#commitSessionTransition();
 				return true;
 			} catch (error) {
 				if (transitionCleanupCommitted) throw error;
@@ -28760,6 +28780,7 @@ export class AgentSession {
 					throw new Error("Exact MCP control retirement changed before session adoption");
 				this.sessionManager.commitPreparedNewSession(prepared);
 				await exactRetirement?.commit();
+				this.#commitSessionTransition();
 			} catch (error) {
 				await exactRetirement?.abort();
 				throw await discardPreparedNewSessionAfterFailure(this.sessionManager, prepared, error);
@@ -28999,6 +29020,7 @@ export class AgentSession {
 				// No summary, navigating to non-root
 				this.sessionManager.branch(newLeafId);
 			}
+			this.#commitSessionTransition();
 
 			// The history rewrite is now committed. Drop predecessor-owned queued SDK
 			// work at this boundary; cancelled or failed preparation above preserves it.
