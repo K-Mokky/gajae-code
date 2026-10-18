@@ -1008,6 +1008,8 @@ export interface AgentSessionConfig {
 	workflowGatePublication?: "endpoint" | "local";
 	/** Tool registry for LSP and settings */
 	toolRegistry?: Map<string, AgentTool>;
+	/** Publish committed active tool names to tool execution contexts. */
+	onToolNamesChanged?: (toolNames: string[]) => void;
 	/**
 	 * Tool objects this session's builder constructed from built-in descriptors, captured
 	 * before any extension, MCP, or dynamically registered tool could claim their registry
@@ -4067,6 +4069,7 @@ export class AgentSession {
 
 	// Tool registry and prompt builder for extensions
 	#toolRegistry: Map<string, AgentTool>;
+	#onToolNamesChanged: ((toolNames: string[]) => void) | undefined;
 	/**
 	 * Session-owned provenance for tool OBJECTS built from a built-in descriptor.
 	 *
@@ -5861,6 +5864,7 @@ export class AgentSession {
 			this.#providerSessionState = config.providerSessionState;
 		}
 		this.#toolRegistry = config.toolRegistry ?? new Map();
+		this.#onToolNamesChanged = config.onToolNamesChanged;
 		this.#builtinToolIdentities = new WeakSet(config.builtinToolIdentities ?? []);
 		this.#workflowGateToolSession = config.workflowGateToolSession;
 		this.#requestedToolNames = config.requestedToolNames;
@@ -12517,6 +12521,7 @@ export class AgentSession {
 
 	#setGuardedAgentTools(tools: AgentTool[]): void {
 		this.agent.setTools(tools.map(tool => this.#prepareToolForExecution(tool)));
+		this.#onToolNamesChanged?.(tools.map(tool => tool.name));
 	}
 
 	async #applyActiveToolsByName(

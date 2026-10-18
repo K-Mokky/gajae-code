@@ -9,6 +9,7 @@ import { Settings } from "../src/config/settings";
 import type { CustomTool } from "../src/extensibility/custom-tools/types";
 import { AgentSession } from "../src/session/agent-session";
 import { buildSessionContext, SessionManager } from "../src/session/session-manager";
+import { ToolContextStore } from "../src/tools/context";
 
 function createModel(): Model<"openai-responses"> {
 	return {
@@ -458,7 +459,7 @@ describe("AgentSession MCP discovery", () => {
 		});
 	});
 
-	it("fences in-flight discovery activations across new sessions and resets their queue", async () => {
+	it("fences in-flight search activation across new sessions and keeps tool context on committed tools", async () => {
 		const readTool = createBasicTool("read", "Read");
 		const docsSearchTool = createMcpTool("mcp__docs_search", "docs", "search", "Search internal docs", ["query"]);
 		const slackSendTool = createMcpTool("mcp__slack_send_message", "slack", "send_message", "Send a Slack message", [
@@ -474,6 +475,15 @@ describe("AgentSession MCP discovery", () => {
 			[searchTool.name, searchTool],
 		]);
 		const sessionManager = SessionManager.inMemory();
+		const toolContextStore = new ToolContextStore(() => ({
+			sessionManager,
+			modelRegistry: {} as never,
+			model: createModel(),
+			isIdle: () => true,
+			hasQueuedMessages: () => false,
+			abort: () => {},
+			settings: Settings.isolated(),
+		}));
 		const firstRebuildStarted = Promise.withResolvers<void>();
 		const releaseFirstRebuild = Promise.withResolvers<void>();
 		let successorRebuildStarted = false;
@@ -493,9 +503,10 @@ describe("AgentSession MCP discovery", () => {
 				withConsumerLease: async <T>(body: () => T | Promise<T>): Promise<T> => await body(),
 			} as never,
 			toolRegistry,
+			onToolNamesChanged: names => toolContextStore.setToolNames(names),
 			mcpDiscoveryEnabled: true,
 			rebuildSystemPrompt: async toolNames => {
-				if (toolNames.includes("mcp__docs_search")) {
+				if (toolNames.includes("search")) {
 					firstRebuildStarted.resolve();
 					await releaseFirstRebuild.promise;
 				}
@@ -505,11 +516,12 @@ describe("AgentSession MCP discovery", () => {
 		});
 		sessions.push(session);
 
-		const staleActivation = session.activateDiscoveredTools(["mcp__docs_search", "search"]);
+		const staleActivation = session.activateDiscoveredTools(["search"]);
 		await firstRebuildStarted.promise;
 		await session.newSession();
 
 		expect(session.getActiveToolNames()).toEqual(["read"]);
+		expect(toolContextStore.getContext().toolNames).toEqual(session.getActiveToolNames());
 		expect(session.getSelectedMCPToolNames()).toEqual([]);
 		expect(session.getSelectedDiscoveredToolNames()).toEqual([]);
 		expect(sessionManager.buildSessionContext()).toMatchObject({
@@ -525,6 +537,7 @@ describe("AgentSession MCP discovery", () => {
 		expect(await Promise.all([staleActivation, successorActivation])).toEqual([[], ["mcp__slack_send_message"]]);
 		expect(successorActivationStartedBeforeStaleRebuild).toBe(true);
 		expect(session.getActiveToolNames()).toEqual(["read", "mcp__slack_send_message"]);
+		expect(toolContextStore.getContext().toolNames).toEqual(session.getActiveToolNames());
 		expect(session.getSelectedMCPToolNames()).toEqual(["mcp__slack_send_message"]);
 		expect(session.getSelectedDiscoveredToolNames()).toEqual(["mcp__slack_send_message"]);
 		expect(sessionManager.buildSessionContext()).toMatchObject({
