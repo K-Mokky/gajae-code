@@ -12244,7 +12244,6 @@ export class AgentSession {
 	activateDiscoveredTools(toolNames: string[]): Promise<string[]> {
 		const requestedToolNames = [...toolNames];
 		const sessionTransitionGeneration = this.#sessionTransitionGeneration;
-		if (this.#sessionTransitionKind !== undefined) return Promise.resolve([]);
 		const activation = this.#discoveredToolActivationChain.then(async () => {
 			while (this.#sessionTransitionKind !== undefined) {
 				await this.#waitForSessionTransitionEnd(this.#disposeAbortController.signal);
