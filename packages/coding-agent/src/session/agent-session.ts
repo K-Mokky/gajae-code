@@ -4130,6 +4130,7 @@ export class AgentSession {
 	#discoverableToolSearchIndex: DiscoverableToolSearchIndex | null = null;
 	#selectedDiscoveredToolNames = new Set<string>();
 	#discoveredToolActivationChain: Promise<void> = Promise.resolve();
+	#mcpCatalogGeneration = 0;
 	#baselineDiscoveredBuiltinToolNames = new Set<string>();
 	#discoverableToolAllowedNames: ReadonlySet<string> | undefined;
 	#gjcSubskillToolNames = new Set<string>();
@@ -11588,6 +11589,7 @@ export class AgentSession {
 
 	#setDiscoverableMCPTools(discoverableMCPTools: Map<string, DiscoverableTool>): void {
 		this.#discoverableMCPTools = discoverableMCPTools;
+		this.#mcpCatalogGeneration += 1;
 		this.#invalidateDiscoveryCaches();
 	}
 
@@ -12051,11 +12053,13 @@ export class AgentSession {
 		this.#toolRegistry.clear();
 		for (const [name, tool] of snapshot.toolRegistry) this.#toolRegistry.set(name, tool);
 		this.#discoverableMCPTools = snapshot.discoverableMCPTools;
+		this.#mcpCatalogGeneration += 1;
 		this.#selectedMCPToolNames = snapshot.selectedMCPToolNames;
 		this.#selectedDiscoveredToolNames = snapshot.selectedDiscoveredToolNames;
 		// These are the already-prepared predecessor objects from agent.state;
 		// re-preparing them would stack execution guards and break identity.
 		this.agent.setTools(snapshot.tools);
+		this.#onToolNamesChanged?.(snapshot.tools.map(tool => tool.name));
 		this.#baseSystemPrompt = snapshot.baseSystemPrompt;
 		this.agent.setSystemPrompt(snapshot.systemPrompt);
 		this.#lastAppliedToolSignature = snapshot.lastAppliedToolSignature;
@@ -12259,40 +12263,45 @@ export class AgentSession {
 	}
 
 	async #activateDiscoveredTools(toolNames: string[], sessionTransitionGeneration: number): Promise<string[]> {
-		const previousSelectedMCPToolNames = this.getSelectedMCPToolNames();
-		const previousSelectedDiscoveredBuiltinToolNames = this.#getSelectedDiscoveredBuiltinToolNames();
-		const nextActiveToolNames = this.getActiveToolNames();
-		const nextActiveNameSet = new Set(nextActiveToolNames);
-		const nextSelectedDiscoveredBuiltinToolNames = new Set(this.#selectedDiscoveredToolNames);
-		const activated: string[] = [];
-		for (const name of new Set(toolNames)) {
-			if (this.#discoverableMCPTools.has(name) && this.#toolRegistry.has(name)) {
-				if (!nextActiveNameSet.has(name)) {
+		while (true) {
+			if (sessionTransitionGeneration !== this.#sessionTransitionGeneration) return [];
+			const mcpCatalogGeneration = this.#mcpCatalogGeneration;
+			const previousSelectedMCPToolNames = this.getSelectedMCPToolNames();
+			const previousSelectedDiscoveredBuiltinToolNames = this.#getSelectedDiscoveredBuiltinToolNames();
+			const nextActiveToolNames = this.getActiveToolNames();
+			const nextActiveNameSet = new Set(nextActiveToolNames);
+			const nextSelectedDiscoveredBuiltinToolNames = new Set(this.#selectedDiscoveredToolNames);
+			const activated: string[] = [];
+			for (const name of new Set(toolNames)) {
+				if (this.#discoverableMCPTools.has(name) && this.#toolRegistry.has(name)) {
+					if (!nextActiveNameSet.has(name)) {
+						nextActiveToolNames.push(name);
+						nextActiveNameSet.add(name);
+						activated.push(name);
+					}
+					continue;
+				}
+				if (this.#discoverableToolAllowedNames && !this.#discoverableToolAllowedNames.has(name)) continue;
+				const tool = this.#toolRegistry.get(name);
+				if (tool?.loadMode === "discoverable" && !nextActiveNameSet.has(name)) {
 					nextActiveToolNames.push(name);
 					nextActiveNameSet.add(name);
+					nextSelectedDiscoveredBuiltinToolNames.add(name);
 					activated.push(name);
 				}
-				continue;
 			}
-			if (this.#discoverableToolAllowedNames && !this.#discoverableToolAllowedNames.has(name)) continue;
-			const tool = this.#toolRegistry.get(name);
-			if (tool?.loadMode === "discoverable" && !nextActiveNameSet.has(name)) {
-				nextActiveToolNames.push(name);
-				nextActiveNameSet.add(name);
-				nextSelectedDiscoveredBuiltinToolNames.add(name);
-				activated.push(name);
+			if (activated.length > 0) {
+				await this.#applyActiveToolsByName(nextActiveToolNames, {
+					previousSelectedMCPToolNames,
+					previousSelectedDiscoveredBuiltinToolNames,
+					nextSelectedDiscoveredBuiltinToolNames: [...nextSelectedDiscoveredBuiltinToolNames],
+					sessionTransitionGeneration,
+				});
 			}
+			if (sessionTransitionGeneration !== this.#sessionTransitionGeneration) return [];
+			if (mcpCatalogGeneration !== this.#mcpCatalogGeneration) continue;
+			return activated;
 		}
-		if (activated.length > 0) {
-			await this.#applyActiveToolsByName(nextActiveToolNames, {
-				previousSelectedMCPToolNames,
-				previousSelectedDiscoveredBuiltinToolNames,
-				nextSelectedDiscoveredBuiltinToolNames: [...nextSelectedDiscoveredBuiltinToolNames],
-				sessionTransitionGeneration,
-			});
-		}
-		if (sessionTransitionGeneration !== this.#sessionTransitionGeneration) return [];
-		return activated;
 	}
 
 	/** Wrap guarded tools so SDK permission modes remain fail-closed without a reverse provider. */
@@ -12540,6 +12549,7 @@ export class AgentSession {
 			sessionTransitionGeneration?: number;
 		},
 	): Promise<void> {
+		const mcpCatalogGeneration = this.#mcpCatalogGeneration;
 		toolNames = [...new Set([...toolNames.map(name => name.toLowerCase()), ...this.#mandatoryMCPToolNames])];
 		const previousSelectedMCPToolNames = options?.previousSelectedMCPToolNames ?? this.getSelectedMCPToolNames();
 		const previousSelectedDiscoveredBuiltinToolNames =
@@ -12598,6 +12608,12 @@ export class AgentSession {
 						}
 						return;
 					}
+				}
+				if (mcpCatalogGeneration !== this.#mcpCatalogGeneration) {
+					if (generation === this.#baseSystemPromptGeneration) {
+						this.#pendingAppliedToolSignature = undefined;
+					}
+					return;
 				}
 				if (generation === this.#baseSystemPromptGeneration) {
 					this.#baseSystemPrompt = built.systemPrompt;
@@ -18311,8 +18327,8 @@ export class AgentSession {
 				if (exactRetirement && !exactRetirement.canCommit())
 					throw new Error("Exact MCP control retirement changed before session adoption");
 				this.sessionManager.commitPreparedNewSession(prepared);
-				await exactRetirement?.commit();
 				this.#commitSessionTransition();
+				await exactRetirement?.commit();
 				// Endpoint identity committed to the successor: re-register the
 				// manager so post-transition lineage bindings resolve and owned
 				// aborts classify in the successor session (review thread P1).
@@ -18394,8 +18410,8 @@ export class AgentSession {
 				if (exactRetirement && !exactRetirement.canCommit())
 					throw new Error("Exact MCP control retirement changed before session adoption");
 				this.sessionManager.commitPreparedNewSession(prepared);
-				await exactRetirement?.commit();
 				this.#commitSessionTransition();
+				await exactRetirement?.commit();
 				// Endpoint identity committed to the successor: re-register the
 				// manager so post-transition lineage bindings resolve and owned
 				// aborts classify in the successor session (review thread P1).
@@ -18702,8 +18718,8 @@ export class AgentSession {
 					if (exactRetirement && !exactRetirement.canCommit())
 						throw new Error("Exact MCP control retirement changed before session adoption");
 					this.sessionManager.commitPreparedNewSession(prepared);
-					await exactRetirement?.commit();
 					this.#commitSessionTransition();
+					await exactRetirement?.commit();
 					// Fork commits a successor endpoint identity; re-register the
 					// manager under it (review thread P1).
 					this.#rekeyJobManagerForSessionIdentity(previousSessionIdentity, previousSessionFile);
@@ -22132,8 +22148,8 @@ export class AgentSession {
 
 				// --- Commit boundary: synchronous adoption is the sole identity publication.
 				this.sessionManager.commitPreparedNewSession(prepared);
-				await exactRetirement?.commit();
 				this.#commitSessionTransition();
+				await exactRetirement?.commit();
 				// Handoff commits a successor endpoint identity; re-register the
 				// manager under it (review thread P1).
 				this.#rekeyJobManagerForSessionIdentity(rollbackSessionState.sessionId, rollbackSessionState.sessionFile);
