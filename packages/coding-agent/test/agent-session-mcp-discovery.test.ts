@@ -458,6 +458,82 @@ describe("AgentSession MCP discovery", () => {
 		});
 	});
 
+	it("fences in-flight discovery activations across new sessions and resets their queue", async () => {
+		const readTool = createBasicTool("read", "Read");
+		const docsSearchTool = createMcpTool("mcp__docs_search", "docs", "search", "Search internal docs", ["query"]);
+		const slackSendTool = createMcpTool("mcp__slack_send_message", "slack", "send_message", "Send a Slack message", [
+			"channel",
+			"text",
+		]);
+		const searchTool = createBasicTool("search", "Search");
+		searchTool.loadMode = "discoverable";
+		const toolRegistry = new Map([
+			[readTool.name, readTool],
+			[docsSearchTool.name, docsSearchTool],
+			[slackSendTool.name, slackSendTool],
+			[searchTool.name, searchTool],
+		]);
+		const sessionManager = SessionManager.inMemory();
+		const firstRebuildStarted = Promise.withResolvers<void>();
+		const releaseFirstRebuild = Promise.withResolvers<void>();
+		let successorRebuildStarted = false;
+		const agent = new Agent({
+			initialState: {
+				model: createModel(),
+				systemPrompt: ["initial"],
+				tools: [readTool],
+				messages: [],
+			},
+		});
+		const session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({ "mcp.discoveryMode": true, "tools.discoveryMode": "all" }),
+			modelRegistry: {
+				withConsumerLease: async <T>(body: () => T | Promise<T>): Promise<T> => await body(),
+			} as never,
+			toolRegistry,
+			mcpDiscoveryEnabled: true,
+			rebuildSystemPrompt: async toolNames => {
+				if (toolNames.includes("mcp__docs_search")) {
+					firstRebuildStarted.resolve();
+					await releaseFirstRebuild.promise;
+				}
+				if (toolNames.includes("mcp__slack_send_message")) successorRebuildStarted = true;
+				return { systemPrompt: [`tools:${toolNames.join(",")}`] };
+			},
+		});
+		sessions.push(session);
+
+		const staleActivation = session.activateDiscoveredTools(["mcp__docs_search", "search"]);
+		await firstRebuildStarted.promise;
+		await session.newSession();
+
+		expect(session.getActiveToolNames()).toEqual(["read"]);
+		expect(session.getSelectedMCPToolNames()).toEqual([]);
+		expect(session.getSelectedDiscoveredToolNames()).toEqual([]);
+		expect(sessionManager.buildSessionContext()).toMatchObject({
+			hasPersistedMCPToolSelection: false,
+			hasPersistedDiscoveredBuiltinToolSelection: false,
+		});
+
+		const successorActivation = session.activateDiscoveredTools(["mcp__slack_send_message"]);
+		await Promise.resolve();
+		const successorActivationStartedBeforeStaleRebuild = successorRebuildStarted;
+		releaseFirstRebuild.resolve();
+
+		expect(await Promise.all([staleActivation, successorActivation])).toEqual([[], ["mcp__slack_send_message"]]);
+		expect(successorActivationStartedBeforeStaleRebuild).toBe(true);
+		expect(session.getActiveToolNames()).toEqual(["read", "mcp__slack_send_message"]);
+		expect(session.getSelectedMCPToolNames()).toEqual(["mcp__slack_send_message"]);
+		expect(session.getSelectedDiscoveredToolNames()).toEqual(["mcp__slack_send_message"]);
+		expect(sessionManager.buildSessionContext()).toMatchObject({
+			hasPersistedMCPToolSelection: true,
+			selectedMCPToolNames: ["mcp__slack_send_message"],
+			hasPersistedDiscoveredBuiltinToolSelection: false,
+		});
+	});
+
 	it("persists mixed discovery activations with independent MCP and built-in authority", async () => {
 		const readTool = createBasicTool("read", "Read");
 		const docsSearchTool = createMcpTool("mcp__docs_search", "docs", "search", "Search internal docs", ["query"]);

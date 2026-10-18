@@ -4522,6 +4522,7 @@ export class AgentSession {
 			for (const controller of this.#configurationReloadControllers) controller.abort();
 		}
 		this.#sessionTransitionGeneration += 1;
+		this.#discoveredToolActivationChain = Promise.resolve();
 		this.#sessionTransitionKind = kind;
 		const completion = Promise.withResolvers<void>();
 		this.#sessionTransitionCompletion = completion.promise;
@@ -12229,9 +12230,17 @@ export class AgentSession {
 
 	activateDiscoveredTools(toolNames: string[]): Promise<string[]> {
 		const requestedToolNames = [...toolNames];
-		const activation = this.#discoveredToolActivationChain.then(() =>
-			this.#activateDiscoveredTools(requestedToolNames),
-		);
+		const sessionTransitionGeneration = this.#sessionTransitionGeneration;
+		if (this.#sessionTransitionKind !== undefined) return Promise.resolve([]);
+		const activation = this.#discoveredToolActivationChain.then(() => {
+			if (
+				sessionTransitionGeneration !== this.#sessionTransitionGeneration ||
+				this.#sessionTransitionKind !== undefined
+			) {
+				return [];
+			}
+			return this.#activateDiscoveredTools(requestedToolNames, sessionTransitionGeneration);
+		});
 		this.#discoveredToolActivationChain = activation.then(
 			() => undefined,
 			() => undefined,
@@ -12239,7 +12248,7 @@ export class AgentSession {
 		return activation;
 	}
 
-	async #activateDiscoveredTools(toolNames: string[]): Promise<string[]> {
+	async #activateDiscoveredTools(toolNames: string[], sessionTransitionGeneration: number): Promise<string[]> {
 		const previousSelectedMCPToolNames = this.getSelectedMCPToolNames();
 		const previousSelectedDiscoveredBuiltinToolNames = this.#getSelectedDiscoveredBuiltinToolNames();
 		const nextActiveToolNames = this.getActiveToolNames();
@@ -12269,8 +12278,10 @@ export class AgentSession {
 				previousSelectedMCPToolNames,
 				previousSelectedDiscoveredBuiltinToolNames,
 				nextSelectedDiscoveredBuiltinToolNames: [...nextSelectedDiscoveredBuiltinToolNames],
+				sessionTransitionGeneration,
 			});
 		}
+		if (sessionTransitionGeneration !== this.#sessionTransitionGeneration) return [];
 		return activated;
 	}
 
@@ -12515,6 +12526,7 @@ export class AgentSession {
 			previousSelectedMCPToolNames?: string[];
 			previousSelectedDiscoveredBuiltinToolNames?: string[];
 			nextSelectedDiscoveredBuiltinToolNames?: string[];
+			sessionTransitionGeneration?: number;
 		},
 	): Promise<void> {
 		toolNames = [...new Set([...toolNames.map(name => name.toLowerCase()), ...this.#mandatoryMCPToolNames])];
@@ -12560,6 +12572,15 @@ export class AgentSession {
 					this.#rebuildSystemPrompt!(validToolNames, this.#toolRegistry),
 				);
 				if (this.#isDisposed) {
+					if (generation === this.#baseSystemPromptGeneration) {
+						this.#pendingAppliedToolSignature = undefined;
+					}
+					return;
+				}
+				if (
+					options?.sessionTransitionGeneration !== undefined &&
+					options.sessionTransitionGeneration !== this.#sessionTransitionGeneration
+				) {
 					if (generation === this.#baseSystemPromptGeneration) {
 						this.#pendingAppliedToolSignature = undefined;
 					}
