@@ -4542,6 +4542,13 @@ export class AgentSession {
 		this.#discoveredToolActivationChain = Promise.resolve();
 	}
 
+	#commitCatalogPreservingTransition(): void {
+		// Compaction commits a history rewrite without changing session identity or
+		// the active tool catalog. Pending discovery activations wait for the lease
+		// to end and then apply to that same catalog.
+		this.#sessionTransitionCommitted = true;
+	}
+
 	async #waitForSessionTransitionEnd(signal: AbortSignal): Promise<void> {
 		while (this.#sessionTransitionKind !== undefined) {
 			await awaitPromptInvocationPreflight(this.#sessionTransitionCompletion, signal);
@@ -21854,6 +21861,7 @@ export class AgentSession {
 					fromExtension,
 					preserveData,
 				);
+				this.#commitCatalogPreservingTransition();
 				this.#recordAdaptiveCompactionReset(tokensBefore);
 				await this.#applyCompactionPostAppend(compactionEntryId, firstKeptEntryId, fromExtension);
 
@@ -24538,7 +24546,7 @@ export class AgentSession {
 				fromExtension,
 				preserveData,
 			);
-			this.#commitSessionTransition();
+			this.#commitCatalogPreservingTransition();
 			this.#recordAdaptiveCompactionReset(tokensBefore);
 			await this.#applyCompactionPostAppend(compactionEntryId, firstKeptEntryId, fromExtension);
 			if (autoCompactionSignal.aborted) return await emitAborted();
