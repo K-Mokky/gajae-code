@@ -8157,7 +8157,7 @@ test("PresentationArbiter serializes ordinary and workflow asks, fences queued c
 	});
 	arbiter.retain(gate("ordinary", false, 1));
 	arbiter.retain(gate("workflow-first", true, 0));
-	await Bun.sleep(PresentationArbiter.retryBaseDelayMs + 10);
+	await waitFor(() => publications.length === 1, "ordinary ask publication");
 	expect(publications.map(action => action.workflowGateId)).toEqual([undefined]);
 	expect(publications[0]).toMatchObject({ options: ["one", "two"], recommendedIndex: 1 });
 	arbiter.complete("ordinary");
@@ -9054,11 +9054,15 @@ test("PresentationArbiter fences an exhausted ordinary interactive head until ex
 
 test("PresentationArbiter terminally cancels an exhausted ordinary head exactly once before promotion", async () => {
 	const publications: string[] = [];
+	let attempts = 0;
 	const arbiter = new PresentationArbiter(
 		{
 			registerArbitratedAsk(json: string) {
 				const action = JSON.parse(json) as { id: string; question: string };
-				if (action.question === "Unavailable?") throw new Error("unavailable");
+				if (action.question === "Unavailable?") {
+					attempts++;
+					throw new Error("unavailable");
+				}
 				publications.push(action.id);
 				return { actionId: action.id, registrationEpoch: publications.length };
 			},
@@ -9093,7 +9097,7 @@ test("PresentationArbiter terminally cancels an exhausted ordinary head exactly 
 		selectedOptions: [],
 	});
 
-	await Bun.sleep(PresentationArbiter.retryBaseDelayMs * 4);
+	await waitFor(() => attempts >= 2, "ordinary head publication retry");
 	expect(publications).toEqual([]);
 	expect(closes).toBe(0);
 
