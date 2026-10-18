@@ -97,6 +97,35 @@ describe("AgentSession MCP discovery", () => {
 		}
 	});
 
+	function createMcpActivationRaceSession(
+		rebuildSystemPrompt: (toolNames: string[]) => Promise<{ systemPrompt: string[] }>,
+	) {
+		const readTool = createBasicTool("read", "Read");
+		const docsSearchTool = createMcpCustomTool("mcp__docs_search", "docs", "search", "Search internal docs", [
+			"query",
+		]);
+		const session = new AgentSession({
+			agent: new Agent({
+				initialState: {
+					model: createModel(),
+					systemPrompt: ["initial"],
+					tools: [readTool],
+					messages: [],
+				},
+			}),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "mcp.discoveryMode": true }),
+			modelRegistry: {
+				withConsumerLease: async <T>(body: () => T | Promise<T>): Promise<T> => await body(),
+			} as never,
+			toolRegistry: new Map<string, AgentTool>([[readTool.name, readTool]]),
+			mcpDiscoveryEnabled: true,
+			rebuildSystemPrompt,
+		});
+		sessions.push(session);
+		return { session, docsSearchTool };
+	}
+
 	it("caches discoverable MCP search indexes until MCP tools refresh", async () => {
 		const readTool = createBasicTool("read", "Read");
 		const docsSearchTool = createMcpTool("mcp__docs_search", "docs", "search", "Search internal docs", ["query"]);
@@ -1100,6 +1129,58 @@ describe("AgentSession MCP discovery", () => {
 		expect(session.agent.state.tools.find(tool => tool.name === "mcp__docs_search")?.description).toBe(
 			"Refreshed docs search",
 		);
+	});
+
+	it("rebuilds discovery activation after a concurrent base prompt refresh", async () => {
+		const rebuildStarted = Promise.withResolvers<void>();
+		const releaseRebuild = Promise.withResolvers<void>();
+		let blockFirstDiscoveryRebuild = true;
+		const { session, docsSearchTool } = createMcpActivationRaceSession(async toolNames => {
+			if (blockFirstDiscoveryRebuild && toolNames.includes("mcp__docs_search")) {
+				blockFirstDiscoveryRebuild = false;
+				rebuildStarted.resolve();
+				await releaseRebuild.promise;
+			}
+			return { systemPrompt: [`tools:${toolNames.join(",")}`] };
+		});
+		await session.refreshMCPTools([docsSearchTool], { selectedMCPToolNames: [], activeMCPToolNames: [] });
+
+		const activation = session.activateDiscoveredTools(["mcp__docs_search"]);
+		await rebuildStarted.promise;
+		await session.refreshBaseSystemPrompt();
+		expect(session.systemPrompt).toEqual(["tools:read"]);
+		releaseRebuild.resolve();
+
+		expect(await activation).toEqual(["mcp__docs_search"]);
+		expect(session.getActiveToolNames()).toEqual(["read", "mcp__docs_search"]);
+		expect(session.getSelectedMCPToolNames()).toEqual(["mcp__docs_search"]);
+		expect(session.systemPrompt).toEqual(["tools:read,mcp__docs_search"]);
+	});
+
+	it("does not restore discovered tools after a newer explicit active-tool selection", async () => {
+		const rebuildStarted = Promise.withResolvers<void>();
+		const releaseRebuild = Promise.withResolvers<void>();
+		let blockFirstDiscoveryRebuild = true;
+		const { session, docsSearchTool } = createMcpActivationRaceSession(async toolNames => {
+			if (blockFirstDiscoveryRebuild && toolNames.includes("mcp__docs_search")) {
+				blockFirstDiscoveryRebuild = false;
+				rebuildStarted.resolve();
+				await releaseRebuild.promise;
+			}
+			return { systemPrompt: [`tools:${toolNames.join(",")}`] };
+		});
+		await session.refreshMCPTools([docsSearchTool], { selectedMCPToolNames: [], activeMCPToolNames: [] });
+
+		const activation = session.activateDiscoveredTools(["mcp__docs_search"]);
+		await rebuildStarted.promise;
+		await session.setActiveToolsByName(["read"]);
+		expect(session.systemPrompt).toEqual(["tools:read"]);
+		releaseRebuild.resolve();
+
+		expect(await activation).toEqual([]);
+		expect(session.getActiveToolNames()).toEqual(["read"]);
+		expect(session.getSelectedMCPToolNames()).toEqual([]);
+		expect(session.systemPrompt).toEqual(["tools:read"]);
 	});
 
 	it("revalidates discoverable activation when an SSH registry entry is replaced", async () => {

@@ -4130,6 +4130,10 @@ export class AgentSession {
 	#discoverableToolSearchIndex: DiscoverableToolSearchIndex | null = null;
 	#selectedDiscoveredToolNames = new Set<string>();
 	#discoveredToolActivationChain: Promise<void> = Promise.resolve();
+	/** Changes whenever the installed active tool list changes. */
+	#activeToolSelectionRevision = 0;
+	/** Explicit caller selections supersede any older pending discovery activation. */
+	#explicitActiveToolSelectionGeneration = 0;
 	#mcpCatalogGeneration = 0;
 	#baselineDiscoveredBuiltinToolNames = new Set<string>();
 	#discoverableToolAllowedNames: ReadonlySet<string> | undefined;
@@ -12255,12 +12259,21 @@ export class AgentSession {
 	activateDiscoveredTools(toolNames: string[]): Promise<string[]> {
 		const requestedToolNames = [...toolNames];
 		const sessionTransitionGeneration = this.#sessionTransitionGeneration;
+		const explicitActiveToolSelectionGeneration = this.#explicitActiveToolSelectionGeneration;
 		const activation = this.#discoveredToolActivationChain.then(async () => {
 			while (this.#sessionTransitionKind !== undefined) {
 				await this.#waitForSessionTransitionEnd(this.#disposeAbortController.signal);
 			}
-			if (sessionTransitionGeneration !== this.#sessionTransitionGeneration) return [];
-			return this.#activateDiscoveredTools(requestedToolNames, sessionTransitionGeneration);
+			if (
+				sessionTransitionGeneration !== this.#sessionTransitionGeneration ||
+				explicitActiveToolSelectionGeneration !== this.#explicitActiveToolSelectionGeneration
+			)
+				return [];
+			return this.#activateDiscoveredTools(
+				requestedToolNames,
+				sessionTransitionGeneration,
+				explicitActiveToolSelectionGeneration,
+			);
 		});
 		this.#discoveredToolActivationChain = activation.then(
 			() => undefined,
@@ -12269,9 +12282,18 @@ export class AgentSession {
 		return activation;
 	}
 
-	async #activateDiscoveredTools(toolNames: string[], sessionTransitionGeneration: number): Promise<string[]> {
+	async #activateDiscoveredTools(
+		toolNames: string[],
+		sessionTransitionGeneration: number,
+		explicitActiveToolSelectionGeneration: number,
+	): Promise<string[]> {
 		while (true) {
-			if (sessionTransitionGeneration !== this.#sessionTransitionGeneration) return [];
+			if (
+				sessionTransitionGeneration !== this.#sessionTransitionGeneration ||
+				explicitActiveToolSelectionGeneration !== this.#explicitActiveToolSelectionGeneration
+			)
+				return [];
+			const activeToolSelectionRevision = this.#activeToolSelectionRevision;
 			const mcpCatalogGeneration = this.#mcpCatalogGeneration;
 			const previousSelectedMCPToolNames = this.getSelectedMCPToolNames();
 			const previousSelectedDiscoveredBuiltinToolNames = this.#getSelectedDiscoveredBuiltinToolNames();
@@ -12299,14 +12321,28 @@ export class AgentSession {
 			}
 			const candidateToolEntries = nextActiveToolNames.map(name => this.#toolRegistry.get(name));
 			if (activated.length > 0) {
-				await this.#applyActiveToolsByName(nextActiveToolNames, {
+				const appliedRevision = await this.#applyActiveToolsByName(nextActiveToolNames, {
 					previousSelectedMCPToolNames,
 					previousSelectedDiscoveredBuiltinToolNames,
 					nextSelectedDiscoveredBuiltinToolNames: [...nextSelectedDiscoveredBuiltinToolNames],
 					sessionTransitionGeneration,
+					expectedActiveToolSelectionRevision: activeToolSelectionRevision,
+					explicitActiveToolSelectionGeneration,
 				});
+				if (appliedRevision === undefined || appliedRevision !== this.#activeToolSelectionRevision) {
+					if (
+						sessionTransitionGeneration !== this.#sessionTransitionGeneration ||
+						explicitActiveToolSelectionGeneration !== this.#explicitActiveToolSelectionGeneration
+					)
+						return [];
+					continue;
+				}
 			}
-			if (sessionTransitionGeneration !== this.#sessionTransitionGeneration) return [];
+			if (
+				sessionTransitionGeneration !== this.#sessionTransitionGeneration ||
+				explicitActiveToolSelectionGeneration !== this.#explicitActiveToolSelectionGeneration
+			)
+				return [];
 			if (
 				mcpCatalogGeneration !== this.#mcpCatalogGeneration ||
 				nextActiveToolNames.some((name, index) => this.#toolRegistry.get(name) !== candidateToolEntries[index])
@@ -12548,10 +12584,12 @@ export class AgentSession {
 	}
 
 	#setGuardedAgentTools(tools: AgentTool[]): void {
+		this.#activeToolSelectionRevision++;
 		this.agent.setTools(tools.map(tool => this.#prepareToolForExecution(tool)));
 		this.#onToolNamesChanged?.(tools.map(tool => tool.name));
 	}
 
+	/** Returns the committed selection revision, or undefined when this candidate was superseded. */
 	async #applyActiveToolsByName(
 		toolNames: string[],
 		options?: {
@@ -12560,8 +12598,17 @@ export class AgentSession {
 			previousSelectedDiscoveredBuiltinToolNames?: string[];
 			nextSelectedDiscoveredBuiltinToolNames?: string[];
 			sessionTransitionGeneration?: number;
+			expectedActiveToolSelectionRevision?: number;
+			explicitActiveToolSelectionGeneration?: number;
 		},
-	): Promise<void> {
+	): Promise<number | undefined> {
+		const activeToolSelectionRevision = this.#activeToolSelectionRevision;
+		const selectionIsCurrent = () =>
+			(options?.expectedActiveToolSelectionRevision === undefined ||
+				(options.expectedActiveToolSelectionRevision === activeToolSelectionRevision &&
+					options.expectedActiveToolSelectionRevision === this.#activeToolSelectionRevision)) &&
+			(options?.explicitActiveToolSelectionGeneration === undefined ||
+				options.explicitActiveToolSelectionGeneration === this.#explicitActiveToolSelectionGeneration);
 		const mcpCatalogGeneration = this.#mcpCatalogGeneration;
 		toolNames = [...new Set([...toolNames.map(name => name.toLowerCase()), ...this.#mandatoryMCPToolNames])];
 		const previousSelectedMCPToolNames = options?.previousSelectedMCPToolNames ?? this.getSelectedMCPToolNames();
@@ -12600,16 +12647,24 @@ export class AgentSession {
 		const promptRelevantToolsChanged =
 			signature !== (this.#pendingAppliedToolSignature ?? this.#lastAppliedToolSignature);
 		if (promptRelevantToolsChanged && this.#rebuildSystemPrompt) {
-			const generation = this.#reserveBaseSystemPromptGeneration();
-			try {
-				const built = await this.#runAdmittedBaseSystemPromptRebuild(() =>
-					this.#rebuildSystemPrompt!(validToolNames, this.#toolRegistry),
-				);
-				if (this.#isDisposed) {
+			while (true) {
+				const generation = this.#reserveBaseSystemPromptGeneration();
+				let built: { systemPrompt: string[] };
+				try {
+					built = await this.#runAdmittedBaseSystemPromptRebuild(() =>
+						this.#rebuildSystemPrompt!(validToolNames, this.#toolRegistry),
+					);
+				} catch (error) {
 					if (generation === this.#baseSystemPromptGeneration) {
 						this.#pendingAppliedToolSignature = undefined;
 					}
-					return;
+					throw error;
+				}
+				if (this.#isDisposed || !selectionIsCurrent()) {
+					if (generation === this.#baseSystemPromptGeneration) {
+						this.#pendingAppliedToolSignature = undefined;
+					}
+					return undefined;
 				}
 				if (options?.sessionTransitionGeneration !== undefined) {
 					while (this.#sessionTransitionKind !== undefined) {
@@ -12619,8 +12674,14 @@ export class AgentSession {
 						if (generation === this.#baseSystemPromptGeneration) {
 							this.#pendingAppliedToolSignature = undefined;
 						}
-						return;
+						return undefined;
 					}
+				}
+				if (this.#isDisposed || !selectionIsCurrent()) {
+					if (generation === this.#baseSystemPromptGeneration) {
+						this.#pendingAppliedToolSignature = undefined;
+					}
+					return undefined;
 				}
 				if (
 					mcpCatalogGeneration !== this.#mcpCatalogGeneration ||
@@ -12629,24 +12690,28 @@ export class AgentSession {
 					if (generation === this.#baseSystemPromptGeneration) {
 						this.#pendingAppliedToolSignature = undefined;
 					}
-					return;
+					return undefined;
 				}
-				if (generation === this.#baseSystemPromptGeneration) {
-					this.#baseSystemPrompt = built.systemPrompt;
-					this.agent.setSystemPrompt(this.#baseSystemPrompt);
-					this.#lastAppliedToolSignature = signature;
-					this.#pendingAppliedToolSignature = undefined;
-				}
-			} catch (error) {
-				if (generation === this.#baseSystemPromptGeneration) {
-					this.#pendingAppliedToolSignature = undefined;
-				}
-				throw error;
+				if (generation !== this.#baseSystemPromptGeneration) continue;
+				this.#baseSystemPrompt = built.systemPrompt;
+				this.agent.setSystemPrompt(this.#baseSystemPrompt);
+				this.#lastAppliedToolSignature = signature;
+				this.#pendingAppliedToolSignature = undefined;
+				break;
 			}
 		} else if (promptRelevantToolsChanged) {
+			if (!selectionIsCurrent()) return undefined;
 			this.#lastAppliedToolSignature = signature;
 			this.#pendingAppliedToolSignature = undefined;
 		}
+		if (
+			!selectionIsCurrent() ||
+			(options?.sessionTransitionGeneration !== undefined &&
+				options.sessionTransitionGeneration !== this.#sessionTransitionGeneration) ||
+			mcpCatalogGeneration !== this.#mcpCatalogGeneration ||
+			validToolNames.some((name, index) => this.#toolRegistry.get(name) !== tools[index])
+		)
+			return undefined;
 		if (promptRelevantToolsChanged) this.#defaultModelSelectionMutationRevision++;
 		this.#selectedMCPToolNames = nextSelectedMCPToolNames;
 		this.#selectedDiscoveredToolNames = nextSelectedDiscoveredBuiltinToolNames;
@@ -12658,6 +12723,7 @@ export class AgentSession {
 				previousSelectedDiscoveredBuiltinToolNames,
 			);
 		}
+		return this.#activeToolSelectionRevision;
 	}
 
 	/**
@@ -12712,7 +12778,8 @@ export class AgentSession {
 	 * Changes take effect before the next model call.
 	 */
 	async setActiveToolsByName(toolNames: string[]): Promise<void> {
-		await this.#applyActiveToolsByName(toolNames);
+		const explicitActiveToolSelectionGeneration = ++this.#explicitActiveToolSelectionGeneration;
+		await this.#applyActiveToolsByName(toolNames, { explicitActiveToolSelectionGeneration });
 	}
 
 	async #restoreMCPSelectionsForSessionContext(sessionContext: SessionContext): Promise<void> {
