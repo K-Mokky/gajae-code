@@ -7,6 +7,7 @@ import { Effort, type Model } from "@gajae-code/ai";
 import * as z from "zod/v4";
 import { Settings } from "../src/config/settings";
 import type { CustomTool } from "../src/extensibility/custom-tools/types";
+import { attachExactMcpControls } from "../src/runtime-mcp/redaction";
 import { AgentSession } from "../src/session/agent-session";
 import { buildSessionContext, SessionManager } from "../src/session/session-manager";
 import { ToolContextStore } from "../src/tools/context";
@@ -610,6 +611,76 @@ describe("AgentSession MCP discovery", () => {
 		expect(session.sessionId).toBe(originalSessionId);
 		expect(session.sessionFile).toBe(originalSessionFile);
 		expect(session.getActiveToolNames()).toEqual(["read"]);
+		releaseRebuild.resolve();
+		expect(await activation).toEqual(["mcp__docs_search"]);
+		expect(session.getActiveToolNames()).toEqual(["read", "mcp__docs_search"]);
+		expect(session.getSelectedMCPToolNames()).toEqual(["mcp__docs_search"]);
+		expect(session.systemPrompt).toEqual(["tools:read,mcp__docs_search"]);
+		expect(toolContextStore.getContext().toolNames).toEqual(session.getActiveToolNames());
+		expect(sessionManager.buildSessionContext()).toMatchObject({
+			hasPersistedMCPToolSelection: true,
+			selectedMCPToolNames: ["mcp__docs_search"],
+		});
+	});
+
+	it("preserves pending discovery activation while reading exact MCP status", async () => {
+		const readTool = createBasicTool("read", "Read");
+		const docsSearchTool = createMcpTool("mcp__docs_search", "docs", "search", "Search internal docs", ["query"]);
+		const toolRegistry = new Map([
+			[readTool.name, readTool],
+			[docsSearchTool.name, docsSearchTool],
+		]);
+		const sessionManager = SessionManager.inMemory();
+		const toolContextStore = new ToolContextStore(() => ({
+			sessionManager,
+			modelRegistry: {} as never,
+			model: createModel(),
+			isIdle: () => true,
+			hasQueuedMessages: () => false,
+			abort: () => {},
+			settings: Settings.isolated(),
+		}));
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-exact-mcp-status-"));
+		tempDirs.push(tempDir);
+		const configPath = path.join(tempDir, "mcp.json");
+		await Bun.write(configPath, JSON.stringify({ mcpServers: {} }));
+		const rebuildStarted = Promise.withResolvers<void>();
+		const releaseRebuild = Promise.withResolvers<void>();
+		const session = new AgentSession({
+			agent: new Agent({
+				initialState: {
+					model: createModel(),
+					systemPrompt: ["initial"],
+					tools: [readTool],
+					messages: [],
+				},
+			}),
+			sessionManager,
+			settings: Settings.isolated({ "mcp.discoveryMode": true }),
+			modelRegistry: {
+				withConsumerLease: async <T>(body: () => T | Promise<T>): Promise<T> => await body(),
+			} as never,
+			toolRegistry,
+			onToolNamesChanged: names => toolContextStore.setToolNames(names),
+			mcpDiscoveryEnabled: true,
+			rebuildSystemPrompt: async toolNames => {
+				if (toolNames.includes("mcp__docs_search")) {
+					rebuildStarted.resolve();
+					await releaseRebuild.promise;
+				}
+				return { systemPrompt: [`tools:${toolNames.join(",")}`] };
+			},
+		});
+		sessions.push(session);
+		attachExactMcpControls(session, { grantSource: "root-interactive-exact-config", configPath });
+
+		const activation = session.activateDiscoveredTools(["mcp__docs_search"]);
+		await rebuildStarted.promise;
+		expect(await session.getExactMcpStatusSnapshot()).toEqual({
+			startup: "no-servers-declared",
+			servers: [],
+		});
+
 		releaseRebuild.resolve();
 		expect(await activation).toEqual(["mcp__docs_search"]);
 		expect(session.getActiveToolNames()).toEqual(["read", "mcp__docs_search"]);

@@ -11904,9 +11904,7 @@ export class AgentSession {
 		return this.#withSessionAdmission("mcp-control", async () => {
 			this.#beginSessionTransition("mcp-control");
 			try {
-				const result = await body();
-				this.#commitSessionTransition();
-				return result;
+				return await body();
 			} finally {
 				this.#endSessionTransition();
 			}
@@ -12022,6 +12020,7 @@ export class AgentSession {
 				} else if (action === "resume") {
 					this.#exactMcpSuspendedTools.delete(name);
 				}
+				this.#commitSessionTransition();
 				return { action, ...result };
 			} catch (error) {
 				this.#restoreExactMcpSessionState(snapshot);
