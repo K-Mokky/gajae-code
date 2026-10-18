@@ -482,12 +482,16 @@ describe("workflow permission policy", () => {
 			repo: string;
 			pull_number: number;
 			reviewers: string[];
-			headers: { "X-GitHub-Api-Version": string };
+			headers?: { "X-GitHub-Api-Version": string };
 		};
 		type GithubStub = {
 			rest: {
 				pulls: {
 					get: (params: { owner: string; repo: string; pull_number: number }) => Promise<{ data: { number: number } }>;
+					requestReviewers: (params: RequestParams) => Promise<{ status: number }>;
+				};
+				issues: {
+					createComment: (params: { owner: string; repo: string; issue_number: number; body: string }) => Promise<{ status: number }>;
 				};
 			};
 			request: (route: string, params: RequestParams) => Promise<{ status: number }>;
@@ -497,6 +501,10 @@ describe("workflow permission policy", () => {
 			rest: {
 				pulls: {
 					get: async ({ pull_number }) => ({ data: { number: pull_number } }),
+					requestReviewers: async (params) => ({ status: 201 }),
+				},
+				issues: {
+					createComment: async () => ({ status: 201 }),
 				},
 			},
 			request: async (route, params) => {
@@ -527,6 +535,172 @@ describe("workflow permission policy", () => {
 				},
 			},
 		]);
+	});
+
+	test("falls back to standard requestReviewers on rerequest endpoint 500 error", async () => {
+		const source = await parsedWorkflow(RE_REVIEW_WORKFLOW);
+		const jobs = documentRecord(source.jobs);
+		const steps = documentRecord(jobs["request-review-on-comment"]).steps as unknown[];
+		const requestStep = steps.map(documentRecord).find(step => step.id === "request-reviewers");
+		const requestScript = documentRecord(documentRecord(requestStep).with).script as string;
+
+		type RequestParams = {
+			owner: string;
+			repo: string;
+			pull_number: number;
+			reviewers: string[];
+			headers?: { "X-GitHub-Api-Version": string };
+		};
+		const fallbackRequests: RequestParams[] = [];
+		const github = {
+			rest: {
+				pulls: {
+					get: async ({ pull_number }: { owner: string; repo: string; pull_number: number }) => ({ data: { number: pull_number } }),
+					requestReviewers: async (params: RequestParams) => {
+						fallbackRequests.push(params);
+						return { status: 201 };
+					},
+				},
+				issues: {
+					createComment: async () => ({ status: 201 }),
+				},
+			},
+			request: async (route: string, params: RequestParams) => {
+				if (route.includes("rerequest")) {
+					const error = Object.assign(new Error("Internal Server Error"), { status: 500 });
+					throw error;
+				}
+				return { status: 201 };
+			},
+		};
+		const context = { repo: { owner: "Yeachan-Heo", repo: "gajae-code" }, issue: { number: 6599 } };
+		const processStub = { env: { REVIEWERS_JSON: '["previous-reviewer"]' } };
+		const executeRequestStep = new Function(
+			"github",
+			"context",
+			"process",
+			`return (async () => { ${requestScript} })();`,
+		) as (github: typeof github, ctx: typeof context, proc: typeof processStub) => Promise<void>;
+
+		await executeRequestStep(github, context, processStub);
+
+		expect(fallbackRequests).toHaveLength(1);
+		expect(fallbackRequests[0]).toEqual({
+			owner: "Yeachan-Heo",
+			repo: "gajae-code",
+			pull_number: 6599,
+			reviewers: ["previous-reviewer"],
+		});
+	});
+
+	test("falls back to standard requestReviewers on rerequest endpoint 404 error", async () => {
+		const source = await parsedWorkflow(RE_REVIEW_WORKFLOW);
+		const jobs = documentRecord(source.jobs);
+		const steps = documentRecord(jobs["request-review-on-comment"]).steps as unknown[];
+		const requestStep = steps.map(documentRecord).find(step => step.id === "request-reviewers");
+		const requestScript = documentRecord(documentRecord(requestStep).with).script as string;
+
+		type RequestParams = {
+			owner: string;
+			repo: string;
+			pull_number: number;
+			reviewers: string[];
+			headers?: { "X-GitHub-Api-Version": string };
+		};
+		const fallbackRequests: RequestParams[] = [];
+		const github = {
+			rest: {
+				pulls: {
+					get: async ({ pull_number }: { owner: string; repo: string; pull_number: number }) => ({ data: { number: pull_number } }),
+					requestReviewers: async (params: RequestParams) => {
+						fallbackRequests.push(params);
+						return { status: 201 };
+					},
+				},
+				issues: {
+					createComment: async () => ({ status: 201 }),
+				},
+			},
+			request: async (route: string, params: RequestParams) => {
+				if (route.includes("rerequest")) {
+					const error = Object.assign(new Error("Not Found"), { status: 404 });
+					throw error;
+				}
+				return { status: 201 };
+			},
+		};
+		const context = { repo: { owner: "Yeachan-Heo", repo: "gajae-code" }, issue: { number: 6599 } };
+		const processStub = { env: { REVIEWERS_JSON: '["previous-reviewer"]' } };
+		const executeRequestStep = new Function(
+			"github",
+			"context",
+			"process",
+			`return (async () => { ${requestScript} })();`,
+		) as (github: typeof github, ctx: typeof context, proc: typeof processStub) => Promise<void>;
+
+		await executeRequestStep(github, context, processStub);
+
+		expect(fallbackRequests).toHaveLength(1);
+		expect(fallbackRequests[0]).toEqual({
+			owner: "Yeachan-Heo",
+			repo: "gajae-code",
+			pull_number: 6599,
+			reviewers: ["previous-reviewer"],
+		});
+	});
+
+	test("posts comment and fails if both rerequest and fallback fail", async () => {
+		const source = await parsedWorkflow(RE_REVIEW_WORKFLOW);
+		const jobs = documentRecord(source.jobs);
+		const steps = documentRecord(jobs["request-review-on-comment"]).steps as unknown[];
+		const requestStep = steps.map(documentRecord).find(step => step.id === "request-reviewers");
+		const requestScript = documentRecord(documentRecord(requestStep).with).script as string;
+
+		type RequestParams = {
+			owner: string;
+			repo: string;
+			pull_number: number;
+			reviewers: string[];
+			headers?: { "X-GitHub-Api-Version": string };
+		};
+		const comments: Array<{ owner: string; repo: string; issue_number: number; body: string }> = [];
+		const github = {
+			rest: {
+				pulls: {
+					get: async ({ pull_number }: { owner: string; repo: string; pull_number: number }) => ({ data: { number: pull_number } }),
+					requestReviewers: async (params: RequestParams) => {
+						const error = Object.assign(new Error("Cannot request reviewers"), { status: 422 });
+						throw error;
+					},
+				},
+				issues: {
+					createComment: async (params: { owner: string; repo: string; issue_number: number; body: string }) => {
+						comments.push(params);
+						return { status: 201 };
+					},
+				},
+			},
+			request: async (route: string, params: RequestParams) => {
+				if (route.includes("rerequest")) {
+					const error = Object.assign(new Error("Internal Server Error"), { status: 500 });
+					throw error;
+				}
+				return { status: 201 };
+			},
+		};
+		const context = { repo: { owner: "Yeachan-Heo", repo: "gajae-code" }, issue: { number: 6599 } };
+		const processStub = { env: { REVIEWERS_JSON: '["previous-reviewer"]' } };
+		const executeRequestStep = new Function(
+			"github",
+			"context",
+			"process",
+			`return (async () => { ${requestScript} })();`,
+		) as (github: typeof github, ctx: typeof context, proc: typeof processStub) => Promise<void>;
+
+		await expect(executeRequestStep(github, context, processStub)).rejects.toThrow();
+
+		expect(comments).toHaveLength(1);
+		expect(comments[0].body).toContain("Failed to re-request reviews");
 	});
 
 	test("detects if re-review.yml has workflow-level write permissions instead of job-level", async () => {
