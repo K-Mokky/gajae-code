@@ -4440,7 +4440,7 @@ export class AgentSession {
 	 * exposes an unowned history rewrite.
 	 */
 	#sessionTransitionKind: string | undefined;
-	// Detects transitions that begin and finish while an async preflight is staging.
+	// Detects transitions that commit while an async preflight is staging.
 	#sessionTransitionGeneration = 0;
 	#sessionTransitionCommitted = false;
 	#sessionTransitionCompletion: Promise<void> = Promise.resolve();
