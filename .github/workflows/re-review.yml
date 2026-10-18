@@ -203,51 +203,24 @@ jobs:
 
             const reviewers = JSON.parse(process.env.REVIEWERS_JSON);
 
-            // Try the dedicated rerequest endpoint first
-            let rerequestSucceeded = false;
+            // GitHub's dedicated re-request endpoint returned an empty HTTP 500 for every
+            // call on this repository, so use the standard
+            // review-request endpoint, which re-notifies reviewers who already reviewed.
             try {
-              await github.request(
-                'POST /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers/rerequest',
-                {
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  pull_number: pr.data.number,
-                  reviewers: reviewers,
-                  headers: { 'X-GitHub-Api-Version': '2026-03-10' },
-                },
-              );
-              rerequestSucceeded = true;
+              await github.rest.pulls.requestReviewers({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: pr.data.number,
+                reviewers,
+              });
             } catch (error) {
-              // Fallback to standard requestReviewers endpoint on 5xx or 404
-              if (error.status && (error.status >= 500 || error.status === 404)) {
-                console.log(`Rerequest endpoint failed with ${error.status}, falling back to standard requestReviewers endpoint`);
-                try {
-                  await github.rest.pulls.requestReviewers({
-                    owner: context.repo.owner,
-                    repo: context.repo.repo,
-                    pull_number: pr.data.number,
-                    reviewers: reviewers,
-                  });
-                  rerequestSucceeded = true;
-                } catch (fallbackError) {
-                  console.log(`Fallback requestReviewers endpoint also failed: ${fallbackError.message}`);
-                  // Post a comment to inform the user
-                  await github.rest.issues.createComment({
-                    owner: context.repo.owner,
-                    repo: context.repo.repo,
-                    issue_number: context.issue.number,
-                    body: 'Failed to re-request reviews: GitHub API returned an error. Please try again or manually request reviews.',
-                  });
-                  throw fallbackError;
-                }
-              } else {
-                // Re-throw if it's not a retryable error
-                throw error;
-              }
-            }
-
-            if (!rerequestSucceeded) {
-              throw new Error('Failed to request reviewers');
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: `Failed to re-request reviews from ${reviewers.join(', ')}: ${error.message}`,
+              });
+              throw error;
             }
 
       - name: React to comment on success
