@@ -92,9 +92,10 @@ describe("#697 auto-compaction respects the active custom provider", () => {
 		if (!currentModel) throw new Error("expected myproxy model to load");
 
 		// Only the custom provider has a usable credential — OpenAI must never be needed.
-		vi.spyOn(modelRegistry, "getApiKey").mockImplementation(async model =>
-			model.provider === "myproxy" ? "myproxy-secret" : undefined,
-		);
+		vi.spyOn(modelRegistry, "getApiKeyWithCredentialRowId").mockImplementation(async model => ({
+			apiKey: model.provider === "myproxy" ? "myproxy-secret" : undefined,
+			credentialRowId: undefined,
+		}));
 
 		const agent = new Agent({
 			initialState: { model: currentModel, systemPrompt: ["Test"], tools: [], messages: [] },
@@ -201,10 +202,10 @@ describe("#697 auto-compaction respects the active custom provider", () => {
 		const settings = Settings.isolated({ "compaction.keepRecentTokens": 1 });
 		settings.setModelRole("default", `${roleFallback.provider}/${roleFallback.id}`);
 
-		vi.spyOn(modelRegistry, "getApiKey").mockImplementation(async model => {
-			if (model.provider === "myproxy") return "myproxy-secret";
-			if (model.provider === "anthropic") return "anthropic-token";
-			return undefined;
+		vi.spyOn(modelRegistry, "getApiKeyWithCredentialRowId").mockImplementation(async model => {
+			if (model.provider === "myproxy") return { apiKey: "myproxy-secret", credentialRowId: undefined };
+			if (model.provider === "anthropic") return { apiKey: "anthropic-token", credentialRowId: undefined };
+			return { apiKey: undefined, credentialRowId: undefined };
 		});
 		vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([currentModel, roleFallback]);
 

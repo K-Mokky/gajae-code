@@ -49,6 +49,7 @@ function makeHarness(bridge: ClientBridge): Harness {
 				return undefined;
 			},
 			has: () => false,
+			getShellConfig: () => ({ shell: "bash", args: [], env: {} }),
 			getBashInterceptorRules: () => [],
 		},
 		getClientBridge: () => bridge,

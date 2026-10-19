@@ -139,9 +139,9 @@ describe("issue #986 compaction auth fallback", () => {
 			}
 			throw new Error(`Unexpected compaction model ${model.provider}/${model.id}`);
 		});
-		vi.spyOn(modelRegistry, "getApiKey").mockImplementation(async model => {
-			if (model.provider === currentModel.provider && model.id === currentModel.id) return "codex-token";
-			return undefined;
+		vi.spyOn(modelRegistry, "getApiKeyWithCredentialRowId").mockImplementation(async model => {
+			const configured = model.provider === currentModel.provider && model.id === currentModel.id;
+			return { apiKey: configured ? "codex-token" : undefined, credentialRowId: undefined };
 		});
 
 		const error = await session.compact().catch(err => err);
@@ -235,9 +235,9 @@ describe("issue #986 compaction auth fallback", () => {
 		vi.spyOn(compactionModule, "compact").mockRejectedValue(
 			new Error("Summarization failed: 503 auth_unavailable: no auth available"),
 		);
-		vi.spyOn(modelRegistry, "getApiKey").mockImplementation(async model => {
-			if (model.provider === currentModel.provider && model.id === currentModel.id) return "codex-token";
-			return undefined;
+		vi.spyOn(modelRegistry, "getApiKeyWithCredentialRowId").mockImplementation(async model => {
+			const configured = model.provider === currentModel.provider && model.id === currentModel.id;
+			return { apiKey: configured ? "codex-token" : undefined, credentialRowId: undefined };
 		});
 
 		await session.runIdleCompaction();

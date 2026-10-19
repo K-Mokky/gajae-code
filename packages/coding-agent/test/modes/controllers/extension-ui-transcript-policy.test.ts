@@ -69,6 +69,7 @@ function createFixture(initialSessionId = "session-a"): Fixture {
 			reload: vi.fn(async () => {
 				sessionId = nextSessionId;
 			}),
+			notifySessionIdentityChanged: vi.fn(async () => undefined),
 		},
 		sessionManager: {
 			getSessionId: () => sessionId,
