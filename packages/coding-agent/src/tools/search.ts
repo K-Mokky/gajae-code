@@ -24,7 +24,7 @@ import { createFileRecorder, formatResultPath } from "./file-recorder";
 import { formatGroupedFiles } from "./grouped-file-output";
 import { formatMatchLine } from "./match-line-format";
 import { formatFullOutputReference, type OutputMeta } from "./output-meta";
-import { resolveReadPath, resolveToolSearchScope, assertRealpathInsideActiveWorkspace } from "./path-utils";
+import { assertRealpathInsideActiveWorkspace, resolveReadPath, resolveToolSearchScope } from "./path-utils";
 import {
 	createCachedComponent,
 	formatCodeFrameLine,

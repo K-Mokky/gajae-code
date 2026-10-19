@@ -24,6 +24,7 @@ import type { ToolSession } from ".";
 import { applyListLimit } from "./list-limit";
 import { formatFullOutputReference, type OutputMeta } from "./output-meta";
 import {
+	assertRealpathInsideActiveWorkspace,
 	formatPathRelativeToCwd,
 	hasGlobPathChars,
 	normalizePathLikeInput,
@@ -31,7 +32,6 @@ import {
 	partitionExistingPaths,
 	resolveExplicitFindPatterns,
 	resolveToCwd,
-	assertRealpathInsideActiveWorkspace,
 } from "./path-utils";
 import {
 	createCachedComponent,

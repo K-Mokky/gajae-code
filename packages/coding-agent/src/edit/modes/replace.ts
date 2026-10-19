@@ -12,8 +12,8 @@ import type { ToolSession } from "../../tools";
 import { assertEditableFile, assertEditableFileContent } from "../../tools/auto-generated-guard";
 import { invalidateFsScanAfterWrite } from "../../tools/fs-cache-invalidation";
 import { outputMeta } from "../../tools/output-meta";
-import { enforcePlanModeWrite, resolvePlanPath } from "../../tools/plan-mode-guard";
 import { assertRealpathInsideActiveWorkspace } from "../../tools/path-utils";
+import { enforcePlanModeWrite, resolvePlanPath } from "../../tools/plan-mode-guard";
 import { ToolError } from "../../tools/tool-errors";
 import { generateDiffString, replaceText } from "../diff";
 import {
