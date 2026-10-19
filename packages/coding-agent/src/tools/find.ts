@@ -31,6 +31,7 @@ import {
 	partitionExistingPaths,
 	resolveExplicitFindPatterns,
 	resolveToCwd,
+	assertRealpathInsideActiveWorkspace,
 } from "./path-utils";
 import {
 	createCachedComponent,
@@ -217,6 +218,7 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 			const hasGlob = multiPattern ? true : (parsedPattern?.hasGlob ?? false);
 			const globPattern = multiPattern?.globPattern ?? parsedPattern?.globPattern ?? "**/*";
 			const searchPath = resolveToCwd(multiPattern?.basePath ?? parsedPattern?.basePath ?? ".", this.session.cwd);
+			await assertRealpathInsideActiveWorkspace(searchPath);
 			const scopePath = multiPattern?.scopePath ?? formatScopePath(searchPath);
 
 			if (searchPath === "/") {

@@ -13,7 +13,6 @@ const PROFILE_PATH = /^[A-Za-z0-9._/-]+$/;
  */
 export function confineSandboxProfile(root: string): string {
 	const confinedRoot = seatbeltPath(root);
-	const parent = seatbeltPath(path.dirname(confinedRoot));
 	return [
 		"(version 1)",
 		"(allow default)",

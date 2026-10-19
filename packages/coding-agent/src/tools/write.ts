@@ -27,7 +27,7 @@ import {
 } from "./conflict-detect";
 import { invalidateFsScanAfterWrite } from "./fs-cache-invalidation";
 import { type OutputMeta, outputMeta } from "./output-meta";
-import { formatPathRelativeToCwd } from "./path-utils";
+import { formatPathRelativeToCwd, assertRealpathInsideActiveWorkspace } from "./path-utils";
 import { enforcePlanModeWrite, resolvePlanPath } from "./plan-mode-guard";
 import {
 	formatDiagnostics,
@@ -772,6 +772,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 
 			enforcePlanModeWrite(this.session, path, { op: "create" });
 			const absolutePath = resolvePlanPath(this.session, path);
+			await assertRealpathInsideActiveWorkspace(absolutePath);
 			const batchRequest = getLspBatchRequest(context?.toolCall);
 
 			// Check if file exists and is auto-generated before overwriting

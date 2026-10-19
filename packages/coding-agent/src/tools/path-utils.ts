@@ -7,7 +7,7 @@ import { isEnoent } from "@gajae-code/utils/fs-error";
 import { InternalUrlRouter } from "../internal-urls";
 import type { MCPManager } from "../runtime-mcp/manager";
 import { ToolError } from "./tool-errors";
-import { pathEscapesWorkspace } from "./workspace-confine";
+import { pathEscapesWorkspace, realpathEscapesWorkspace } from "./workspace-confine";
 
 const workspaceConfineRoot = new AsyncLocalStorage<string>();
 
@@ -22,6 +22,17 @@ function assertInsideActiveWorkspace(resolved: string, original: string): void {
 	throw new ToolError(
 		`Path escapes the confined session root (${root}): ${original}. This session can only use its cwd and descendants.`,
 	);
+}
+
+/** Reject a lexically admitted path whose real target leaves the confined root. */
+export async function assertRealpathInsideActiveWorkspace(resolved: string): Promise<void> {
+	const root = workspaceConfineRoot.getStore();
+	if (!root) return;
+	if (await realpathEscapesWorkspace(root, resolved)) {
+		throw new ToolError(
+			`Path resolves outside the confined session root (${root}): ${resolved}. This session can only use its cwd and descendants.`,
+		);
+	}
 }
 
 const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;

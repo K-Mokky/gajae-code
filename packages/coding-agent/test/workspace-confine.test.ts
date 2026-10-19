@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { directoryEscapesWorkspace, pathEscapesWorkspace } from "../src/tools/workspace-confine";
+import { directoryEscapesWorkspace, pathEscapesWorkspace, realpathEscapesWorkspace } from "../src/tools/workspace-confine";
 import { confineSandboxProfile, sandboxedShellCommand } from "../src/tools/confine-sandbox";
 
 describe("--confine path boundary", () => {
@@ -25,6 +25,20 @@ describe("--confine path boundary", () => {
 		await expect(directoryEscapesWorkspace(root, root)).resolves.toBe(false);
 		await expect(directoryEscapesWorkspace(root, outside)).resolves.toBe(true);
 		await expect(directoryEscapesWorkspace(root, linked)).resolves.toBe(true);
+		await fs.rm(parent, { recursive: true, force: true });
+	});
+	it("rejects an in-root symlink and a new file below it when they resolve outside", async () => {
+		const parent = await fs.mkdtemp(path.join(os.tmpdir(), "confine-realpath-"));
+		const root = path.join(parent, "repo");
+		const outside = path.join(parent, "outside");
+		const linked = path.join(root, "link");
+		await fs.mkdir(root);
+		await fs.mkdir(outside);
+		await fs.writeFile(path.join(outside, "secret.txt"), "hidden");
+		await fs.symlink(outside, linked);
+		await expect(realpathEscapesWorkspace(root, path.join(linked, "secret.txt"))).resolves.toBe(true);
+		await expect(realpathEscapesWorkspace(root, path.join(linked, "new.txt"))).resolves.toBe(true);
+		await expect(realpathEscapesWorkspace(root, path.join(root, "visible.txt"))).resolves.toBe(false);
 		await fs.rm(parent, { recursive: true, force: true });
 	});
 	it("denies a parent path, a dotdot path, and a symlink from inside the sandboxed process", async () => {

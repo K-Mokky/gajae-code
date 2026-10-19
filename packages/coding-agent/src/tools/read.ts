@@ -72,6 +72,7 @@ import {
 	expandPath,
 	formatPathRelativeToCwd,
 	resolveReadPath,
+	assertRealpathInsideActiveWorkspace,
 	splitInternalUrlSel,
 	splitPathAndSel,
 } from "./path-utils";
@@ -2768,6 +2769,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		const parsed = parseSel(localTarget.sel);
 
 		let absolutePath = resolveReadPath(localReadPath, this.session.cwd);
+		await assertRealpathInsideActiveWorkspace(absolutePath);
 		let suffixResolution: { from: string; to: string } | undefined;
 
 		let isDirectory = false;
