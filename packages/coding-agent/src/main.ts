@@ -87,6 +87,7 @@ import type { AgentSession } from "./session/agent-session";
 import { ManagedAppendIdentityMismatchError } from "./session/internal/managed-session-storage";
 import { SessionMigrationBusyError } from "./session/internal/session-open-errors";
 import { setPrimaryControlSurface } from "./session/primary-control-surface";
+import { sessionMatchesConfinement } from "./session/session-confinement";
 import {
 	type ResumeSessionIdentity,
 	resolveResumableSession,
@@ -99,7 +100,6 @@ import {
 	SessionTranscriptOversizedError,
 	type StrictSessionOpenResult,
 } from "./session/session-manager";
-import { sessionMatchesConfinement } from "./session/session-confinement";
 import { resolveStartupAuthConfig } from "./session/startup-auth-config";
 import { runStartupCredentialAutoImportIfNeeded } from "./setup/credential-auto-import";
 import {
@@ -1317,7 +1317,9 @@ export async function createSessionManager(
 	}
 
 	if (parsed.noSession) {
-		return SessionManager.inMemory();
+		const ephemeral = SessionManager.inMemory();
+		if (parsed.confine) ephemeral.confineToCwd();
+		return ephemeral;
 	}
 	if (typeof parsed.resume === "string") {
 		const sessionArg = parsed.resume;
@@ -1325,7 +1327,13 @@ export async function createSessionManager(
 			const destination = parsed.sessionDir
 				? SessionManager.explicitDestination(parsed.sessionDir)
 				: SessionManager.explicitDestination(path.dirname(sessionArg));
-			const opened = await SessionManager.open(sessionArg, destination, undefined, migrationPolicy, sessionMemoryMode);
+			const opened = await SessionManager.open(
+				sessionArg,
+				destination,
+				undefined,
+				migrationPolicy,
+				sessionMemoryMode,
+			);
 			if (opened.isFilesystemConfined() !== (parsed.confine === true)) {
 				await opened.close();
 				throw new SessionNotFoundError(sessionArg);

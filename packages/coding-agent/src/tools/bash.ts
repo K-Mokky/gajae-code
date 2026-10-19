@@ -77,6 +77,7 @@ import { canUseInteractiveBashPty } from "./bash-pty-selection";
 import { expandInternalUrls, type InternalUrlExpansionOptions } from "./bash-skill-urls";
 import { longSleepAdvisory } from "./bash-sleep-advisory";
 import { checkComposerBashPolicy } from "./composer-bash-policy";
+import { sandboxedShellCommand } from "./confine-sandbox";
 import {
 	formatArtifactReference,
 	formatStyledTruncationWarning,
@@ -88,11 +89,11 @@ import {
 import { resolveToCwd } from "./path-utils";
 import { formatToolWorkingDirectory, replaceTabs } from "./render-utils";
 import { assertCwdInsideWorkspace } from "./restricted-cwd";
-import { directoryEscapesWorkspace } from "./workspace-confine";
 import { steerFoldReasonLine, watchSteerForFold } from "./steer-fold";
 import { checkTmuxSelfInjection } from "./tmux-self-injection-guard";
 import { ToolAbortError, ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
+import { directoryEscapesWorkspace } from "./workspace-confine";
 
 export { STEER_FOLD_GRACE_MS, steerFoldReasonLine } from "./steer-fold";
 
@@ -2750,7 +2751,9 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		let ptyOutcome: BashInteractiveResult | undefined;
 		const result: BashResult | BashInteractiveResult = interactiveUi
 			? await runInteractiveBashPty(interactiveUi, {
-					command,
+					command: this.session.filesystemRoot
+						? sandboxedShellCommand(command, this.session.filesystemRoot)
+						: command,
 					cwd: commandCwd,
 					settings: this.session.settings,
 					timeoutMs,

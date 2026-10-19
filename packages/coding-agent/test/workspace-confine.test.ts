@@ -2,8 +2,12 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { directoryEscapesWorkspace, pathEscapesWorkspace, realpathEscapesWorkspace } from "../src/tools/workspace-confine";
-import { confineSandboxProfile, sandboxedShellCommand } from "../src/tools/confine-sandbox";
+import { sandboxedShellCommand } from "../src/tools/confine-sandbox";
+import {
+	directoryEscapesWorkspace,
+	pathEscapesWorkspace,
+	realpathEscapesWorkspace,
+} from "../src/tools/workspace-confine";
 
 describe("--confine path boundary", () => {
 	it("accepts the root and a descendant, and rejects a parent", () => {
@@ -80,6 +84,31 @@ describe("--confine path boundary", () => {
 			expect(stderr).toContain("Operation not permitted");
 		} finally {
 			await fs.rm(outside, { force: true });
+			await fs.rm(parent, { recursive: true, force: true });
+		}
+	});
+	it("denies a sibling under the same temp prefix from inside the sandboxed process", async () => {
+		const parent = await fs.mkdtemp(path.join(os.tmpdir(), "confine-sibling-"));
+		const root = path.join(parent, "repo");
+		const sibling = path.join(parent, "secret.txt");
+		await fs.mkdir(root);
+		await fs.writeFile(sibling, "hidden");
+		await fs.writeFile(path.join(root, "visible.txt"), "visible");
+		try {
+			const command = sandboxedShellCommand(
+				`cat ${JSON.stringify(path.join(root, "visible.txt"))}; cat ${JSON.stringify(sibling)}`,
+				root,
+			);
+			const proc = Bun.spawn(["/bin/sh", "-c", command], { cwd: root, stdout: "pipe", stderr: "pipe" });
+			const [stdout, stderr] = await Promise.all([
+				new Response(proc.stdout).text(),
+				new Response(proc.stderr).text(),
+				proc.exited,
+			]);
+			expect(stdout).toContain("visible");
+			expect(stdout).not.toContain("hidden");
+			expect(stderr).toContain("Operation not permitted");
+		} finally {
 			await fs.rm(parent, { recursive: true, force: true });
 		}
 	});
