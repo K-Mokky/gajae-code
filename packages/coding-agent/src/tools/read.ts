@@ -1519,6 +1519,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					if (retryStat.isDirectory()) continue;
 
 					absolutePath = suffixMatch.absolutePath;
+					await assertRealpathInsideActiveWorkspace(absolutePath);
+					absolutePath = suffixMatch.absolutePath;
+					await assertRealpathInsideActiveWorkspace(absolutePath);
 					suffixResolution = { from: candidate.archivePath, to: suffixMatch.displayPath };
 					return {
 						absolutePath,
@@ -1566,6 +1569,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					if (!(await isSqliteFile(suffixMatch.absolutePath))) continue;
 
 					absolutePath = suffixMatch.absolutePath;
+					await assertRealpathInsideActiveWorkspace(absolutePath);
 					suffixResolution = { from: candidate.sqlitePath, to: suffixMatch.displayPath };
 					return {
 						absolutePath,
@@ -2797,6 +2801,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						try {
 							const retryStat = await Bun.file(suffixMatch.absolutePath).stat();
 							absolutePath = suffixMatch.absolutePath;
+							await assertRealpathInsideActiveWorkspace(absolutePath);
 							fileSize = retryStat.size;
 							isDirectory = retryStat.isDirectory();
 							suffixResolution = { from: localReadPath, to: suffixMatch.displayPath };
