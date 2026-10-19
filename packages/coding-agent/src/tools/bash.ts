@@ -88,6 +88,7 @@ import {
 import { resolveToCwd } from "./path-utils";
 import { formatToolWorkingDirectory, replaceTabs } from "./render-utils";
 import { assertCwdInsideWorkspace } from "./restricted-cwd";
+import { directoryEscapesWorkspace } from "./workspace-confine";
 import { steerFoldReasonLine, watchSteerForFold } from "./steer-fold";
 import { checkTmuxSelfInjection } from "./tmux-self-injection-guard";
 import { ToolAbortError, ToolError } from "./tool-errors";
@@ -1159,6 +1160,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 								options.resolvedEnv,
 							)
 						: await executeBash(options.command, {
+								sandboxRoot: this.session.filesystemRoot,
 								cwd: options.commandCwd,
 								settings: this.session.settings,
 								sessionKey: `${this.session.getSessionId?.() ?? ""}:async:${jobId}`,
@@ -1601,6 +1603,13 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			}
 			command = normalizedWorkflowCommand;
 		}
+		if (this.session.filesystemRoot) {
+			if (await directoryEscapesWorkspace(this.session.filesystemRoot, commandCwd)) {
+				throw new ToolError(
+					`Working directory escapes the confined session root (${this.session.filesystemRoot}): ${commandCwd}. This session can only use its cwd and descendants. Shell command text itself is not jailed.`,
+				);
+			}
+		}
 
 		const requestedTimeoutSec = input.timeout ?? 300;
 		const timeoutSec = clampTimeout("bash", requestedTimeoutSec);
@@ -1773,6 +1782,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 
 				try {
 					const result = await executeBash(prepared.command, {
+						sandboxRoot: this.session.filesystemRoot,
 						cwd: prepared.commandCwd,
 						settings: this.session.settings,
 						sessionKey: `${this.session.getSessionId?.() ?? ""}:monitor:${id}`,
@@ -2910,6 +2920,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					// Completion, error, and a fold all settle this foreground wait.
 					.finally(() => awaitingInput.dispose())
 			: await executeBash(command, {
+					sandboxRoot: this.session.filesystemRoot,
 					cwd: commandCwd,
 					settings: this.session.settings,
 					sessionKey: this.session.getSessionId?.() ?? undefined,

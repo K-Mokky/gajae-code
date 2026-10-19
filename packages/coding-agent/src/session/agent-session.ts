@@ -475,7 +475,7 @@ import { releaseTabsForOwner } from "../tools/browser/tab-supervisor";
 import type { CheckpointState } from "../tools/checkpoint";
 import { githubPermissionIntent } from "../tools/github-side-effect";
 import { outputMeta, wrapToolWithMetaNotice } from "../tools/output-meta";
-import { normalizeLocalScheme, resolveReadPath, resolveToCwd } from "../tools/path-utils";
+import { normalizeLocalScheme, resolveReadPath, resolveToCwd, runWithWorkspaceConfine } from "../tools/path-utils";
 import { registerResourceGcSession } from "../tools/resource-gc";
 import { getLatestTodoPhasesFromEntries, type TodoItem, type TodoPhase } from "../tools/todo-write";
 import { ToolAbortError, ToolError } from "../tools/tool-errors";
@@ -12555,6 +12555,25 @@ export class AgentSession {
 			},
 		}) as T;
 	}
+	#wrapToolForWorkspaceConfine<T extends AgentTool>(tool: T): T {
+		if (!this.sessionManager.isFilesystemConfined()) return tool;
+		return new Proxy(tool, {
+			get: (target, prop) => {
+				if (prop !== "execute") return Reflect.get(target, prop, target);
+				return (
+					toolCallId: string,
+					args: unknown,
+					signal: AbortSignal | undefined,
+					onUpdate: never,
+					ctx: never,
+				) =>
+					runWithWorkspaceConfine(this.sessionManager.getCwd(), () =>
+						target.execute(toolCallId, args as never, signal, onUpdate, ctx),
+					);
+			},
+		}) as T;
+	}
+
 
 	/**
 	/** Wrap a tool with the workflow mutation guard before permissions or execution. */
@@ -12612,14 +12631,16 @@ export class AgentSession {
 		if (cached) return cached as T;
 		wrappersByVersion?.clear();
 		const innerTool = tool instanceof ExtensionToolWrapper ? tool.getInnerTool() : tool;
-		const guarded = this.#wrapToolForCwdTransitionFence(
-			this.#wrapToolForWorkflowMutationGuard(
-				this.#wrapToolForAcpPermission(
-					guardToolForUltragoalAsk(
-						innerTool,
-						() => this.sessionManager.getCwd(),
-						() => ({ sessionId: this.sessionManager.getSessionId() }),
-						() => this.getSessionAgentDir(),
+		const guarded = this.#wrapToolForWorkspaceConfine(
+			this.#wrapToolForCwdTransitionFence(
+				this.#wrapToolForWorkflowMutationGuard(
+					this.#wrapToolForAcpPermission(
+						guardToolForUltragoalAsk(
+							innerTool,
+							() => this.sessionManager.getCwd(),
+							() => ({ sessionId: this.sessionManager.getSessionId() }),
+							() => this.getSessionAgentDir(),
+						),
 					),
 				),
 			),

@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -6,6 +7,22 @@ import { isEnoent } from "@gajae-code/utils/fs-error";
 import { InternalUrlRouter } from "../internal-urls";
 import type { MCPManager } from "../runtime-mcp/manager";
 import { ToolError } from "./tool-errors";
+import { pathEscapesWorkspace } from "./workspace-confine";
+
+const workspaceConfineRoot = new AsyncLocalStorage<string>();
+
+/** Run tool path resolution confined to `root` for this execution. */
+export function runWithWorkspaceConfine<T>(root: string, fn: () => T): T {
+	return workspaceConfineRoot.run(root, fn);
+}
+
+function assertInsideActiveWorkspace(resolved: string, original: string): void {
+	const root = workspaceConfineRoot.getStore();
+	if (!root || !pathEscapesWorkspace(root, resolved)) return;
+	throw new ToolError(
+		`Path escapes the confined session root (${root}): ${original}. This session can only use its cwd and descendants.`,
+	);
+}
 
 const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
 const FILE_LINE_RANGE_RE = /^(?:L?\d+(?:[-+]L?\d+|-)?(?:,L?\d+(?:[-+]L?\d+|-)?)*|raw|conflicts)$/i;
@@ -308,10 +325,9 @@ export function resolveToCwd(filePath: string, cwd: string): string {
 	if (/^\/+$/.test(expanded)) {
 		return cwd;
 	}
-	if (path.isAbsolute(expanded)) {
-		return expanded;
-	}
-	return path.resolve(cwd, expanded);
+	const resolved = path.isAbsolute(expanded) ? expanded : path.resolve(cwd, expanded);
+	if (!isInternalUrlPath(filePath)) assertInsideActiveWorkspace(resolved, filePath);
+	return resolved;
 }
 
 export function formatPathRelativeToCwd(
