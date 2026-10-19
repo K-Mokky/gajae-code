@@ -1520,8 +1520,6 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 
 					absolutePath = suffixMatch.absolutePath;
 					await assertRealpathInsideActiveWorkspace(absolutePath);
-					absolutePath = suffixMatch.absolutePath;
-					await assertRealpathInsideActiveWorkspace(absolutePath);
 					suffixResolution = { from: candidate.archivePath, to: suffixMatch.displayPath };
 					return {
 						absolutePath,
