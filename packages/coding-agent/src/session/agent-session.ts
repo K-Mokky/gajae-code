@@ -18822,6 +18822,7 @@ export class AgentSession {
 					undefined,
 					"copy-retain",
 					this.settings.get("sessionMemory.mode"),
+					previousManager.isFilesystemConfined(),
 				);
 				let exactRetirement: PreparedExactMcpRetirement | undefined;
 				let adopted = false;
