@@ -1,3 +1,4 @@
+import * as fs from "node:fs";
 import * as path from "node:path";
 
 const UNSAFE_PROFILE_PATH = /[\u0000-\u001f"()#]/;
@@ -54,7 +55,12 @@ export function sandboxedShellCommand(command: string, root: string): string {
 }
 
 function seatbeltPath(value: string): string {
-	const resolved = path.resolve(value);
+	let resolved = path.resolve(value);
+	try {
+		resolved = fs.realpathSync(value);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+	}
 	if (UNSAFE_PROFILE_PATH.test(resolved)) {
 		throw new Error(`Confined session root cannot be expressed in a sandbox profile: ${resolved}`);
 	}
