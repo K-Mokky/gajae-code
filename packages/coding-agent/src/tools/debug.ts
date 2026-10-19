@@ -38,7 +38,7 @@ import { renderStatusLine } from "../tui";
 import { CachedOutputBlock } from "../tui/output-block";
 import type { ToolSession } from ".";
 import type { OutputMeta } from "./output-meta";
-import { formatPathRelativeToCwd, resolveToCwd } from "./path-utils";
+import { assertRealpathInsideActiveWorkspace, formatPathRelativeToCwd, resolveToCwd } from "./path-utils";
 import {
 	formatExpandHint,
 	formatStatusIcon,
@@ -644,7 +644,9 @@ export class DebugTool implements AgentTool<typeof debugSchema, DebugToolDetails
 					throw new ToolError("program is required for launch");
 				}
 				const commandCwd = params.cwd ? resolveToCwd(params.cwd, this.session.cwd) : this.session.cwd;
+				await assertRealpathInsideActiveWorkspace(commandCwd);
 				const program = resolveToCwd(params.program, commandCwd);
+				await assertRealpathInsideActiveWorkspace(program);
 				await validateLaunchProgram(program, commandCwd);
 				const adapter = selectLaunchAdapter(program, commandCwd, params.adapter, trustCwds);
 				if (!adapter) {
@@ -666,6 +668,7 @@ export class DebugTool implements AgentTool<typeof debugSchema, DebugToolDetails
 					throw new ToolError("attach requires pid or port");
 				}
 				const commandCwd = params.cwd ? resolveToCwd(params.cwd, this.session.cwd) : this.session.cwd;
+				await assertRealpathInsideActiveWorkspace(commandCwd);
 				const adapter = selectAttachAdapter(commandCwd, params.adapter, params.port, trustCwds);
 				if (!adapter) {
 					throw new ToolError(
@@ -704,6 +707,7 @@ export class DebugTool implements AgentTool<typeof debugSchema, DebugToolDetails
 					throw new ToolError("set_breakpoint requires file+line or function");
 				}
 				const file = resolveToCwd(params.file, this.session.cwd);
+				await assertRealpathInsideActiveWorkspace(file);
 				const response = await dapSessionManager.setBreakpoint(
 					file,
 					params.line,
@@ -730,6 +734,7 @@ export class DebugTool implements AgentTool<typeof debugSchema, DebugToolDetails
 					throw new ToolError("remove_breakpoint requires file+line or function");
 				}
 				const file = resolveToCwd(params.file, this.session.cwd);
+				await assertRealpathInsideActiveWorkspace(file);
 				const response = await dapSessionManager.removeBreakpoint(
 					file,
 					params.line,

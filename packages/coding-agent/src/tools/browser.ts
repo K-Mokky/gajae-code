@@ -14,7 +14,7 @@ import type { Observation, RunResultOk, ScreenshotResult } from "./browser/tab-p
 import { acquireTab, dropHeadlessTabs, getTab, releaseAllTabs, releaseTab, runInTab } from "./browser/tab-supervisor";
 import { wrapUntrustedContent } from "./fetch";
 import type { OutputMeta } from "./output-meta";
-import { resolveToCwd } from "./path-utils";
+import { assertRealpathInsideActiveWorkspace, resolveToCwd } from "./path-utils";
 import { ToolAbortError, ToolError, throwIfAborted } from "./tool-errors";
 import { toolResult } from "./tool-result";
 import { clampTimeout } from "./tool-timeouts";
@@ -151,6 +151,7 @@ async function resolveChromeProfileKind(
 ): Promise<BrowserKind> {
 	const profileDirectory = app.profile_directory ?? "Default";
 	const exe = app.path ? resolveToCwd(app.path, session.cwd) : resolveSystemChromeForProfile();
+	if (app.path && exe) await assertRealpathInsideActiveWorkspace(exe);
 	if (!exe) {
 		throw new ToolError(
 			'No Chrome/Chromium executable found for app.browser "chrome". Install Chrome, or pass app.path with the binary path.',
@@ -260,6 +261,7 @@ async function resolveBrowserKind(
 	}
 	if (app?.path) {
 		const exe = resolveToCwd(app.path, session.cwd);
+		await assertRealpathInsideActiveWorkspace(exe);
 		return { kind: "spawned", path: exe };
 	}
 	const headless = session.settings.get("browser.headless") as boolean;
