@@ -162,7 +162,7 @@ import {
 	resolveMCPToolCache,
 } from "../runtime-mcp";
 import { createMCPFormInputHandler } from "../runtime-mcp/elicitation";
-import type { MCPLoadResult } from "../runtime-mcp/manager";
+import { type MCPLoadResult, omitUnapprovedProjectStdio } from "../runtime-mcp/manager";
 import { omitPluginMcpNameShadows, retainPluginMcpMandatoryNames } from "../runtime-mcp/plugin-mcp-name-filter";
 import { MCP_STARTUP_WAIT_GRACE_MS } from "../runtime-mcp/startup-policy";
 import type { MCPServerConfig } from "../runtime-mcp/types";
@@ -189,6 +189,7 @@ import {
 	parsePersistedCredentialSelector,
 	resolveStartupAuthConfig,
 	type StartupAuthConfigSnapshot,
+	startupAuthConfigError,
 } from "../session/startup-auth-config";
 import {
 	isOwnedCompletionEnvelopeAllowed,
@@ -797,7 +798,7 @@ export async function discoverAuthStorage(
 			credentialRankingMode,
 			credentialPreferences,
 		});
-		return await reloadDiscoveredAuthStorage(storage);
+		return rejectDuplicateCredentialPreferences(await reloadDiscoveredAuthStorage(storage), agentDir);
 	}
 	const dbPath = getAgentDbPath(agentDir);
 	const storage = await AuthStorage.create(dbPath, {
@@ -806,7 +807,7 @@ export async function discoverAuthStorage(
 		credentialRankingMode,
 		credentialPreferences,
 	});
-	return await reloadDiscoveredAuthStorage(storage);
+	return rejectDuplicateCredentialPreferences(await reloadDiscoveredAuthStorage(storage), agentDir);
 }
 
 async function reloadDiscoveredAuthStorage(storage: AuthStorage): Promise<AuthStorage> {
@@ -821,6 +822,26 @@ async function reloadDiscoveredAuthStorage(storage: AuthStorage): Promise<AuthSt
 		throw error;
 	}
 	return storage;
+}
+
+/**
+ * Two preference entries can name one stored account through different selectors (`email:` and `account:` for the
+ * same login). Only the loaded rows reveal that, so the startup-config check finishes here and fails closed like any
+ * other invalid preference list.
+ */
+function rejectDuplicateCredentialPreferences(storage: AuthStorage, agentDir: string): AuthStorage {
+	const duplicates = storage.findDuplicateCredentialPreferences();
+	if (duplicates.length === 0) return storage;
+	logger.warn("Configured credential preferences name one account twice", {
+		providers: duplicates.map(({ provider }) => sanitizeProviderForLog(provider)),
+	});
+	const error = startupAuthConfigError(agentDir, "invalid-credential-preferences");
+	try {
+		storage.close();
+	} catch (cleanupError) {
+		throw attachStartupCleanupDiagnostic(error, cleanupError);
+	}
+	throw error;
 }
 
 /** Ranking is resolved as part of the typed startup-auth snapshot. */
@@ -1558,6 +1579,19 @@ function validateAutomationTools(options: CreateAgentSessionOptions): Automation
 		throw new Error(`SDK automation tools cannot collide with custom tools: ${collisions.join(", ")}`);
 	}
 	return automationTools;
+}
+
+/** User/global `mcp.enableProjectConfig` only. A project file cannot set it.
+ *  Unset keeps non-stdio project MCP and does not approve a project stdio spawn.
+ */
+function nativeProjectMcpAutoload(settings: Settings): {
+	enableProjectConfig: boolean;
+	allowProjectStdio: boolean;
+} {
+	const configured = settings.getGlobal("mcp.enableProjectConfig");
+	if (configured === true) return { enableProjectConfig: true, allowProjectStdio: true };
+	if (configured === false) return { enableProjectConfig: false, allowProjectStdio: false };
+	return { enableProjectConfig: true, allowProjectStdio: false };
 }
 
 export async function createAgentSession(options: CreateAgentSessionOptions = {}): Promise<CreateAgentSessionResult> {
@@ -2466,7 +2500,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			const rulebookRules: Rule[] = [];
 			const alwaysApplyRules: Rule[] = [];
 			for (const rule of rulesResult.items) {
-				const isTtsrRule = rule.condition && rule.condition.length > 0 ? ttsrManager.addRule(rule) : false;
+				const hasTtsrCondition = (rule.condition?.length ?? 0) > 0 || (rule.astCondition?.length ?? 0) > 0;
+				const isTtsrRule = hasTtsrCondition ? ttsrManager.addRule(rule) : false;
 				if (isTtsrRule) {
 					continue;
 				}
@@ -2730,16 +2765,16 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				ownedMcpManagerTools = [];
 				publishOwnedMcpTools = false;
 				let nextManager: MCPManager | undefined;
+				const projectMcp = nativeProjectMcpAutoload(settings);
 				try {
 					const loaded = await loadAllMCPConfigs(to, {
 						agentDir,
-						enableProjectConfig: settings.has("mcp.enableProjectConfig")
-							? settings.get("mcp.enableProjectConfig")
-							: true,
+						enableProjectConfig: projectMcp.enableProjectConfig,
 						autoloadOnly: true,
 						nativeOnly: true,
 						settings,
 					});
+					omitUnapprovedProjectStdio(loaded.configs, loaded.sources, projectMcp.allowProjectStdio);
 					const { configs: pluginConfigs } = await buildPluginMcpConfigs({ cwd: to });
 					const pluginNames = new Set(Object.keys(pluginConfigs));
 					const mergedConfigs = { ...loaded.configs, ...pluginConfigs };
@@ -2764,6 +2799,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 							{
 								sharedPoolIdleMs: settings.get("mcp.sharedPoolIdleMs"),
 								toolCacheServerNames: conventionalCacheServerNames,
+								allowUntrustedProjectStdio: projectMcp.allowProjectStdio,
 							},
 						);
 						nextManager.setAuthStorage(authStorage);
@@ -3277,6 +3313,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			getWorkflowGateEmitter: () => session?.getWorkflowGateEmitter(),
 			getAskAnswerSource: () => session?.getAskAnswerSource(),
 			getGoalRuntime: () => session?.goalRuntime,
+			getSdkPermissionMode: () => session?.sdkPermissionMode ?? "allow",
 			getClientBridge: () => session?.clientBridge,
 			getCompactContext: () => session.formatCompactContext(),
 			getTodoPhases: () => session.getTodoPhases(),
@@ -3751,6 +3788,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			// `--mcp-config` exact-file sessions never reach here. The owned manager's
 			// tools are surfaced as always-on custom tools (like plugin MCPs), so an
 			// ordinary session exposes them without needing MCP discovery mode.
+			const projectMcp = nativeProjectMcpAutoload(settings);
 			let conventionalConfigs: Record<string, MCPServerConfig> = {};
 			let conventionalSources: Record<string, SourceMeta> = {};
 			if (options.enableMcpAutoload !== false) {
@@ -3760,13 +3798,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 						// `gjc mcp add` (user scope) writes; an SDK embedder that runs on
 						// its own agent directory autoloads its own registrations.
 						agentDir,
-						// Project-scope native config loads by default; only an
-						// explicitly configured `mcp.enableProjectConfig: false`
-						// disables it (the legacy schema default stays false for
-						// foreign-format discovery consumers of the capability system).
-						enableProjectConfig: settings.has("mcp.enableProjectConfig")
-							? settings.get("mcp.enableProjectConfig")
-							: true,
+						// Non-stdio project MCP stays on unless the user/global layer
+						// sets `mcp.enableProjectConfig` to false. Project files cannot
+						// set that flag. Project stdio also needs it explicitly true.
+						enableProjectConfig: projectMcp.enableProjectConfig,
 						autoloadOnly: true,
 						// Runtime authority is GJC's native `.gjc` config in both scopes;
 						// Claude Code/Codex MCP files are explicit import sources into
@@ -3774,6 +3809,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 						nativeOnly: true,
 						settings,
 					});
+					omitUnapprovedProjectStdio(loaded.configs, loaded.sources, projectMcp.allowProjectStdio);
 					conventionalConfigs = loaded.configs;
 					conventionalSources = loaded.sources;
 					for (const warning of loaded.warnings) {
@@ -3838,6 +3874,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 						{
 							sharedPoolIdleMs: settings.get("mcp.sharedPoolIdleMs"),
 							toolCacheServerNames: conventionalCacheServerNames,
+							allowUntrustedProjectStdio: projectMcp.allowProjectStdio,
 							...(maxPluginMcpStartupWaitMs === undefined
 								? {}
 								: { maxStartupTimeoutMs: maxPluginMcpStartupWaitMs }),
@@ -4195,18 +4232,19 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			});
 		}
 
-		// Extension modules are discovered at session startup from the canonical
-		// native locations (`<agentDir>/extensions`, `<cwd>/.gjc/extensions`),
-		// installed plugin bundles, the `extensions` setting, and explicitly
-		// supplied `additionalExtensionPaths`. `disableExtensionDiscovery` keeps its
-		// documented opt-out semantics: explicit paths still load, matching
+		// Extension modules are discovered at session startup from the user agent
+		// directory, installed plugin bundles, the user/global `extensions` setting,
+		// and explicitly supplied `additionalExtensionPaths`. A repository
+		// `.gjc/extensions` tree is not imported. `disableExtensionDiscovery` keeps
+		// its documented opt-out semantics: explicit paths still load, matching
 		// `cli/list-models.ts`. A caller-supplied `preloadedExtensions` result
 		// suppresses discovery entirely.
 		const explicitExtensionPaths = options.additionalExtensionPaths ?? [];
-		// The `extensions` setting is schema-typed as an array of paths, but a
-		// hand-edited config can hold an invalid shape; discovery must degrade to
-		// no extra paths instead of aborting startup for every session.
-		const extensionsSettingPaths = Array.isArray(settings.get("extensions")) ? settings.get("extensions") : [];
+		// The merged `extensions` value includes the project layer, which can name
+		// any module. Only the user/global list is imported. A hand-edited value
+		// with an invalid shape contributes no extra paths.
+		const globalExtensionPaths = settings.getGlobal("extensions");
+		const extensionsSettingPaths = Array.isArray(globalExtensionPaths) ? globalExtensionPaths : [];
 		// Discovery must never block session creation: a filesystem or plugin-registry
 		// failure degrades to the explicit paths and then to no extensions at all, and
 		// the failure stays observable in `extensionsResult.errors`.
@@ -4765,7 +4803,6 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			// epoch additionally fences overlapping rebuilds, so a slower earlier
 			// pass cannot publish over a newer one.
 			const gjcPassEpoch = gjcRuntimeStore.beginPass();
-			toolContextStore.setToolNames(toolNames);
 			const promptTools = (() => {
 				const previousPromptMetadataModel = promptMetadataModel;
 				promptMetadataModel = candidateModel;
@@ -5433,6 +5470,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			taskDepth,
 			workflowGatePublication: isCanonicalSubSession ? "local" : "endpoint",
 			toolRegistry,
+			onToolNamesChanged: toolNames => toolContextStore.setToolNames(toolNames),
 			builtinToolIdentities,
 			workflowGateToolSession: toolSession,
 			transformContext,

@@ -24,7 +24,7 @@ A server is loaded at startup when all of the following hold:
 - the server is not marked `enabled: false`;
 - the server name is not in the `disabledServers` list of either native config scope (`<agent dir>/mcp.json` or `./.gjc/mcp.json`);
 - the server is not marked `autoload: false` (autoload defaults to true; `autoload: false` keeps a server stored but unloaded at startup — flip the flag and start a new session to load it);
-- project-scope servers load by default; setting `mcp.enableProjectConfig` explicitly to `false` in settings disables every project-scope source for that environment.
+- project-scope HTTP and SSE servers load by default. A project stdio server is spawned only when the user config sets `mcp.enableProjectConfig` to true. A project settings file cannot set that flag. Setting it to false in the user config disables every project-scope source.
 
 Conventional discovery logs a structured `Skipping MCP autoload registration`
 diagnostic with the server name and reason when an eligible-looking entry is
@@ -56,15 +56,16 @@ Pass `--no-mcp` to skip conventional autoload for one session (plugin-bundle MCP
 
 ## Public slash-command boundary
 
-The ordinary interactive TUI and ACP slash-command surfaces intentionally do not
-register a top-level `/mcp` command. `/mcp test`, `/mcp reauth`, `/mcp
-reconnect`, and `/mcp reload` are not supported user-input entry points. Use
-`gjc mcp add`, `gjc mcp list`, or `gjc mcp remove` to manage stored registrations
-and start a new session. `--mcp-config` and the SDK's `mcpConfigPath` are
-explicit connection-consumer entry points for a trusted config; they do not
-initiate MCP OAuth authorization. Existing credentials bound through `auth` may
-be refreshed by the runtime, but there is no public MCP OAuth authorization or
-reauthorization entry path, nor a public `/mcp` reconnection or reload contract.
+Only an interactive session using exact-file `--mcp-config` exposes the
+session-scoped `/mcp` status and control command. Ordinary TUI sessions and ACP
+do not advertise a top-level `/mcp`; `/mcp test`, `/mcp reauth`, and `/mcp reload`
+are not supported user-input entry points. Use `gjc mcp add`, `gjc mcp list`, or
+`gjc mcp remove` to manage stored registrations and start a new session.
+`--mcp-config` and the SDK's `mcpConfigPath` are explicit connection-consumer
+entry points for a trusted config; they do not initiate MCP OAuth authorization.
+Existing credentials bound through `auth` may be refreshed by the runtime, but
+there is no public MCP OAuth authorization or reauthorization entry path, nor a
+public config reload contract.
 
 ## Subagents and lifecycle
 
