@@ -1293,6 +1293,7 @@ export async function createSessionManager(
 				undefined,
 				migrationPolicy,
 				sessionMemoryMode,
+				parsed.confine === true,
 			);
 		}
 		const match = await resolveResumableSession(
@@ -1313,6 +1314,7 @@ export async function createSessionManager(
 			undefined,
 			migrationPolicy,
 			sessionMemoryMode,
+			parsed.confine === true,
 		);
 	}
 
@@ -1366,6 +1368,7 @@ export async function createSessionManager(
 					undefined,
 					migrationPolicy,
 					sessionMemoryMode,
+					parsed.confine === true,
 				);
 			}
 		}
@@ -1390,9 +1393,12 @@ export async function createSessionManager(
 	// --resume without value is handled separately (needs picker UI)
 	// If --session-dir provided without --continue/--resume, create new session there
 	if (parsed.sessionDir) {
-		const created = SessionManager.create(cwd, SessionManager.explicitDestination(parsed.sessionDir));
-		if (parsed.confine) created.confineToCwd();
-		return created;
+		return SessionManager.create(
+			cwd,
+			SessionManager.explicitDestination(parsed.sessionDir),
+			undefined,
+			parsed.confine === true,
+		);
 	}
 	// A lifecycle `/session_create` child must start a FRESH session that adopts
 	// the pre-allocated id (GJC_SESSION_ID), never auto-resume existing history in
@@ -1423,11 +1429,19 @@ export async function createSessionManager(
 		}
 		return manager;
 	}
-	const created = parsed.sessionDir
-		? SessionManager.create(cwd, SessionManager.explicitDestination(parsed.sessionDir))
-		: SessionManager.create(cwd, SessionManager.managedDestination(cwd, activeSettings.getAgentDir()));
-	if (parsed.confine) created.confineToCwd();
-	return created;
+	return parsed.sessionDir
+		? SessionManager.create(
+				cwd,
+				SessionManager.explicitDestination(parsed.sessionDir),
+				undefined,
+				parsed.confine === true,
+			)
+		: SessionManager.create(
+				cwd,
+				SessionManager.managedDestination(cwd, activeSettings.getAgentDir()),
+				undefined,
+				parsed.confine === true,
+			);
 }
 
 async function maybeAutoChdir(parsed: Args): Promise<void> {

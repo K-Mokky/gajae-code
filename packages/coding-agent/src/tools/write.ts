@@ -27,7 +27,7 @@ import {
 } from "./conflict-detect";
 import { invalidateFsScanAfterWrite } from "./fs-cache-invalidation";
 import { type OutputMeta, outputMeta } from "./output-meta";
-import { formatPathRelativeToCwd, assertRealpathInsideActiveWorkspace } from "./path-utils";
+import { assertRealpathInsideActiveWorkspace, formatPathRelativeToCwd } from "./path-utils";
 import { enforcePlanModeWrite, resolvePlanPath } from "./plan-mode-guard";
 import {
 	formatDiagnostics,
@@ -250,9 +250,11 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			archiveSubPath: normalizeArchiveWriteSubPath(fallbackCandidate.subPath),
 			exists: false,
 		};
+		await assertRealpathInsideActiveWorkspace(fallback.absolutePath);
 
 		for (const candidate of candidates) {
 			const absolutePath = resolvePlanPath(this.session, candidate.archivePath);
+			await assertRealpathInsideActiveWorkspace(absolutePath);
 			try {
 				const stat = await Bun.file(absolutePath).stat();
 				if (stat.isDirectory()) {
@@ -364,11 +366,13 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			key: fallbackTarget.key,
 			exists: false,
 		};
+		await assertRealpathInsideActiveWorkspace(fallback.absolutePath);
 
 		let sawExistingNonSqlite = false;
 		for (const candidate of candidates) {
 			const target = parseSqliteWriteTarget(candidate.subPath, candidate.queryString);
 			const absolutePath = resolvePlanPath(this.session, candidate.sqlitePath);
+			await assertRealpathInsideActiveWorkspace(absolutePath);
 			try {
 				const stat = await Bun.file(absolutePath).stat();
 				if (stat.isDirectory()) {

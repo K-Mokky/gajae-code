@@ -75,7 +75,6 @@ import type { ManagedLegacyLocalMigrationSource } from "../internal-urls/local-p
 import * as git from "../utils/git";
 import { invalidateSessionTitleGeneration } from "../utils/session-title-generation";
 import { ArtifactManager } from "./artifacts";
-import { sessionMatchesConfinement } from "./session-confinement";
 import {
 	type BlobPutResult,
 	BlobStore,
@@ -224,6 +223,7 @@ import {
 	sanitizeRehydratedOpenAIResponsesAssistantMessage,
 	stripInternalDetailsFields,
 } from "./messages";
+import { sessionMatchesConfinement } from "./session-confinement";
 import { type SessionManagerReadAccess, sessionManagerReadCapability } from "./session-manager-internal";
 import { isStagedSessionPath, SESSION_STAGING_DIRNAME } from "./session-staging-paths";
 import type {
@@ -10543,6 +10543,7 @@ export class SessionManager {
 				this.#sessionId = sessionId;
 				this.#sessionName = header?.title;
 				this.#titleSource = header?.titleSource;
+				this.filesystemScope = header?.filesystemScope === "cwd" ? "cwd" : undefined;
 				this.#needsFullRewriteOnNextPersist = migrationApplied;
 				this.#managedPersistExpectedIdentity = expectedIdentity;
 				this.#artifactManager = null;
@@ -21013,9 +21014,18 @@ export class SessionManager {
 		cwd: string,
 		destinationInput?: SessionDestinationInput,
 		storage: SessionStorage = new FileSessionStorage(),
+		confined = false,
 	): SessionManager {
 		const destination = destinationFor(cwd, destinationInput, storage);
-		const manager = new SessionManager(cwd, destination.directory, true, storage, destination);
+		const manager = new SessionManager(
+			cwd,
+			destination.directory,
+			true,
+			storage,
+			destination,
+			false,
+			confined ? "cwd" : undefined,
+		);
 		manager.#initNewSession();
 		return manager;
 	}
@@ -21550,10 +21560,11 @@ export class SessionManager {
 		storage: SessionStorage = new FileSessionStorage(),
 		migrationPolicy: SessionDirectoryMigrationPolicy = "copy-retain",
 		sessionMemoryMode: SessionMemoryMode = "shadow",
+		confined = false,
 	): Promise<SessionManager> {
 		const destination = destinationFor(cwd, destinationInput, storage);
 		const dir = destination.directory;
-		const manager = new SessionManager(cwd, dir, true, storage, destination);
+		const manager = new SessionManager(cwd, dir, true, storage, destination, false, confined ? "cwd" : undefined);
 		manager.#sessionMemoryMode = sessionMemoryMode;
 		let managedSourcePath = sourcePath;
 		if (destination.kind === "managed" && storage instanceof FileSessionStorage) {

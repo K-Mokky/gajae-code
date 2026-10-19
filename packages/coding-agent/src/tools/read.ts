@@ -69,10 +69,10 @@ import {
 	stripOutputNotice,
 } from "./output-meta";
 import {
+	assertRealpathInsideActiveWorkspace,
 	expandPath,
 	formatPathRelativeToCwd,
 	resolveReadPath,
-	assertRealpathInsideActiveWorkspace,
 	splitInternalUrlSel,
 	splitPathAndSel,
 } from "./path-utils";
@@ -1497,6 +1497,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		const candidates = parseArchivePathCandidates(readPath);
 		for (const candidate of candidates) {
 			let absolutePath = resolveReadPath(candidate.archivePath, this.session.cwd);
+			await assertRealpathInsideActiveWorkspace(absolutePath);
 			let suffixResolution: { from: string; to: string } | undefined;
 
 			try {
@@ -1539,6 +1540,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		const candidates = parseSqlitePathCandidates(readPath);
 		for (const candidate of candidates) {
 			let absolutePath = resolveReadPath(candidate.sqlitePath, this.session.cwd);
+			await assertRealpathInsideActiveWorkspace(absolutePath);
 			let suffixResolution: { from: string; to: string } | undefined;
 
 			try {

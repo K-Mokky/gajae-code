@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { sandboxedShellCommand } from "../src/tools/confine-sandbox";
+import { confineSandboxProfile, sandboxedShellCommand } from "../src/tools/confine-sandbox";
 import {
 	directoryEscapesWorkspace,
 	pathEscapesWorkspace,
@@ -16,6 +16,13 @@ describe("--confine path boundary", () => {
 		expect(pathEscapesWorkspace(root, path.join(root, "src", "file.ts"))).toBe(false);
 		expect(pathEscapesWorkspace(root, path.resolve(root, "..", "secret"))).toBe(true);
 		expect(pathEscapesWorkspace(root, path.resolve(root, ".."))).toBe(true);
+	});
+
+	it("accepts a root containing spaces and rejects its parent", () => {
+		const root = path.join(os.tmpdir(), "My Project");
+		expect(pathEscapesWorkspace(root, path.join(root, "src"))).toBe(false);
+		expect(pathEscapesWorkspace(root, path.resolve(root, ".."))).toBe(true);
+		expect(confineSandboxProfile(root)).toContain("My Project");
 	});
 	it("admits the root and descendants, and rejects parents and sibling prefixes", () => {
 		const root = path.join(os.tmpdir(), "confine-root");
@@ -57,6 +64,7 @@ describe("--confine path boundary", () => {
 		await fs.rm(parent, { recursive: true, force: true });
 	});
 	it("denies a parent path, a dotdot path, and a symlink from inside the sandboxed process", async () => {
+		if (process.platform !== "darwin") return;
 		const parent = await fs.mkdtemp(path.join(os.tmpdir(), "confine-sandbox-"));
 		const root = path.join(parent, "repo");
 		const outside = path.join(os.homedir(), `.gjc-confine-secret-${process.pid}`);
@@ -88,6 +96,7 @@ describe("--confine path boundary", () => {
 		}
 	});
 	it("denies a sibling under the same temp prefix from inside the sandboxed process", async () => {
+		if (process.platform !== "darwin") return;
 		const parent = await fs.mkdtemp(path.join(os.tmpdir(), "confine-sibling-"));
 		const root = path.join(parent, "repo");
 		const sibling = path.join(parent, "secret.txt");

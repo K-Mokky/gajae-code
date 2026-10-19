@@ -1,6 +1,6 @@
 import * as path from "node:path";
 
-const PROFILE_PATH = /^[A-Za-z0-9._/-]+$/;
+const PROFILE_PATH = /^[A-Za-z0-9._ /-]+$/;
 
 /**
  * macOS Seatbelt profile for a confined session.
@@ -27,8 +27,6 @@ export function confineSandboxProfile(root: string): string {
 		'(allow file-read* (subpath "/Applications"))',
 		'(allow file-read* (subpath "/dev"))',
 		'(allow file-read* (subpath "/opt/homebrew"))',
-		'(allow file-read* (subpath "/private/tmp"))',
-		'(allow file-read* (subpath "/tmp"))',
 		"(deny file-write*)",
 		`(allow file-write* (subpath ${quote(confinedRoot)}))`,
 		'(allow file-write* (subpath "/private/tmp"))',
