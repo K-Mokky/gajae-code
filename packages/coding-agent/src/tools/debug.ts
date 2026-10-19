@@ -638,6 +638,11 @@ export class DebugTool implements AgentTool<typeof debugSchema, DebugToolDetails
 		const details: DebugToolDetails = { action: params.action, success: true };
 		const result = toolResult(details);
 		const trustCwds = [this.session.cwd];
+		if (this.session.filesystemRoot) {
+			throw new ToolError(
+				"Debugger actions are unavailable in a confined session because the debug process is not sandboxed.",
+			);
+		}
 		switch (params.action) {
 			case "launch": {
 				if (!params.program) {

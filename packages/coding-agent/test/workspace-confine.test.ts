@@ -23,7 +23,6 @@ describe("--confine path boundary", () => {
 		expect(pathEscapesWorkspace(root, path.join(root, "src"))).toBe(false);
 		expect(pathEscapesWorkspace(root, path.resolve(root, ".."))).toBe(true);
 		expect(confineSandboxProfile(root)).toContain("My Project");
-		expect(confineSandboxProfile(root)).toContain("My Project");
 	});
 
 	it("accepts a Korean directory name in the sandbox profile", () => {
