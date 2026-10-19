@@ -4859,8 +4859,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					].join(" ")
 				: undefined;
 			const appendPrompt =
-				[memoryInstructions, browserBackend.developerInstructions, confinementNotice].filter(Boolean).join("\n\n") ||
-				undefined;
+				[memoryInstructions, browserBackend.developerInstructions, confinementNotice]
+					.filter(Boolean)
+					.join("\n\n") || undefined;
 			let pluginSystemAppendices = "";
 			try {
 				pluginSystemAppendices = await renderAlwaysOnSystemAppendices({ cwd: getLiveCwd() });

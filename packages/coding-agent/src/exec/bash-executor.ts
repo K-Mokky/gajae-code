@@ -22,8 +22,8 @@ import {
 	type TerminalArtifactPublisher,
 	truncateHeadBytes,
 } from "../session/streaming-output";
-import { formatArtifactReference, resolveOutputMaxColumns, resolveOutputSinkHeadBytes } from "../tools/output-meta";
 import { sandboxedShellCommand } from "../tools/confine-sandbox";
+import { formatArtifactReference, resolveOutputMaxColumns, resolveOutputSinkHeadBytes } from "../tools/output-meta";
 import { getOrCreateSnapshot } from "../utils/shell-snapshot";
 import { IsolatedShell } from "./isolated-shell";
 import { NON_INTERACTIVE_ENV } from "./non-interactive-env";
