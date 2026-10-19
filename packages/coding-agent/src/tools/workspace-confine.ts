@@ -36,7 +36,11 @@ export async function realpathEscapesWorkspace(root: string, candidate: string):
 		fs.realpath(root).catch(() => path.resolve(root)),
 		nearestExistingPath(candidate),
 	]);
-	const realCandidate = await fs.realpath(existing).catch(() => existing);
+	const stat = await fs.lstat(existing);
+	const realCandidate = stat.isSymbolicLink()
+		? await fs.realpath(existing).catch(() => undefined)
+		: await fs.realpath(existing);
+	if (!realCandidate) return true;
 	const suffix = path.relative(existing, path.resolve(candidate));
 	const resolved = suffix ? path.resolve(realCandidate, suffix) : realCandidate;
 	return resolved !== realRoot && !pathIsWithin(realRoot, resolved);

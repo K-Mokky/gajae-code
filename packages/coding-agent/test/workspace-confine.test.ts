@@ -23,6 +23,23 @@ describe("--confine path boundary", () => {
 		expect(pathEscapesWorkspace(root, path.join(root, "src"))).toBe(false);
 		expect(pathEscapesWorkspace(root, path.resolve(root, ".."))).toBe(true);
 		expect(confineSandboxProfile(root)).toContain("My Project");
+		expect(confineSandboxProfile(root)).toContain("My Project");
+	});
+
+	it("accepts a Korean directory name in the sandbox profile", () => {
+		const root = path.join(os.tmpdir(), "프로젝트");
+		expect(confineSandboxProfile(root)).toContain("프로젝트");
+	});
+
+	it("rejects a dangling symlink whose target is outside the root", async () => {
+		const parent = await fs.mkdtemp(path.join(os.tmpdir(), "confine-dangling-"));
+		const root = path.join(parent, "repo");
+		const outside = path.join(parent, "outside-missing.txt");
+		const linked = path.join(root, "link");
+		await fs.mkdir(root);
+		await fs.symlink(outside, linked);
+		await expect(realpathEscapesWorkspace(root, linked)).resolves.toBe(true);
+		await fs.rm(parent, { recursive: true, force: true });
 	});
 	it("admits the root and descendants, and rejects parents and sibling prefixes", () => {
 		const root = path.join(os.tmpdir(), "confine-root");

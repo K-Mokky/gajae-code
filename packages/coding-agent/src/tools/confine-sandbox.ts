@@ -1,6 +1,6 @@
 import * as path from "node:path";
 
-const PROFILE_PATH = /^[A-Za-z0-9._ /-]+$/;
+const UNSAFE_PROFILE_PATH = /[\u0000-\u001f"()#]/;
 
 /**
  * macOS Seatbelt profile for a confined session.
@@ -55,7 +55,7 @@ export function sandboxedShellCommand(command: string, root: string): string {
 
 function seatbeltPath(value: string): string {
 	const resolved = path.resolve(value);
-	if (!PROFILE_PATH.test(resolved)) {
+	if (UNSAFE_PROFILE_PATH.test(resolved)) {
 		throw new Error(`Confined session root cannot be expressed in a sandbox profile: ${resolved}`);
 	}
 	return resolved;
