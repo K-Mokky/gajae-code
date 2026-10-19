@@ -28,6 +28,7 @@ import {
 import { outputMeta } from "../../tools/output-meta";
 import { resolveToCwd } from "../../tools/path-utils";
 import { enforcePlanModeWrite, resolvePlanPath } from "../../tools/plan-mode-guard";
+import { assertRealpathInsideActiveWorkspace } from "../../tools/path-utils";
 import { ToolError } from "../../tools/tool-errors";
 import { ApplyPatchError, generateUnifiedDiffString, normalizeCreateContent } from "../diff";
 import { detectLineEnding, normalizeToLF, restoreLineEndings, stripBom } from "../normalize";
@@ -657,7 +658,9 @@ export async function executePatchSingle(
 
 	enforcePlanModeWrite(session, path, { op, move: rename });
 	const resolvedPath = resolvePlanPath(session, path);
+	await assertRealpathInsideActiveWorkspace(resolvedPath);
 	const resolvedRename = rename ? resolvePlanPath(session, rename) : undefined;
+	if (resolvedRename) await assertRealpathInsideActiveWorkspace(resolvedRename);
 
 	signal?.throwIfAborted();
 	await assertEditableFile(resolvedPath, path, session.settings);

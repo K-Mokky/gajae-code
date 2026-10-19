@@ -13,6 +13,17 @@ describe("--confine path boundary", () => {
 		expect(pathEscapesWorkspace(root, path.resolve(root, "..", "secret"))).toBe(true);
 		expect(pathEscapesWorkspace(root, path.resolve(root, ".."))).toBe(true);
 	});
+	it("admits the root and descendants, and rejects parents and sibling prefixes", () => {
+		const root = path.join(os.tmpdir(), "confine-root");
+		const cases = ["", "a", "a/b", "a/b/c", ".hidden", "name with space"];
+		for (const relative of cases) {
+			expect(pathEscapesWorkspace(root, relative ? path.join(root, relative) : root)).toBe(false);
+		}
+		expect(pathEscapesWorkspace(root, path.resolve(root, ".."))).toBe(true);
+		expect(pathEscapesWorkspace(root, path.resolve(root, "..", "secret"))).toBe(true);
+		expect(pathEscapesWorkspace(root, `${root}-sibling`)).toBe(true);
+		expect(pathEscapesWorkspace(root, `${root}-sibling/file`)).toBe(true);
+	});
 
 	it("follows the real directory when checking a shell cwd", async () => {
 		const parent = await fs.mkdtemp(path.join(os.tmpdir(), "confine-cwd-"));

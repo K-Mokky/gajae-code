@@ -26,6 +26,7 @@ import replaceDescription from "../prompts/tools/replace.md" with { type: "text"
 import type { ToolSession } from "../tools";
 import { assertEditableFile } from "../tools/auto-generated-guard";
 import { resolvePlanPath } from "../tools/plan-mode-guard";
+import { assertRealpathInsideActiveWorkspace } from "../tools/path-utils";
 import { VimTool, vimSchema } from "../tools/vim";
 import { type EditMode, resolveEditMode, resolveForcedEnvEditMode } from "../utils/edit-mode";
 import type { VimToolDetails } from "../vim/types";
@@ -209,10 +210,12 @@ async function collectPatchGuardFailures(
 		signal?.throwIfAborted();
 		try {
 			const resolvedPath = resolvePlanPath(session, entry.path);
+			await assertRealpathInsideActiveWorkspace(resolvedPath);
 			await assertEditableFile(resolvedPath, entry.path, session.settings);
 			signal?.throwIfAborted();
 			if (!entry.rename) continue;
 			const resolvedRename = resolvePlanPath(session, entry.rename);
+			await assertRealpathInsideActiveWorkspace(resolvedRename);
 			if (resolvedRename === resolvedPath) continue;
 			await assertEditableFile(resolvedRename, entry.rename, session.settings);
 			signal?.throwIfAborted();

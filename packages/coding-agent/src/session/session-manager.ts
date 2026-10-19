@@ -23430,7 +23430,7 @@ export class SessionManager {
 			const opened = await openSelectedStrictly(mostRecent);
 			if (opened) return opened;
 		}
-		const manager = new SessionManager(cwd, dir, true, storage, destination);
+		const manager = new SessionManager(cwd, dir, true, storage, destination, false, confined ? "cwd" : undefined);
 		manager.#initNewSession();
 		return manager;
 	}
