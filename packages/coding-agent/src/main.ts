@@ -1286,6 +1286,18 @@ export async function createSessionManager(
 		}
 		const forkSource = parsed.fork;
 		if (forkSource.includes("/") || forkSource.includes("\\") || forkSource.endsWith(".jsonl")) {
+			const source = await SessionManager.open(
+				forkSource,
+				sessionDestination(),
+				undefined,
+				migrationPolicy,
+				sessionMemoryMode,
+			);
+			if (source.isFilesystemConfined() !== (parsed.confine === true)) {
+				await source.close();
+				throw new SessionNotFoundError(forkSource);
+			}
+			await source.close();
 			return await SessionManager.forkFrom(
 				forkSource,
 				cwd,
@@ -1335,6 +1347,7 @@ export async function createSessionManager(
 				undefined,
 				migrationPolicy,
 				sessionMemoryMode,
+				parsed.confine === true,
 			);
 			if (opened.isFilesystemConfined() !== (parsed.confine === true)) {
 				await opened.close();

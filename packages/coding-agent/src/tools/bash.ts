@@ -1883,6 +1883,11 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			notices: pendingNotices,
 		} = prepared;
 		const masterCapability = directMasterSpawn ? resolvedEnv[MASTER_CAPABILITY_ENV] : undefined;
+		if (directMasterSpawn && this.session.filesystemRoot) {
+			throw new ToolError(
+				"Direct master spawn is unavailable in a confined session because the child process is not sandboxed.",
+			);
+		}
 		if (directMasterSpawn && masterCapability !== undefined && !asyncRequested) {
 			return await this.#executeDirectMasterSpawn(
 				command,

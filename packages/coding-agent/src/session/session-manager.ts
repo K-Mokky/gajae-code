@@ -22072,6 +22072,7 @@ export class SessionManager {
 		storage: SessionStorage = new FileSessionStorage(),
 		migrationPolicy: SessionDirectoryMigrationPolicy = "copy-retain",
 		sessionMemoryMode: SessionMemoryMode = "shadow",
+		confined = false,
 	): Promise<SessionManager> {
 		if (isStagedSessionPath(filePath)) throw new Error("Staged session paths are not resumable");
 		const destination =
@@ -22106,6 +22107,7 @@ export class SessionManager {
 				const inspected = inspectResumeSessionFile(filePath, storage);
 				if ("kind" in inspected) {
 					if (inspected.reason === "missing") {
+						if (confined) throw new Error("Cannot create a confined session by resuming a missing path.");
 						const manager = new SessionManager(
 							getProjectDir(),
 							destination.directory,
@@ -23436,7 +23438,6 @@ export class SessionManager {
 			const opened = await openSelectedStrictly(candidate.path);
 			if (opened) return opened;
 		}
-		const mostRecent = await findMostRecentSession(dir, storage);
 		if (mostRecent) {
 			const opened = await openSelectedStrictly(mostRecent);
 			if (opened) return opened;

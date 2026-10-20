@@ -368,6 +368,11 @@ export class BrowserTool implements AgentTool<typeof browserSchema, BrowserToolD
 			}),
 		);
 
+		if (this.session.filesystemRoot && params.url?.toLowerCase().startsWith("file:")) {
+			throw new ToolError(
+				"Local file navigation is unavailable in a confined session because the browser process is not sandboxed.",
+			);
+		}
 		const result = await untilAborted(signal, () =>
 			acquireTab(name, browser, {
 				ownerId: this.session.getSessionId?.() ?? undefined,
@@ -472,6 +477,15 @@ export class BrowserTool implements AgentTool<typeof browserSchema, BrowserToolD
 		signal?: AbortSignal,
 	): Promise<AgentToolResult<BrowserToolDetails>> {
 		const steps = (params.actions ?? []) as BrowserActionStep[];
+		if (this.session.filesystemRoot) {
+			for (const step of steps) {
+				if (step.verb === "navigate" && step.url?.toLowerCase().startsWith("file:")) {
+					throw new ToolError(
+						"Local file navigation is unavailable in a confined session because the browser process is not sandboxed.",
+					);
+				}
+			}
+		}
 		if (steps.length === 0) {
 			throw new ToolError("Missing required parameter 'actions' for action 'act'.");
 		}
