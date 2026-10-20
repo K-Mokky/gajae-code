@@ -23438,8 +23438,9 @@ export class SessionManager {
 			const opened = await openSelectedStrictly(candidate.path);
 			if (opened) return opened;
 		}
-		if (mostRecent) {
-			const opened = await openSelectedStrictly(mostRecent);
+		const recentSessions = await getSortedSessions(dir, storage);
+		for (const candidate of recentSessions) {
+			const opened = await openSelectedStrictly(candidate.path);
 			if (opened) return opened;
 		}
 		const manager = new SessionManager(cwd, dir, true, storage, destination, false, confined ? "cwd" : undefined);
