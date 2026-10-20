@@ -1607,7 +1607,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		if (this.session.filesystemRoot) {
 			if (await directoryEscapesWorkspace(this.session.filesystemRoot, commandCwd)) {
 				throw new ToolError(
-					`Working directory escapes the confined session root (${this.session.filesystemRoot}): ${commandCwd}. This session can only use its cwd and descendants. Shell command text itself is not jailed.`,
+					`Working directory escapes the confined session root (${this.session.filesystemRoot}): ${commandCwd}. This session can only use its cwd and descendants.`,
 				);
 			}
 		}

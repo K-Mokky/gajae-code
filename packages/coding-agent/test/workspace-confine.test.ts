@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import fc from "fast-check";
 import { confineSandboxProfile, sandboxedShellCommand } from "../src/tools/confine-sandbox";
 import {
 	directoryEscapesWorkspace,
@@ -53,26 +54,23 @@ describe("--confine path boundary", () => {
 	});
 
 	it("generates containment cases for descendants, dot segments, parents, and sibling prefixes", () => {
-		const names = ["repo", "My Project", "프로젝트", ".hidden"];
-		const parts = ["src", "a b", ".", "..", "file.ts"];
-		let seed = 0x9e3779b9;
-		const next = (): number => {
-			seed = Math.imul(seed ^ (seed >>> 16), 0x7feb352d);
-			seed = Math.imul(seed ^ (seed >>> 15), 0x846ca68b);
-			return (seed ^ (seed >>> 16)) >>> 0;
-		};
-		for (let i = 0; i < 64; i++) {
-			const root = path.join(os.tmpdir(), names[next() % names.length]!, `case-${next() % 32}`);
-			const depth = next() % 4;
-			const relative = Array.from({ length: depth }, () => parts[next() % parts.length]!);
-			const descendant = path.resolve(root, ...relative.filter(part => part !== ".."));
-			expect(pathEscapesWorkspace(root, descendant)).toBe(false);
-			expect(pathEscapesWorkspace(root, path.resolve(root, "..", `parent-${i}`))).toBe(true);
-			expect(pathEscapesWorkspace(root, `${root}-sibling`)).toBe(true);
-			expect(pathEscapesWorkspace(root, path.join(`${root}-sibling`, "file"))).toBe(true);
-		}
+		const segment = fc
+			.stringMatching(/^[A-Za-z0-9가-힣 ._-]{1,12}$/)
+			.filter(value => value !== "." && value !== "..");
+		fc.assert(
+			fc.property(
+				fc.array(segment, { minLength: 1, maxLength: 3 }),
+				fc.array(segment, { maxLength: 3 }),
+				(rootParts, relativeParts) => {
+					const root = path.join(os.tmpdir(), ...rootParts);
+					const descendant = path.resolve(root, ...relativeParts);
+					expect(pathEscapesWorkspace(root, descendant)).toBe(false);
+					expect(pathEscapesWorkspace(root, path.resolve(root, ".."))).toBe(true);
+					expect(pathEscapesWorkspace(root, `${root}-sibling`)).toBe(true);
+				},
+			),
+		);
 	});
-
 	it("follows the real directory when checking a shell cwd", async () => {
 		const parent = await fs.mkdtemp(path.join(os.tmpdir(), "confine-cwd-"));
 		const root = path.join(parent, "repo");
