@@ -41,8 +41,6 @@ Identity is platform-specific:
 
 The default managed writer creates new data only in v2 scopes. It never writes new legacy-layout data. `--session-dir` is an explicit storage/lookup override and is not a request to derive the default managed scope.
 
-`--confine` opens a session that can only use its cwd and descendants. Its transcript stays in the same managed scope, but the header records `filesystemScope: "cwd"`. Ordinary `--continue`, `--resume`, and the resume picker skip those transcripts, and a confined launch skips ordinary ones. Resuming a confined session requires the same flag. Tool paths and the shell working directory are rejected outside the root. On macOS the shell command itself runs under `sandbox-exec`, so a command such as `cat ../secret` is denied by the kernel. This build has no equivalent process sandbox on Linux or Windows, so a confined shell fails closed there instead of pretending the command text is jailed.
-
 ### Legacy migration and retention
 
 Legacy encoded directories are discovered only after validating each candidate's header and workspace identity. With `session.directoryMigration: "copy-retain"` (the default), an eligible legacy session is copied into the v2 scope without replacing an existing destination; the legacy source is retained. Set `session.directoryMigration: "disabled"` to leave legacy candidates unmigrated. Migration is lazy and guarded by a managed lock, binding checks, no-follow/owner-only path checks, and source identity validation; conflicts, unsafe artifacts, or changed sources fail rather than guessing.
