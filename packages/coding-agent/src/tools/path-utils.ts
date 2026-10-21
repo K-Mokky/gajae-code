@@ -16,6 +16,10 @@ export function runWithWorkspaceConfine<T>(root: string, fn: () => T): T {
 	return workspaceConfineRoot.run(root, fn);
 }
 
+export function getActiveWorkspaceConfineRoot(): string | undefined {
+	return workspaceConfineRoot.getStore();
+}
+
 function assertInsideActiveWorkspace(resolved: string, original: string): void {
 	const root = workspaceConfineRoot.getStore();
 	if (!root || !pathEscapesWorkspace(root, resolved)) return;
@@ -853,6 +857,12 @@ export async function resolveToolSearchScope(opts: ToolScopeOptions): Promise<To
 		throw new ToolError(`Path not found: ${scopePath}${hint}`);
 	}
 
+	const confinedTargets = [
+		searchPath,
+		...(exactFilePaths ?? []),
+		...(multiTargets?.map(target => target.basePath) ?? []),
+	];
+	for (const target of confinedTargets) await assertRealpathInsideActiveWorkspace(target);
 	return {
 		searchPath,
 		scopePath,

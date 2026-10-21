@@ -72,6 +72,7 @@ import {
 	assertRealpathInsideActiveWorkspace,
 	expandPath,
 	formatPathRelativeToCwd,
+	getActiveWorkspaceConfineRoot,
 	resolveReadPath,
 	splitInternalUrlSel,
 	splitPathAndSel,
@@ -97,6 +98,7 @@ import {
 } from "./sqlite-reader";
 import { ToolAbortError, ToolError, throwIfAborted } from "./tool-errors";
 import { toolResult } from "./tool-result";
+import { openFileInsideWorkspace } from "./workspace-confine";
 
 type NativeReadBindings = Pick<typeof import("@gajae-code/natives"), "glob" | "summarizeCode">;
 let nativeReadBindingsLoad: Promise<NativeReadBindings> | undefined;
@@ -515,6 +517,12 @@ function expandRangeWithContext(
 	};
 }
 
+async function openReadHandle(filePath: string): Promise<fs.FileHandle> {
+	const root = getActiveWorkspaceConfineRoot();
+	if (!root) return fs.open(filePath, "r");
+	return openFileInsideWorkspace(root, filePath);
+}
+
 export async function streamLinesFromFile(
 	filePath: string,
 	startLine: number,
@@ -844,7 +852,7 @@ export async function streamLinesFromFile(
 	setupLineState();
 
 	try {
-		fileHandle = await fs.open(filePath, "r");
+		fileHandle = await openReadHandle(filePath);
 		while (true) {
 			throwIfAborted(signal);
 			const { bytesRead } = await fileHandle.read(bufferChunk, 0, bufferChunk.length, null);

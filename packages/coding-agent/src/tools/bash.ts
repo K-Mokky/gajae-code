@@ -2092,6 +2092,11 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			});
 		}
 
+		if (this.session.filesystemRoot && clientBridge?.capabilities.terminal && clientBridge.createTerminal) {
+			throw new ToolError(
+				"Client terminal execution is unavailable in a confined session because the bridge host is not sandboxed.",
+			);
+		}
 		if (clientBridge?.capabilities.terminal && clientBridge.createTerminal && !pty) {
 			const clientAdmission = ownedManager?.reserveCapacity();
 			const clientHeadBytes = resolveBashOutputSinkHeadBytes(this.session.settings);

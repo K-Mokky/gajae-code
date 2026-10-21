@@ -71,6 +71,7 @@ import type { ContextFileEntry } from "../tools";
 import { jtdToJsonSchema, normalizeSchema } from "../tools/jtd-to-json-schema";
 import type { ReportFindingDetails } from "../tools/review";
 import { ToolAbortError } from "../tools/tool-errors";
+import { directoryEscapesWorkspace } from "../tools/workspace-confine";
 import type { EventBus } from "../utils/event-bus";
 import { buildNamedToolChoiceResult } from "../utils/tool-choice";
 import type { WorkspaceTree } from "../workspace-tree";
@@ -227,6 +228,7 @@ export function trimForkContextSeedForModel(seed: ForkContextSeed, model: Model 
 export interface ExecutorOptions {
 	cwd: string;
 	worktree?: string;
+	parentFilesystemRoot?: string;
 	agent: AgentDefinition;
 	task: string;
 	assignment?: string;
@@ -1964,6 +1966,13 @@ export async function runSubprocessOnce(options: ExecutorOptions): Promise<Singl
 								)
 							: SessionManager.inMemory(worktree ?? cwd);
 			openedSessionManager = sessionManager;
+			if (options.parentFilesystemRoot) {
+				const childCwd = worktree ?? cwd;
+				if (await directoryEscapesWorkspace(options.parentFilesystemRoot, childCwd)) {
+					throw new Error(`Task worktree escapes the confined session root (${options.parentFilesystemRoot}).`);
+				}
+				sessionManager.confineToCwd();
+			}
 			if (options.parentArtifactManager && !options.preflightProbe && !options.preflightDurable) {
 				sessionManager.adoptArtifactManager(options.parentArtifactManager);
 			} else if (options.preflightDurable && !options.managedPersistence) {

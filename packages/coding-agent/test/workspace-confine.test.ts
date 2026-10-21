@@ -6,6 +6,7 @@ import fc from "fast-check";
 import { confineSandboxProfile, sandboxedShellCommand } from "../src/tools/confine-sandbox";
 import {
 	directoryEscapesWorkspace,
+	openFileInsideWorkspace,
 	pathEscapesWorkspace,
 	realpathEscapesWorkspace,
 } from "../src/tools/workspace-confine";
@@ -155,5 +156,24 @@ describe("--confine path boundary", () => {
 		} finally {
 			await fs.rm(parent, { recursive: true, force: true });
 		}
+	});
+	it("pins the Seatbelt launcher to the trusted absolute executable", () => {
+		if (process.platform !== "darwin") return;
+		expect(sandboxedShellCommand("printf ok", os.tmpdir())).toContain("/usr/bin/sandbox-exec");
+	});
+	it("opens a file inside the root and rejects a swapped in-root symlink", async () => {
+		const parent = await fs.mkdtemp(path.join(os.tmpdir(), "confine-open-"));
+		const root = path.join(parent, "repo");
+		const outside = path.join(parent, "outside.txt");
+		const linked = path.join(root, "link");
+		await fs.mkdir(root);
+		await fs.writeFile(path.join(root, "visible.txt"), "visible");
+		await fs.writeFile(outside, "hidden");
+		await fs.symlink(outside, linked);
+		const visible = await openFileInsideWorkspace(root, path.join(root, "visible.txt"));
+		expect(await visible.readFile("utf8")).toBe("visible");
+		await visible.close();
+		await expect(openFileInsideWorkspace(root, linked)).rejects.toThrow(/outside/);
+		await fs.rm(parent, { recursive: true, force: true });
 	});
 });

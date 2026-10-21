@@ -1,3 +1,4 @@
+import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import path from "node:path";
 import { pathIsWithin } from "@gajae-code/utils";
@@ -49,4 +50,20 @@ export async function realpathEscapesWorkspace(root: string, candidate: string):
 /** realpath confinement for a directory the process is about to use as cwd. */
 export async function directoryEscapesWorkspace(root: string, candidate: string): Promise<boolean> {
 	return realpathEscapesWorkspace(root, candidate);
+}
+const OPEN_NOFOLLOW = fsSync.constants.O_RDONLY | fsSync.constants.O_NOFOLLOW;
+
+/** Open an existing file without following a symlink at the final path. */
+export async function openFileInsideWorkspace(root: string, candidate: string): Promise<fs.FileHandle> {
+	if (await realpathEscapesWorkspace(root, candidate)) {
+		throw new Error(`Path resolves outside the confined session root (${root}): ${candidate}`);
+	}
+	const resolved = path.resolve(candidate);
+	try {
+		return await fs.open(resolved, OPEN_NOFOLLOW);
+	} catch (error) {
+		const code = (error as NodeJS.ErrnoException).code;
+		if (code !== "ELOOP" && code !== "EMLINK") throw error;
+		throw new Error(`Path resolves outside the confined session root (${root}): ${candidate}`, { cause: error });
+	}
 }

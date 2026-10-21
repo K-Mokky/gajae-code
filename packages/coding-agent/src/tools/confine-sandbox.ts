@@ -36,8 +36,17 @@ export function confineSandboxProfile(root: string): string {
 	].join("\n");
 }
 
+const TRUSTED_SANDBOX_EXEC = "/usr/bin/sandbox-exec";
+
+function trustedSandboxExec(): string {
+	if (!fs.existsSync(TRUSTED_SANDBOX_EXEC)) {
+		throw new Error(`Confined sessions require ${TRUSTED_SANDBOX_EXEC}.`);
+	}
+	return TRUSTED_SANDBOX_EXEC;
+}
+
 export function sandboxExecAvailable(): boolean {
-	return process.platform === "darwin";
+	return process.platform === "darwin" && fs.existsSync(TRUSTED_SANDBOX_EXEC);
 }
 
 /**
@@ -51,7 +60,7 @@ export function sandboxedShellCommand(command: string, root: string): string {
 			`Confined sessions require a process sandbox, which this build only provides on macOS (got ${process.platform}).`,
 		);
 	}
-	return `sandbox-exec -p ${shellQuote(confineSandboxProfile(root))} /bin/sh -c ${shellQuote(command)}`;
+	return `${trustedSandboxExec()} -p ${shellQuote(confineSandboxProfile(root))} /bin/sh -c ${shellQuote(command)}`;
 }
 
 function seatbeltPath(value: string): string {
