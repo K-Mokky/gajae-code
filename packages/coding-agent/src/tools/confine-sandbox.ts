@@ -8,9 +8,8 @@ const UNSAFE_PROFILE_PATH = /[\u0000-\u001f"()#]/;
  *
  * The shell process and everything it spawns may read the system (so compilers
  * and interpreters keep working) but may not read or write anything beside or
- * above the session root. Writes are limited to that root and the system temp
- * directories. This is a process boundary, not a promise about other host
- * processes the user starts themselves.
+ * above the session root. Writes are limited to that root. This is a process
+ * boundary, not a promise about other host processes the user starts themselves.
  */
 export function confineSandboxProfile(root: string): string {
 	const confinedRoot = seatbeltPath(root);
