@@ -268,6 +268,20 @@ async function resolveBrowserKind(
 	return { kind: "headless", headless };
 }
 
+const LOCAL_FILE_NAVIGATION_ERROR =
+	"Local file navigation is unavailable in a confined session because the browser process is not sandboxed.";
+
+function isLocalFileUrl(value: string | undefined): boolean {
+	return value?.trim().toLowerCase().startsWith("file:") === true;
+}
+
+function assertConfinedBrowserCode(code: string | undefined, confined: boolean): void {
+	if (!confined || !code) return;
+	if (/(?:^|[^A-Za-z0-9_])file:/i.test(code) || /(?:^|[^A-Za-z0-9_$.])tab\s*\.\s*goto\s*\(/i.test(code)) {
+		throw new ToolError(LOCAL_FILE_NAVIGATION_ERROR);
+	}
+}
+
 /**
  * Browser tool: stateful, multi-tab. Three actions:
  * - `open`  → acquire/create a named tab on a browser kind (headless | spawned | connected) and optionally goto a url.
@@ -336,6 +350,9 @@ export class BrowserTool implements AgentTool<typeof browserSchema, BrowserToolD
 		timeoutMs: number,
 		signal?: AbortSignal,
 	): Promise<AgentToolResult<BrowserToolDetails>> {
+		if (this.session.filesystemRoot && isLocalFileUrl(params.url)) {
+			throw new ToolError(LOCAL_FILE_NAVIGATION_ERROR);
+		}
 		const kind = await resolveBrowserKind(params, this.session, signal);
 		details.browser = kind.kind;
 
@@ -368,11 +385,6 @@ export class BrowserTool implements AgentTool<typeof browserSchema, BrowserToolD
 			}),
 		);
 
-		if (this.session.filesystemRoot && params.url?.toLowerCase().startsWith("file:")) {
-			throw new ToolError(
-				"Local file navigation is unavailable in a confined session because the browser process is not sandboxed.",
-			);
-		}
 		const result = await untilAborted(signal, () =>
 			acquireTab(name, browser, {
 				ownerId: this.session.getSessionId?.() ?? undefined,
@@ -439,6 +451,7 @@ export class BrowserTool implements AgentTool<typeof browserSchema, BrowserToolD
 		if (!params.code?.trim()) {
 			throw new ToolError("Missing required parameter 'code' for action 'run'.");
 		}
+		assertConfinedBrowserCode(params.code, this.session.filesystemRoot !== undefined);
 		const tab = getTab(name);
 		if (tab) {
 			details.browser = tab.browser.kind.kind;
@@ -479,10 +492,8 @@ export class BrowserTool implements AgentTool<typeof browserSchema, BrowserToolD
 		const steps = (params.actions ?? []) as BrowserActionStep[];
 		if (this.session.filesystemRoot) {
 			for (const step of steps) {
-				if (step.verb === "navigate" && step.url?.toLowerCase().startsWith("file:")) {
-					throw new ToolError(
-						"Local file navigation is unavailable in a confined session because the browser process is not sandboxed.",
-					);
+				if (step.verb === "navigate" && isLocalFileUrl(step.url)) {
+					throw new ToolError(LOCAL_FILE_NAVIGATION_ERROR);
 				}
 			}
 		}

@@ -22143,6 +22143,7 @@ export class SessionManager {
 				: inspectTranscriptHeaderBounded(filePath, storage, BOUNDED_RESUME_TRANSCRIPT_MAX_BYTES);
 			if (!inspected.ok) {
 				if (inspected.error.reason === "missing") {
+					if (confined) throw new Error("Cannot create a confined session by resuming a missing path.");
 					const manager = new SessionManager(getProjectDir(), destination.directory, true, storage, destination);
 					manager.#sessionMemoryMode = sessionMemoryMode;
 					await manager.#initSessionFile(filePath, true);

@@ -307,4 +307,30 @@ describe("browser page text trust boundary", () => {
 			expect(actedText).toEqual([referenceFrame(sample), referenceFrame(JSON.stringify(payload, null, 2))]);
 		}
 	});
+	it("rejects local-file navigation from a confined session before the browser runs", async () => {
+		let ran = false;
+		runInTabImpl = async () => {
+			ran = true;
+			return { displays: [], returnValue: undefined, screenshots: [] } satisfies RunResultOk;
+		};
+		const confined = new BrowserTool({ ...session(), filesystemRoot: "/session-root" });
+		await expect(
+			settle(confined.execute("open-file", { action: "open", url: " file:///etc/passwd", timeout: 1 })),
+		).rejects.toThrow(/not sandboxed/);
+		await expect(
+			settle(
+				confined.execute("act-file", {
+					action: "act",
+					actions: [{ verb: "navigate", url: "FILE:///etc/passwd" }],
+					timeout: 1,
+				}),
+			),
+		).rejects.toThrow(/not sandboxed/);
+		await expect(
+			settle(
+				confined.execute("run-file", { action: "run", code: "await tab.goto('file:///etc/passwd')", timeout: 1 }),
+			),
+		).rejects.toThrow(/not sandboxed/);
+		expect(ran).toBe(false);
+	});
 });
