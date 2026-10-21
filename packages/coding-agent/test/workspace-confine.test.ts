@@ -8,6 +8,7 @@ import {
 	directoryEscapesWorkspace,
 	openFileInsideWorkspace,
 	pathEscapesWorkspace,
+	readFileInsideWorkspace,
 	realpathEscapesWorkspace,
 } from "../src/tools/workspace-confine";
 
@@ -157,6 +158,25 @@ describe("--confine path boundary", () => {
 			await fs.rm(parent, { recursive: true, force: true });
 		}
 	});
+	it("denies a relative parent write when the root is under the system temp directory", async () => {
+		if (process.platform !== "darwin") return;
+		const parent = await fs.mkdtemp(path.join(os.tmpdir(), "confine-tmp-parent-"));
+		const root = path.join(parent, "repo");
+		const secret = path.join(parent, "secret.txt");
+		await fs.mkdir(root);
+		await fs.writeFile(secret, "hidden");
+		try {
+			const command = sandboxedShellCommand(
+				`echo OVERWRITE > ${JSON.stringify(path.join("..", "secret.txt"))}`,
+				root,
+			);
+			const proc = Bun.spawn(["/bin/sh", "-c", command], { cwd: root, stdout: "pipe", stderr: "pipe" });
+			await proc.exited;
+			expect(await fs.readFile(secret, "utf8")).toBe("hidden");
+		} finally {
+			await fs.rm(parent, { recursive: true, force: true });
+		}
+	});
 	it("pins the Seatbelt launcher to the trusted absolute executable", () => {
 		if (process.platform !== "darwin") return;
 		expect(sandboxedShellCommand("printf ok", os.tmpdir())).toContain("/usr/bin/sandbox-exec");
@@ -174,6 +194,8 @@ describe("--confine path boundary", () => {
 		expect(await visible.readFile("utf8")).toBe("visible");
 		await visible.close();
 		await expect(openFileInsideWorkspace(root, linked)).rejects.toThrow(/outside/);
+		await expect(readFileInsideWorkspace(root, linked)).rejects.toThrow(/outside/);
+		expect(await readFileInsideWorkspace(root, path.join(root, "visible.txt"))).toEqual(Buffer.from("visible"));
 		await fs.rm(parent, { recursive: true, force: true });
 	});
 });

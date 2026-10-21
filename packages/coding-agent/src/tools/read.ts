@@ -98,7 +98,7 @@ import {
 } from "./sqlite-reader";
 import { ToolAbortError, ToolError, throwIfAborted } from "./tool-errors";
 import { toolResult } from "./tool-result";
-import { openFileInsideWorkspace } from "./workspace-confine";
+import { openFileInsideWorkspace, readFileInsideWorkspace } from "./workspace-confine";
 
 type NativeReadBindings = Pick<typeof import("@gajae-code/natives"), "glob" | "summarizeCode">;
 let nativeReadBindingsLoad: Promise<NativeReadBindings> | undefined;
@@ -515,6 +515,12 @@ function expandRangeWithContext(
 		startLine: expandStart ? Math.max(0, requestedStart - RANGE_LEADING_CONTEXT_LINES) : requestedStart,
 		endLine: expandEnd ? Math.min(totalLines, requestedEnd + RANGE_TRAILING_CONTEXT_LINES) : requestedEnd,
 	};
+}
+
+async function readConfinedText(filePath: string): Promise<string> {
+	const root = getActiveWorkspaceConfineRoot();
+	if (!root) return Bun.file(filePath).text();
+	return (await readFileInsideWorkspace(root, filePath)).toString("utf8");
 }
 
 async function openReadHandle(filePath: string): Promise<fs.FileHandle> {
@@ -2051,7 +2057,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		// Directional multi-range reads use the same materialized window oracle as
 		// ACP so each block has identical bytes, anchors, and cache entries.
 		if (direction !== "head") {
-			const diskText = await Bun.file(absolutePath).text();
+			const diskText = await readConfinedText(absolutePath);
 			const result = this.#buildInMemoryMultiRangeResult(diskText, ranges, {
 				details: { resolvedPath: absolutePath, suffixResolution },
 				sourcePath: absolutePath,
@@ -2479,10 +2485,10 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					code = await bridgePromise;
 				} catch (error) {
 					if (isClientAuthorityDenial(error)) throw error;
-					code = await Bun.file(absolutePath).text();
+					code = await readConfinedText(absolutePath);
 				}
 			} else {
-				code = await Bun.file(absolutePath).text();
+				code = await readConfinedText(absolutePath);
 			}
 			throwIfAborted(signal);
 			if (countTextLines(code) > MAX_SUMMARY_LINES) return null;

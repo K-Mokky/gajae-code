@@ -60,10 +60,28 @@ export async function openFileInsideWorkspace(root: string, candidate: string): 
 	}
 	const resolved = path.resolve(candidate);
 	try {
+		const opened = await fs.lstat(resolved);
+		if (opened.isSymbolicLink()) {
+			throw new Error(`Path resolves outside the confined session root (${root}): ${candidate}`);
+		}
 		return await fs.open(resolved, OPEN_NOFOLLOW);
 	} catch (error) {
 		const code = (error as NodeJS.ErrnoException).code;
 		if (code !== "ELOOP" && code !== "EMLINK") throw error;
 		throw new Error(`Path resolves outside the confined session root (${root}): ${candidate}`, { cause: error });
+	}
+}
+
+export async function readFileInsideWorkspace(root: string, candidate: string): Promise<Buffer> {
+	const handle = await openFileInsideWorkspace(root, candidate);
+	try {
+		const opened = await handle.stat();
+		const current = await fs.lstat(candidate);
+		if (!opened.isFile() || opened.dev !== current.dev || opened.ino !== current.ino || current.isSymbolicLink()) {
+			throw new Error(`Path changed outside the confined session root (${root}): ${candidate}`);
+		}
+		return Buffer.from(await handle.readFile());
+	} finally {
+		await handle.close();
 	}
 }

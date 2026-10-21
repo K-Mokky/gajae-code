@@ -30,9 +30,6 @@ export function confineSandboxProfile(root: string): string {
 		'(allow file-read* (subpath "/opt/homebrew"))',
 		"(deny file-write*)",
 		`(allow file-write* (subpath ${quote(confinedRoot)}))`,
-		'(allow file-write* (subpath "/private/tmp"))',
-		'(allow file-write* (subpath "/tmp"))',
-		'(allow file-write* (subpath "/private/var/folders"))',
 	].join("\n");
 }
 
