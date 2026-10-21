@@ -1391,6 +1391,7 @@ export async function createSessionManager(
 			undefined,
 			migrationPolicy,
 			sessionMemoryMode,
+			parsed.confine === true,
 		);
 	}
 	if (parsed.continue) {

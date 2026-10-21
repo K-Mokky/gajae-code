@@ -31,4 +31,28 @@ describe("--confine session selection", () => {
 			await fs.rm(dir, { recursive: true, force: true });
 		}
 	});
+	it("keeps confinement when a confined transcript is resumed by id", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "confine-resume-id-"));
+		const created = SessionManager.create(dir, SessionManager.explicitDestination(dir), undefined, true);
+		await created.ensureOnDisk();
+		const sessionPath = created.getSessionFile();
+		const sessionId = created.getSessionId();
+		await created.close();
+		if (!sessionPath || !sessionId) throw new Error("confined session was not persisted");
+		try {
+			const resumed = await SessionManager.open(
+				sessionPath,
+				SessionManager.explicitDestination(dir),
+				undefined,
+				"copy-retain",
+				"shadow",
+				true,
+			);
+			expect(resumed.isFilesystemConfined()).toBe(true);
+			expect(resumed.getSessionId()).toBe(sessionId);
+			await resumed.close();
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
 });
