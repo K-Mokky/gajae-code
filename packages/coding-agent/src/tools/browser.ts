@@ -240,6 +240,19 @@ export async function isDefaultChromeUserDataDirForTest(
 	return false;
 }
 
+const CONFINED_BROWSER_PROCESS_ERROR =
+	"Spawned and connected browsers are unavailable in a confined session because those processes are not sandboxed. Use the default headless browser.";
+const UNSANDBOXED_BROWSER_ERROR =
+	"The browser process is not sandboxed in a confined session, so local-file navigation and arbitrary browser code are unavailable. Use structured actions against an http(s) page.";
+
+function isRemoteHttpUrl(value: string): boolean {
+	try {
+		const url = new URL(value.trim());
+		return url.protocol === "http:" || url.protocol === "https:";
+	} catch {
+		return false;
+	}
+}
 async function resolveBrowserKind(
 	params: BrowserParams,
 	session: ToolSession,
@@ -247,6 +260,9 @@ async function resolveBrowserKind(
 	discoveryEnv?: DiscoveryEnv,
 ): Promise<BrowserKind> {
 	const app = params.app;
+	if (session.filesystemRoot && (app?.cdp_url || app?.browser === "chrome" || app?.path)) {
+		throw new ToolError(CONFINED_BROWSER_PROCESS_ERROR);
+	}
 	if (app?.cdp_url) {
 		const cdpUrl = app.cdp_url.replace(/\/+$/, "");
 		try {
@@ -266,20 +282,6 @@ async function resolveBrowserKind(
 	}
 	const headless = session.settings.get("browser.headless") as boolean;
 	return { kind: "headless", headless };
-}
-
-const LOCAL_FILE_NAVIGATION_ERROR =
-	"Local file navigation is unavailable in a confined session because the browser process is not sandboxed.";
-
-function isLocalFileUrl(value: string | undefined): boolean {
-	return value?.trim().toLowerCase().startsWith("file:") === true;
-}
-
-function assertConfinedBrowserCode(code: string | undefined, confined: boolean): void {
-	if (!confined || !code) return;
-	if (/(?:^|[^A-Za-z0-9_])file:/i.test(code) || /(?:^|[^A-Za-z0-9_$.])tab\s*\.\s*goto\s*\(/i.test(code)) {
-		throw new ToolError(LOCAL_FILE_NAVIGATION_ERROR);
-	}
 }
 
 /**
@@ -350,8 +352,8 @@ export class BrowserTool implements AgentTool<typeof browserSchema, BrowserToolD
 		timeoutMs: number,
 		signal?: AbortSignal,
 	): Promise<AgentToolResult<BrowserToolDetails>> {
-		if (this.session.filesystemRoot && isLocalFileUrl(params.url)) {
-			throw new ToolError(LOCAL_FILE_NAVIGATION_ERROR);
+		if (this.session.filesystemRoot && params.url !== undefined && !isRemoteHttpUrl(params.url)) {
+			throw new ToolError(UNSANDBOXED_BROWSER_ERROR);
 		}
 		const kind = await resolveBrowserKind(params, this.session, signal);
 		details.browser = kind.kind;
@@ -448,10 +450,12 @@ export class BrowserTool implements AgentTool<typeof browserSchema, BrowserToolD
 		timeoutMs: number,
 		signal?: AbortSignal,
 	): Promise<AgentToolResult<BrowserToolDetails>> {
+		if (this.session.filesystemRoot) {
+			throw new ToolError(UNSANDBOXED_BROWSER_ERROR);
+		}
 		if (!params.code?.trim()) {
 			throw new ToolError("Missing required parameter 'code' for action 'run'.");
 		}
-		assertConfinedBrowserCode(params.code, this.session.filesystemRoot !== undefined);
 		const tab = getTab(name);
 		if (tab) {
 			details.browser = tab.browser.kind.kind;
@@ -489,14 +493,10 @@ export class BrowserTool implements AgentTool<typeof browserSchema, BrowserToolD
 		timeoutMs: number,
 		signal?: AbortSignal,
 	): Promise<AgentToolResult<BrowserToolDetails>> {
-		const steps = (params.actions ?? []) as BrowserActionStep[];
 		if (this.session.filesystemRoot) {
-			for (const step of steps) {
-				if (step.verb === "navigate" && isLocalFileUrl(step.url)) {
-					throw new ToolError(LOCAL_FILE_NAVIGATION_ERROR);
-				}
-			}
+			throw new ToolError(UNSANDBOXED_BROWSER_ERROR);
 		}
+		const steps = (params.actions ?? []) as BrowserActionStep[];
 		if (steps.length === 0) {
 			throw new ToolError("Missing required parameter 'actions' for action 'act'.");
 		}
