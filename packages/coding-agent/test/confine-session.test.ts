@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { sessionMatchesConfinement } from "../src/session/session-confinement";
 import { SessionManager } from "../src/session/session-manager";
+import { getActiveWorkspaceConfineRoot, runWithWorkspaceConfine } from "../src/tools/path-utils";
 
 describe("--confine session selection", () => {
 	it("keeps a confined transcript out of an ordinary resume match", () => {
@@ -53,6 +54,63 @@ describe("--confine session selection", () => {
 			await resumed.close();
 		} finally {
 			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+});
+describe("confinement escapes", () => {
+	it("keeps a lifecycle fork of a confined transcript confined", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "confine-fork-"));
+		const sourceDir = path.join(dir, "source");
+		const forkDir = path.join(dir, "fork");
+		await fs.mkdir(sourceDir);
+		const created = SessionManager.create(sourceDir, SessionManager.explicitDestination(sourceDir), undefined, true);
+		await created.ensureOnDisk();
+		const sessionPath = created.getSessionFile();
+		await created.close();
+		if (!sessionPath) throw new Error("confined session was not persisted");
+		try {
+			const captured = SessionManager.captureTranscriptStrict(sessionPath);
+			if (captured.kind !== "captured") throw new Error(captured.reason);
+			const forked = await SessionManager.forkFromCaptured(
+				captured.snapshot,
+				sourceDir,
+				SessionManager.explicitDestination(forkDir),
+				"copy-retain",
+				"shadow",
+				true,
+			);
+			if (forked.kind !== "forked") throw new Error(forked.reason);
+			expect(forked.manager.isFilesystemConfined()).toBe(true);
+			const header = JSON.parse((await fs.readFile(forked.manager.getSessionFile()!, "utf8")).split(/\r?\n/, 1)[0]!);
+			expect(header.filesystemScope).toBe("cwd");
+			await forked.manager.close();
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("does not follow an in-root symlink while a confined edit reads and writes", async () => {
+		const parent = await fs.mkdtemp(path.join(os.tmpdir(), "confine-hashline-"));
+		const root = path.join(parent, "root");
+		const outside = path.join(parent, "outside.txt");
+		const linked = path.join(root, "escape.txt");
+		await fs.mkdir(root);
+		await fs.writeFile(outside, "secret\n");
+		await fs.writeFile(path.join(root, "inside.txt"), "inside\n");
+		await fs.symlink(outside, linked);
+		const { readFileTextInsideActiveWorkspace, writeFileTextInsideActiveWorkspace } = await import(
+			"../src/tools/path-utils"
+		);
+		try {
+			await runWithWorkspaceConfine(root, async () => {
+				expect(getActiveWorkspaceConfineRoot()).toBe(root);
+				await expect(readFileTextInsideActiveWorkspace(linked)).rejects.toThrow(/outside/);
+				await expect(writeFileTextInsideActiveWorkspace(linked, "changed\n")).rejects.toThrow(/outside/);
+				expect(await readFileTextInsideActiveWorkspace(path.join(root, "inside.txt"))).toBe("inside\n");
+			});
+			expect(await fs.readFile(outside, "utf8")).toBe("secret\n");
+		} finally {
+			await fs.rm(parent, { recursive: true, force: true });
 		}
 	});
 });

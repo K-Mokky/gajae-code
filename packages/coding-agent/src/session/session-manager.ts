@@ -21276,6 +21276,7 @@ export class SessionManager {
 		if (!identity) return false;
 		applyHeaderPatch(sourceHeader, headerPatch);
 		const fresh = this.#freshSessionState({ parentSession: sourceHeader.id });
+		if (sourceHeader.filesystemScope === "cwd") fresh.header.filesystemScope = "cwd";
 		fresh.header.title = sourceHeader.title;
 		fresh.header.titleSource = sourceHeader.titleSource;
 		if (!fresh.sessionFile) return false;
@@ -21476,6 +21477,7 @@ export class SessionManager {
 		if (rejected || !sourceHeader || !sawCompaction) return undefined;
 		applyHeaderPatch(sourceHeader, headerPatch);
 		const fresh = this.#freshSessionState({ parentSession: sourceHeader.id });
+		if (sourceHeader.filesystemScope === "cwd") fresh.header.filesystemScope = "cwd";
 		fresh.header.title = sourceHeader.title;
 		fresh.header.titleSource = sourceHeader.titleSource;
 		if (!fresh.sessionFile) return undefined;
@@ -21656,6 +21658,7 @@ export class SessionManager {
 		const sourceHeader = forkEntries.find(entry => entry.type === "session") as SessionHeader | undefined;
 		const historyEntries = forkEntries.filter(entry => entry.type !== "session") as SessionEntry[];
 		const fresh = manager.#freshSessionState({ parentSession: sourceHeader?.id });
+		if (sourceHeader?.filesystemScope === "cwd") fresh.header.filesystemScope = "cwd";
 		fresh.header.title = sourceHeader?.title;
 		fresh.header.titleSource = sourceHeader?.titleSource;
 		const transition = manager.#prepareResidentTextStoreTransition(
@@ -22408,6 +22411,7 @@ export class SessionManager {
 		storage: SessionStorage = new FileSessionStorage(),
 		cwdOverride?: string,
 		sessionMemoryMode: SessionMemoryMode = "shadow",
+		filesystemScope?: "cwd",
 	): Promise<SessionManager> {
 		if (destination.kind !== "managed" || !trustedSessionDestinations.has(destination))
 			throw new Error("Nested managed session authority is unavailable");
@@ -22434,6 +22438,8 @@ export class SessionManager {
 				true,
 				storage,
 				destination,
+				false,
+				filesystemScope,
 			);
 			boundedManager.#sessionMemoryMode = sessionMemoryMode;
 			try {
@@ -22445,6 +22451,9 @@ export class SessionManager {
 						| undefined;
 					if (!header) throw new Error("source_changed");
 					const sessionCwd = cwdOverride ? path.resolve(cwdOverride) : header.cwd || getProjectDir();
+					if (filesystemScope === "cwd" && !boundedManager.isFilesystemConfined()) {
+						boundedManager.confineToCwd();
+					}
 					if (cwdOverride && resolveEquivalentPath(header.cwd) !== resolveEquivalentPath(sessionCwd))
 						throw new Error("nested_managed_bounded_rewrite_required");
 					boundedManager.cwd = sessionCwd;
@@ -22505,7 +22514,15 @@ export class SessionManager {
 			header && cwdOverride && resolveEquivalentPath(header.cwd) !== resolveEquivalentPath(sessionCwd),
 		);
 		if (header && cwdChanged) header.cwd = sessionCwd;
-		const manager = new SessionManager(sessionCwd, destination.directory, true, storage, destination);
+		const manager = new SessionManager(
+			sessionCwd,
+			destination.directory,
+			true,
+			storage,
+			destination,
+			false,
+			filesystemScope,
+		);
 		manager.#sessionMemoryMode = sessionMemoryMode;
 		try {
 			let transcriptChanged = false;
@@ -22523,6 +22540,7 @@ export class SessionManager {
 				if (await manager.#sanitizeLoadedOpenAIResponsesReplayMetadataAndPersist()) transcriptChanged = true;
 			} else {
 				const fresh = manager.#freshSessionState(undefined, resolved);
+				if (filesystemScope === "cwd") manager.confineToCwd();
 				const transition = manager.#prepareFreshSessionTransition(fresh, "memory-fallback");
 				manager.#applyFreshSessionMetadata(fresh);
 				manager.#commitResidentTextStoreTransition(transition);
@@ -22664,13 +22682,22 @@ export class SessionManager {
 		destinationInput?: SessionDestinationInput,
 		_migrationPolicy: SessionDirectoryMigrationPolicy = "copy-retain",
 		sessionMemoryMode: SessionMemoryMode = "shadow",
+		confined = false,
 	): Promise<StrictSessionForkResult> {
 		const destination = destinationFor(cwd, destinationInput, snapshot.storage);
 		if (
 			sessionMemoryMode === "enabled" ||
 			(sessionMemoryMode === "auto" && snapshot.identity.size > eagerHydrationMaxBytes())
 		) {
-			const boundedManager = new SessionManager(cwd, destination.directory, true, snapshot.storage, destination);
+			const boundedManager = new SessionManager(
+				cwd,
+				destination.directory,
+				true,
+				snapshot.storage,
+				destination,
+				false,
+				confined ? "cwd" : undefined,
+			);
 			boundedManager.#sessionMemoryMode = sessionMemoryMode;
 			if (
 				destination.kind === "managed" &&
@@ -22775,11 +22802,20 @@ export class SessionManager {
 		let privateStagingPublished = false;
 
 		try {
-			manager = new SessionManager(cwd, privateStagingDir ?? dir, true, snapshot.storage, forkDestination);
+			manager = new SessionManager(
+				cwd,
+				privateStagingDir ?? dir,
+				true,
+				snapshot.storage,
+				forkDestination,
+				false,
+				confined ? "cwd" : undefined,
+			);
 			manager.#sessionMemoryMode = sessionMemoryMode;
 			await resolveBlobRefsInEntries(forkEntries, manager.#blobStore);
 			const sourceHeader = forkEntries[0] as SessionHeader | undefined;
 			const fresh = manager.#freshSessionState({ parentSession: sourceHeader?.id });
+			if (sourceHeader?.filesystemScope === "cwd" || confined) fresh.header.filesystemScope = "cwd";
 			fresh.header.title = sourceHeader?.title;
 			fresh.header.titleSource = sourceHeader?.titleSource;
 			forkEntries[0] = fresh.header;

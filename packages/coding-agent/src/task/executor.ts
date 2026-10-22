@@ -372,7 +372,11 @@ export class ManagedTaskPersistence {
 			throw new Error("Managed task persistence authority is unavailable");
 	}
 
-	async openSession(cwd: string, sessionMemoryMode: SessionMemoryMode = "shadow"): Promise<SessionManager> {
+	async openSession(
+		cwd: string,
+		sessionMemoryMode: SessionMemoryMode = "shadow",
+		filesystemScope?: "cwd",
+	): Promise<SessionManager> {
 		const artifacts = this.#getArtifacts();
 		const store = artifacts.getManagedStore();
 		if (!store) throw new Error("Managed task persistence authority is unavailable");
@@ -385,6 +389,7 @@ export class ManagedTaskPersistence {
 			undefined,
 			cwd,
 			sessionMemoryMode,
+			filesystemScope,
 		);
 		artifacts.assertManagedBinding();
 		session.registerManagedTranscriptRelocationResolver(this.#getArtifacts);
@@ -1950,6 +1955,7 @@ export async function runSubprocessOnce(options: ExecutorOptions): Promise<Singl
 								options.managedPersistence.openSession(
 									worktree ?? cwd,
 									subagentSettings.get("sessionMemory.mode"),
+									options.parentFilesystemRoot ? "cwd" : undefined,
 								),
 							)
 						: sessionFile
@@ -1962,9 +1968,12 @@ export async function runSubprocessOnce(options: ExecutorOptions): Promise<Singl
 											? "disabled"
 											: "copy-retain",
 										subagentSettings.get("sessionMemory.mode"),
+										options.parentFilesystemRoot ? "cwd" : undefined,
 									),
 								)
-							: SessionManager.inMemory(worktree ?? cwd);
+							: options.parentFilesystemRoot
+								? SessionManager.create(worktree ?? cwd, undefined, undefined, true)
+								: SessionManager.inMemory(worktree ?? cwd);
 			openedSessionManager = sessionManager;
 			if (options.parentFilesystemRoot) {
 				const childCwd = worktree ?? cwd;
